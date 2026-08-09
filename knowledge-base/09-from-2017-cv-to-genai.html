@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>09 · From 2017 CV to Modern GenAI</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 09 · Your Catch-Up Path</span>
+
+# From 2017 CV to Modern GenAI
+
+<p class="lede">A personal bridge for someone who already did the real work — Haar cascades, backprop, CNNs, bounding-box detection, and building their own datasets — and stepped away while the field forked. You're not starting over. You're adding four chapters to a book you already understand.</p>
+
+## You have the hard 70% already
+
+The intuitions that take *years* to build — you own them. What's left is a small set of *additive* ideas.
+
+<div class="callout truth"><span class="t">Your 2017 skills → where they live in 2026</span>
+<table>
+<tr><th>What you know</th><th>Where it lives now</th></tr>
+<tr><td><b>Backprop</b></td><td>Unchanged. Trained the 33B DiT, the encoder, both VAEs. Still the engine of everything.</td></tr>
+<tr><td><b>CNN</b></td><td>The <b>VAE is a CNN.</b> The part that turns latents into pixels is your convolutional net. ResNet ideas everywhere.</td></tr>
+<tr><td><b>Haar → hand-crafted features → learned CNN features</b></td><td>Same arc continued: transformers learn even more general features. "Less hand-engineering, more learned-from-data" is the whole story.</td></tr>
+<tr><td><b>Bounding-box detection</b> (image → class + rect)</td><td><b>Discriminative</b>: "what IS in this image." Generative just <b>flips the arrow</b>: "make an image that HAS this." Same math, reversed direction.</td></tr>
+<tr><td><b>You built datasets</b></td><td>The most underrated skill in 2026 — foundation models are mostly about data quality + scale. You already respect data.</td></tr>
+</table>
+</div>
+
+## The fork: what changed since 2017
+
+You were doing CV in **2017 — the exact year "Attention Is All You Need" launched.** You were on the detection track; the field forked onto the attention/generative track. Here's the timeline of what you "missed" (all learnable):
+
+```mermaid
+timeline
+    title The fork you can now cross
+    2012 : AlexNet — deep CNNs take over vision (you were here)
+    2015-2016 : Faster R-CNN / YOLO / SSD — detection (your world)
+    2017 : Transformers — "Attention Is All You Need" (the fork)
+    2020 : ViT (vision transformers) + DDPM (diffusion)
+    2021 : CLIP — text ↔ image alignment
+    2022 : Latent Diffusion / Stable Diffusion + Flow Matching
+    2026 : MiniMax-H3 — omni-modal video+audio (you, now)
+```
+
+## The four ideas that are the whole gap
+
+### 1. Transformers & attention — the big one
+Replaced CNNs+RNNs as the general workhorse. The DiT *is* a transformer. Attention = "every piece looks at every other piece and weighs relevance."
+- **Read:** Jay Alammar, *The Illustrated Transformer* · **Watch:** Andrej Karpathy, *Let's build GPT* (YouTube) · **Paper:** *Attention Is All You Need* (2017).
+
+### 2. The generative shift — diffusion
+Discriminative (detect the rect) → generative (synthesize). GANs matured, then **diffusion** (2020) took over. You already have most of this from Chapters 1 & 8.
+- **Read:** Lilian Weng, *What are Diffusion Models?* · **Watch:** Computerphile, *Stable Diffusion* · **Paper:** DDPM (Ho et al., 2020).
+
+### 3. Latent diffusion — the combo we run
+Compress with a VAE, diffuse in the small latent space, decode back. This is exactly the H3 pipeline.
+- **Read:** the Stable Diffusion / Latent Diffusion paper (Rombach et al., 2022) · HuggingFace `diffusers` "intro to diffusers" notebook.
+
+### 4. Alignment + scale (CLIP) — how words steer pixels
+How "a woman singing" becomes a coordinate the generator understands. Contrastive text–image training, then scaled to internet size.
+- **Read:** OpenAI CLIP (2021) · any "Illustrated CLIP" explainer.
+
+<div class="callout spec"><span class="t">Bonus (H3-specific): Flow matching</span>
+<p>H3 is flow-matching (rectified flow), the 2022–2023 evolution of diffusion — straighter trajectories, fewer steps. Skim after the four above. See the <em>Sampling Math</em> notes in the repo.</p></div>
+
+## The staged path (do it in order)
+
+```mermaid
+flowchart LR
+    S0["You are here<br/>backprop · CNN · detection · data"] --> S1["1. Transformers<br/>Illustrated Transformer +<br/>Karpathy 'build GPT'"]
+    S1 --> S2["2. Diffusion<br/>Weng blog +<br/>Ch.1 & 8 here"]
+    S2 --> S3["3. Latent diffusion<br/>SD paper +<br/>diffusers notebook"]
+    S3 --> S4["4. CLIP / alignment<br/>+ skim flow matching"]
+    S4 --> NOW["Current — you can<br/>read any 2026 paper"]
+    style S0 fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style NOW fill:#14342c,stroke:#5ee0c0,color:#eafff8
+```
+
+Optional but perfect for your background: **Karpathy's "Neural Networks: Zero to Hero"** series — it rebuilds backprop → transformers from scratch in code, which is exactly your learning style (you already think in gradients).
+
+## The honest reframe
+
+<div class="callout truth"><span class="t">You didn't fall behind</span>
+<p>Someone who trained a detector from scratch and built their own dataset understands <b>the machine</b>. A 2026 "prompt engineer" understands <b>the API</b>. You're ahead of them, not behind — the foundation is the hard part, and you did it. The field added a wing to the house while you were away; the frame is still yours. Four ideas, a few weeks each, and you're fully current.</p>
+</div>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

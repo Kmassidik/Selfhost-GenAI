@@ -1,0 +1,140 @@
+# Sampling Math — MiniMax-H3 on 8 GB
+
+_Working notes on how the sampler actually works, why Turbo-LoRA helped, and where the real bottleneck moved. Written to be argued with — poke holes._
+
+---
+
+## 1. Sampling = integrating an ODE
+
+H3 is a **flow-matching** model (ComfyUI reports `model_type FLOW_AV`). It does **not** learn "remove one notch of noise" like classic DDPM. It learns a **velocity field** $v_\theta(x, t)$, and generating a clip means solving an ordinary differential equation from noise to data:
+
+$$\frac{dx}{dt} = v_\theta(x, t), \qquad x(1) = \text{Gaussian noise} \;\longrightarrow\; x(0) = \text{clean latent}$$
+
+The `euler` sampler we use is **literally Euler's method** on that ODE:
+
+$$x_{s+1} = x_s + (t_{s+1} - t_s)\, v_\theta(x_s, t_s)$$
+
+Each step evaluates $v_\theta$ **once** — and $v_\theta$ is the full 33B DiT. So:
+
+> **"20 steps" = 20 forward passes of the 33B transformer = NFE (number of function evaluations) of 20.**
+
+---
+
+## 2. The cost model (the whole thing in one line)
+
+$$T_{\text{sampling}} = \text{NFE} \times T_{\text{forward}}(\text{res} \times \text{frames})$$
+
+- **NFE** = number of steps (× solver order — see §6).
+- **$T_{\text{forward}}$** = time for one DiT forward pass. It grows with the sequence length, which is set by `width × height × frames` (after the VAE's patchify/compression).
+
+Total wall-clock for a full clip is then:
+
+$$T_{\text{total}} = \underbrace{\text{NFE} \times T_{\text{forward}}}_{\text{sampling}} \;+\; \underbrace{T_{\text{encoder-load}} + T_{\text{VAE-decode}} + T_{\text{upscale}}}_{\text{fixed serial costs}}$$
+
+Keep this equation in mind — every optimization we discuss pulls on one of these terms.
+
+---
+
+## 3. Why the base needs ~20 steps but Turbo needs 4
+
+Euler is a **first-order** solver. Its global truncation error scales as
+
+$$\text{error} \sim \mathcal{O}(\Delta t), \qquad \Delta t = \frac{1}{\text{NFE}}$$
+
+Fewer steps → bigger $\Delta t$ → the straight-line Euler jump misses the **curved** true trajectory → blur / artifacts. So naively running the base model at 4 steps **degrades** — the integration error blows up.
+
+**Turbo-LoRA is distillation, not just "fewer steps."** It retrains the velocity field so the trajectory is *straight enough* (rectified-flow / consistency-style) that a coarse 4-step Euler integrates it **accurately**. The key mental shift:
+
+> You are not integrating the *same* ODE worse. You've **changed the ODE** into one that's well-conditioned for coarse solvers.
+
+That's why 4-step Turbo ≈ 20-step base quality instead of looking like garbage. The math moved, not just the step count.
+
+---
+
+## 4. Sigma shift / dual-clock (step *placement*, not count)
+
+The Turbo sampler uses a **dual-clock** schedule: video sigma shift 12, audio sigma shift 3. This is about **where along $t \in [0,1]$ the steps land**, not how many there are (SD3-style timestep shifting).
+
+- Video and audio latents have different "curvature" along the flow.
+- Stepping the audio latent on the video schedule **over-steps** it at low NFE and corrupts the sound.
+- So the sampler steps each modality on its own schedule.
+
+Elegant low-level detail — and a reminder that *where* you spend your NFE matters as much as *how many* you have.
+
+---
+
+## 5. Amdahl's law — why 5× fewer steps ≠ 5× faster (the real lesson)
+
+Turbo cut NFE from 20 → 4 (~5× cheaper **sampling**). But the wall-clock did **not** drop 5×, because the fixed serial costs (§2) don't scale with NFE. This is **Amdahl's law**:
+
+$$\text{speedup} = \frac{1}{(1-p) + \dfrac{p}{s}}$$
+
+- $p$ = fraction of time that *was* sampling
+- $s = 5$ = the sampling speedup
+
+If, say, sampling was $p = 0.6$ of the time, then even with $s = 5$:
+
+$$\text{speedup} = \frac{1}{0.4 + 0.6/5} = \frac{1}{0.52} \approx 1.9\times$$
+
+...not 5×. **The fixed costs (encoder streaming, VAE decode, upscale) become the new wall.** Turbo didn't remove the bottleneck — it *moved* it.
+
+> **Corollary:** the next optimization should target the biggest *serial* chunk, not the part we already made cheap. Optimizing a 10%-of-time phase can't ever give more than ~11% speedup, no matter how clever.
+
+---
+
+## 6. Solver order — an open tradeoff worth testing
+
+- **1st-order (Euler):** 1 NFE/step, error $\mathcal{O}(\Delta t)$.
+- **2nd-order (Heun, RES-multistep, DPM++2M):** ~2 NFE/step (or reuse history), error $\mathcal{O}(\Delta t^2)$.
+
+Question: is **Euler at 6 steps** better or worse than a **2nd-order solver at 3 steps** (same 6 NFE)? Higher-order cuts error per step but costs more per step. For distilled/straightened flows the answer isn't obvious — worth an A/B. (The Abiray Turbo variant actually recommends `res_multistep`, a multistep higher-order solver.)
+
+---
+
+## 7. Where sampling math meets the VRAM wall
+
+$T_{\text{forward}}$ isn't just time — it's also **memory**. The DiT holds the packed multimodal sequence and runs self-attention over it, which is
+
+$$\text{attention cost} \sim \mathcal{O}(N^2), \qquad N \propto \text{res} \times \text{frames}$$
+
+So `res × frames` sets **both**:
+- $T_{\text{forward}}$ (speed), and
+- peak resident VRAM (the wall we hit at 7.57 GB for 576×320 × 362 frames).
+
+**This coupling is the crux.** Turbo attacks the NFE term. Upscaling dodges the res term at decode. But the *only* thing that shrinks $T_{\text{forward}}$ **and** peak memory at once is reducing the attention cost itself — i.e. **sparse attention** (which MiniMax trained but hasn't released) or a FlashAttention-style IO rewrite. That's the frontier lever.
+
+---
+
+## 8. Our measured data points (8 GB RTX 3060 Ti)
+
+| Clip | Res × frames | Steps | Solver | Wall-clock |
+|---|---|---|---|---|
+| 3 s (non-turbo) | 1024×576 × 73 | 20 | euler | ~10 min |
+| 15 s (non-turbo) | 512×288 × 362 | 20 | euler | ~17.5 min |
+| 15 s dragon (edge) | 576×320 × 362 | 20 | euler | ~28 min |
+| **3 s Turbo → 720p** | 512×288 × 73 | **4** | turbo-euler | **3 min** |
+
+Turbo's 4-step run is the outlier — the sampling term nearly vanished, exposing the fixed costs.
+
+---
+
+## 9. What to measure next (before optimizing anything)
+
+Amdahl says: **don't guess $p$, measure it.** Instrument one Turbo run to time each phase separately:
+
+1. Encoder load / stream (26 GB from RAM) — suspected new #1 cost
+2. Sampling (4 × $T_{\text{forward}}$)
+3. VAE decode (video + audio)
+4. 4× upscale + downscale
+
+Then attack the largest. Leading hypothesis: **keep the encoder resident between runs** so we stop re-streaming 26 GB every generation.
+
+---
+
+## 10. Open threads (for discussion)
+
+1. **Solver order** — Euler@6 vs res_multistep@3 (§6). Error-vs-NFE empirically.
+2. **Distillation internals** — consistency vs trajectory vs adversarial; *why* straightening the flow drops NFE losslessly (§3).
+3. **The $\mathcal{O}(N^2)$ wall** — sparse attention / sequence parallelism as the only lever that cuts speed *and* memory together (§7). This is the RunPod / frontier direction.
+
+_Next step: measure the phase breakdown (§9), then pick the thread._

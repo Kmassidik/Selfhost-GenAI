@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>01 · What Is Generative AI</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 01 · Foundations</span>
+
+# What Is Generative AI
+
+<p class="lede">Before touching hardware, it helps to know what kind of thing we're actually running. A video model isn't a database of clips — it's a machine that <em>predicts</em>, and we lean on that prediction to conjure something new.</p>
+
+## From "recognize" to "generate"
+
+Older AI mostly **classified**: shown a photo, it answered "cat." Generative AI runs that in reverse — shown the word "cat," it **produces** a plausible new picture of one. Same underlying machinery (a neural network), pointed the other way.
+
+A neural network is just a very large math function with millions-to-billions of tunable numbers called **parameters** (also "weights"). During *training*, those numbers are nudged over and over until the function turns inputs into good outputs. Once trained, running it is called *inference* — that's what your box does. **We are only doing inference here; we did not train anything.**
+
+<div class="callout spec"><span class="t">Scale, in concrete terms</span>
+<p>MiniMax-H3's core has <b>33 billion</b> parameters. Each is a number that must be stored and multiplied. That single fact is why we needed 46 GB of files and an offload trick — <a href="02-your-hardware.html">Chapter 2</a> — to run it on 8 GB.</p></div>
+
+## The transformer: the shape of modern AI
+
+Almost every model you'll hear about — ChatGPT, Llama, and the text-understanding part of H3 — is a **transformer**. Its superpower is **attention**: when processing one piece of input, it can "look at" every other piece and weigh how relevant each is. That's how a model keeps track of context across a whole sentence, image, or video.
+
+One thing to file away now, because it bites us later:
+
+<div class="callout warn"><span class="t">Attention cost grows with the square of length</span>
+<p>If a clip is twice as long, attention does roughly <b>four times</b> the work; ten times as long, ~<b>100×</b>. This is exactly why a 3-second clip is doable on your card but 30 seconds is a different universe. Keep this in your back pocket.</p></div>
+
+## Diffusion: how you make a picture out of noise
+
+Language models predict the next word. **Image and video models use a different idea called diffusion**, and H3 is a diffusion model. The concept is beautiful and worth really understanding:
+
+1. **Training:** take a real image, add a tiny bit of random static, repeat until it's pure noise. Teach the network to undo one step — "given this slightly noisy image, guess what it looked like one step cleaner."
+2. **Generating:** start from *pure random noise* and ask the trained network to clean it up, step by step, steered by your text prompt. After enough steps, a coherent image emerges that matches the prompt.
+
+Each cleanup pass is a **step** (you saw `20 steps` in our render). More steps = more refinement = more time.
+
+```mermaid
+flowchart LR
+    N["Pure noise<br/>(random)"] -->|step 1| S1[less noisy]
+    S1 -->|step 2| S2[clearer]
+    S2 -->|"... × 20"| S3[coherent frames]
+    P["Your prompt<br/>'ocean at sunset'"] -.steers every step.-> S1
+    P -.-> S2
+    P -.-> S3
+    S3 --> V[[Finished clip]]
+    style N fill:#241a1a,stroke:#ff6b6b,color:#ffdede
+    style V fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style P fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+```
+
+## Video is images with a time axis — plus sound
+
+A video model does the same denoising, but the thing it cleans up is a **stack of frames** that must stay consistent over time (the puppy in frame 2 must match frame 1). H3 goes one step further: it denoises **video and audio together**, so the sound lines up with the picture. That's why your clips came out with a real 32 kHz stereo track, not silent.
+
+<div class="callout truth"><span class="t">What this means for you</span>
+<p>You are not "downloading videos." You are running a predictor that paints frames out of noise, guided by your words, and it invents the audio to match. Every clip is brand new. That's also why results vary run to run — the starting noise is random (we set a <code>seed</code> to make it repeatable).</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms used everywhere from here on</span>
+<p><span class="badge">parameters / weights</span><span class="badge">inference</span><span class="badge">transformer</span><span class="badge">attention</span><span class="badge">diffusion</span><span class="badge">steps</span><span class="badge">prompt</span><span class="badge">seed</span><span class="badge">latent</span> — if these feel solid, you're ready for the hardware.</p></div>
+
+Next we get physical: what the GPU, VRAM, and RAM each do, and the single clever idea that let a 46 GB model run on your 8 GB card.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

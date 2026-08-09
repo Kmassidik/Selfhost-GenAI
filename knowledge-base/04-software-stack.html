@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>04 · The Software Stack</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 04 · Software</span>
+
+# The Software Stack
+
+<p class="lede">Between your GPU and the model sit five layers of software, each translating for the one above it. When something breaks, it's almost always a mismatch between two of these layers — so it pays to know them.</p>
+
+## The stack, top to bottom
+
+```mermaid
+flowchart TD
+    A["Your prompt / ComfyUI workflow"] --> B
+    B["ComfyUI 0.30<br/>orchestrates the pipeline & nodes"] --> C
+    C["PyTorch 2.11<br/>runs the math as tensor operations"] --> D
+    D["CUDA 12.8 runtime<br/>PyTorch's bridge to NVIDIA hardware"] --> E
+    E["NVIDIA driver 595.84<br/>talks to the physical card"] --> F
+    F["RTX 3060 Ti · CUDA 13.2 capable"]
+    style B fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style C fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style F fill:#0f141d,stroke:#5ee0c0,color:#eafff8
+```
+
+Each layer only needs to be *compatible* with its neighbours — not identical. Notice the driver exposes **CUDA 13.2**, but we run a PyTorch built for **CUDA 12.8**. That's fine: newer drivers run older CUDA builds. Getting this pairing right is half the battle of setup.
+
+## What each layer is
+
+<table>
+<tr><th>Layer</th><th>Role</th><th>Gotcha we hit</th></tr>
+<tr><td><b>NVIDIA driver</b></td><td>The OS's translator for the physical GPU. Provides <code>nvidia-smi</code>.</td><td>Needed a reboot to load the kernel module after install.</td></tr>
+<tr><td><b>CUDA</b></td><td>NVIDIA's platform for general-purpose GPU computing. PyTorch is compiled against a specific CUDA version.</td><td>We installed the <code>cu128</code> PyTorch build; it runs fine on the newer driver.</td></tr>
+<tr><td><b>PyTorch</b></td><td>The deep-learning framework. Turns model operations into GPU kernels.</td><td>No wheels for Python 3.14 → we made a Python 3.12 environment.</td></tr>
+<tr><td><b>ComfyUI</b></td><td>A node-based engine to load models and wire up the generation pipeline. Has native H3 support + the DynamicVRAM offload.</td><td>Needed extra custom-node packs the workflow relied on.</td></tr>
+</table>
+
+## Why a separate Python (the `uv` env)
+
+Your Ubuntu ships **Python 3.14** — so new that PyTorch has no prebuilt package for it yet. Rather than fight the system Python (and risk breaking OS tools), we used **`uv`**, a fast tool that installed an isolated **Python 3.12** just for ComfyUI.
+
+<div class="callout spec"><span class="t">The principle: isolate everything</span>
+<p>A <b>virtual environment</b> is a sandboxed Python with its own packages. Golden rule of self-hosting: never install AI packages into the system Python. One project, one env. It keeps versions from colliding and makes cleanup a one-line delete.</p></div>
+
+## Two file formats: safetensors vs GGUF
+
+Model weights come in different container formats, and **picking the wrong one cost us a 20 GB re-download** — so this section is earned in blood.
+
+<table>
+<tr><th></th><th>safetensors</th><th>GGUF</th></tr>
+<tr><td>Made for</td><td>PyTorch / ComfyUI / diffusers</td><td><code>llama.cpp</code> / <code>stable-diffusion.cpp</code> ecosystems</td></tr>
+<tr><td>ComfyUI native loader</td><td>✅ <code>UNETLoader</code>, <code>CLIPLoader</code></td><td>Only via the <code>ComfyUI-GGUF</code> add-on, and only for architectures it supports</td></tr>
+<tr><td>What happened to us</td><td>Worked perfectly</td><td>The H3 GGUF was built for stable-diffusion.cpp; ComfyUI's GGUF loader rejected it: <em>"Unknown model architecture."</em></td></tr>
+</table>
+
+<div class="callout warn"><span class="t">Lesson</span>
+<p>A file being "MiniMax-H3" and "GGUF" isn't enough — the <b>loader</b> has to understand that specific architecture. When in doubt, prefer the format the <b>official</b> repo (here, <code>Comfy-Org/MiniMax-H3</code>) publishes for your engine. We switched to the native int8 <b>safetensors</b> and it loaded first try.</p></div>
+
+## Quantization: how 66 GB becomes 20 GB
+
+The full H3 transformer in its original precision (bf16, 16 bits per number) is **~66 GB**. We ran a **20 GB** version. The shrinking technique is **quantization**: store each weight with fewer bits.
+
+<table>
+<tr><th>Precision</th><th>Bits/weight</th><th>Size of the 33B transformer</th><th>Runs well on your Ampere card?</th></tr>
+<tr><td>bf16 (original)</td><td>16</td><td>~66 GB</td><td>Way too big for 8 GB</td></tr>
+<tr><td><b>int8 (what we used)</b></td><td>8</td><td>~20 GB (pruned)</td><td>✅ Yes — native int8 ops</td></tr>
+<tr><td>fp8</td><td>8</td><td>~21 GB</td><td>⚠️ Emulated — no hardware fp8 on Ampere (needs Ada/Hopper)</td></tr>
+<tr><td>fp4 / nvfp4</td><td>4</td><td>~13 GB</td><td>❌ Needs Blackwell GPUs — avoid on a 3060 Ti</td></tr>
+</table>
+
+<div class="callout truth"><span class="t">Why we deliberately chose int8, not the smaller fp4</span>
+<p>Smaller isn't always better. Your GPU (Ampere, sm_86) has fast <b>int8</b> hardware but <b>no</b> native fp8/fp4. The workflow defaulted to an fp4 encoder — we swapped it for int8, which your card actually accelerates. Matching the quantization format to your GPU generation is a real skill, and it's why "just grab the smallest file" is bad advice.</p></div>
+
+Quantization does cost a little quality (fewer bits = coarser numbers), but for int8 it's usually a fair trade for making the model runnable at all.
+
+Next: the unedited story of our build — every command, every wall we hit, and how we got around it.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

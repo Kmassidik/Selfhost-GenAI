@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>02 · Your Hardware & the Offload Trick</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 02 · Hardware</span>
+
+# Your Hardware & the Offload Trick
+
+<p class="lede">You asked the best question of the whole session: "you use VRAM, not GPU?" This chapter answers it properly — because understanding how the GPU, VRAM, and RAM cooperate is the difference between guessing and knowing.</p>
+
+## Three different things people blur together
+
+<table>
+<tr><th>Component</th><th>What it is</th><th>Yours</th><th>Analogy</th></tr>
+<tr><td><b>GPU</b> (the chip)</td><td>The processor that does the math — thousands of small cores multiplying numbers in parallel</td><td>RTX 3060 Ti</td><td>The <b>chef</b> doing the cooking</td></tr>
+<tr><td><b>VRAM</b></td><td>Memory <em>on</em> the GPU board. Extremely fast, but small. Holds only what the GPU is working on right now</td><td><b>8 GB</b></td><td>The <b>countertop</b> — small, right next to the chef</td></tr>
+<tr><td><b>System RAM</b></td><td>Your computer's main memory. Bigger, slower, further from the GPU</td><td><b>60 GB</b></td><td>The <b>pantry</b> in the next room</td></tr>
+<tr><td><b>Disk</b> (NVMe)</td><td>Permanent storage. Huge, slowest. Where model files live</td><td>148 GB</td><td>The <b>delivery truck</b> outside</td></tr>
+</table>
+
+<div class="callout truth"><span class="t">So — VRAM or GPU?</span>
+<p>Both, always, together. <b>VRAM is the GPU's own memory.</b> The GPU chip does <b>all</b> the computing; VRAM is just the workbench it computes on. When we measured your live render it read <b>100% GPU utilization, 198.5 W of 200 W, SM clock 1770 MHz</b> — that is the chip flat-out doing math. A CPU-only run would show the GPU at 0%. The 5 GB of VRAM in use is simply the working set sitting on that workbench.</p></div>
+
+## The problem: the model doesn't fit
+
+Here's the squeeze in one picture. The quantized model is ~46 GB. Your countertop (VRAM) is 8 GB.
+
+```mermaid
+flowchart TB
+    subgraph GPU["🟩 GPU card"]
+      CHIP["GPU chip<br/>(the compute)"]
+      VRAM["VRAM · 8 GB<br/>the workbench"]
+      CHIP <--> VRAM
+    end
+    RAM["System RAM · 60 GB<br/>holds the other ~40 GB of weights"]
+    DISK["NVMe disk · 148 GB<br/>model files at rest"]
+    DISK -->|load once at startup| RAM
+    RAM <==>|stream a slice at a time| VRAM
+    style GPU fill:#0f141d,stroke:#5ee0c0,color:#eafff8
+    style VRAM fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style CHIP fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style RAM fill:#151b26,stroke:#7aa2ff,color:#eef3ff
+    style DISK fill:#12161f,stroke:#3a4a63,color:#aab4c5
+```
+
+## The fix: dynamic VRAM offload
+
+ComfyUI does something clever it calls **DynamicVRAM offloading**. Instead of demanding the whole model sit in VRAM, it keeps the bulk of the weights in your 60 GB of RAM and **feeds them to the GPU one layer at a time**, just before that layer is needed. In our logs you can literally see it:
+
+```
+Model MiniMaxH3     ... 19995 MB Staged   (the 20 GB transformer)
+Model MiniMaxH3TE   ... 25882 MB Staged   (the 26 GB text encoder)
+```
+
+"Staged" means *parked in RAM, ready to stream*. The GPU never holds more than a slice at once — which is why VRAM stayed around 5 GB even though the models total 46 GB.
+
+```mermaid
+sequenceDiagram
+    participant RAM as RAM (60 GB)
+    participant VRAM as VRAM (8 GB)
+    participant GPU as GPU chip
+    loop for each layer of the network
+        RAM->>VRAM: copy layer's weights in
+        VRAM->>GPU: feed weights + data
+        GPU->>GPU: compute (this is the 100% / 198 W)
+        GPU->>VRAM: write result
+        VRAM-->>RAM: free the slice, fetch next
+    end
+```
+
+<div class="callout warn"><span class="t">Why it works but is slow</span>
+<p>Copying weights RAM→VRAM every step is extra traffic the GPU has to wait on. That's the price of the trick: you trade <b>speed</b> for the ability to run a model far bigger than your VRAM. It's the core bargain of budget self-hosting — and it's genuinely impressive that a 33B video model runs on an 8 GB gaming card at all.</p></div>
+
+## What this predicts about clip length
+
+Two things fill VRAM: the model slice being streamed (roughly fixed) and the **video latent** being denoised (grows with resolution × frames, and can't be offloaded as easily). Our measured points:
+
+<table>
+<tr><th>Clip</th><th>Resolution × frames</th><th>VRAM used</th><th>Render time</th></tr>
+<tr><td>Smoke test</td><td>512×320 × 5 frames (0.2 s)</td><td>~7 GB</td><td>~57 s (warm)</td></tr>
+<tr><td>Ocean demo</td><td>768×448 × 73 frames (3.0 s)</td><td>~5–7 GB</td><td><b>348 s (5.8 min)</b></td></tr>
+<tr><td>15 s (H3's max)</td><td>~768p × ~360 frames</td><td>likely near/over 8 GB</td><td>much longer — may not fit</td></tr>
+</table>
+
+<div class="callout danger"><span class="t">The honest ceiling of this box</span>
+<p>Remember attention's quadratic cost from Chapter 1. Going from 73 frames to ~360 frames (15 s) isn't 5× harder — it's closer to <b>25× harder</b> for the attention layers, and the latent may exceed 8 GB VRAM. On this card, <b>short clips (a few seconds) are the sweet spot.</b> Long, high-res video is where you'd want a 24 GB+ GPU or a rented cloud one.</p></div>
+
+Next: what the model itself is actually made of — the encoder, the 33B transformer, and the two VAEs that separately produce your picture and your sound.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

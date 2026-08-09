@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>07 · Optimizing for 720p</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 07 · Optimization</span>
+
+# Pushing for 720p on 8 GB
+
+<p class="lede">"Why can't we just get 720p?" is the right question to interrogate. We researched it properly — papers, repos, and three parallel research agents — and the answer reshaped how we generate. Here's the whole investigation and the pipeline it produced.</p>
+
+## The core truth: it's a *fit* problem, not a *capability* problem
+
+MiniMax-H3's native trained canvas is **1344×768** — 720p is literally inside its comfort zone. The blocker isn't the model's ability; it's that during each diffusion step the **DiT activations + the video latent must live on the GPU** and can't be offloaded. At 720p × many frames, those resident tensors alone exceed 8 GB.
+
+<div class="callout truth"><span class="t">What offloading can and cannot do</span>
+<p>Offloading (ComfyUI's DynamicVRAM, diffusers' group-offload) streams <b>weights</b> in and out of VRAM. It does <b>nothing</b> for the live activation/latent working set, which must stay resident mid-computation. That resident set — driven by <code>width × height × frames</code> — is the true ceiling. This is why no library swap fixes it.</p></div>
+
+## What we ruled out (and why)
+
+```mermaid
+flowchart TD
+    Q["Goal: 720p on 8 GB"] --> A{Bypass ComfyUI<br/>→ raw diffusers?}
+    A -->|"No — no sub-12GB recipe,<br/>needs ~75GB RAM we lack"| X1[✗ same ceiling]
+    Q --> B{SageAttention<br/>to save memory?}
+    B -->|"No — known H3 bug:<br/>outputs pure noise"| X2[✗ broken for H3]
+    Q --> C{Caching<br/>TeaCache etc?}
+    C -->|"Speed only,<br/>slight VRAM cost"| X3[✗ doesn't raise res]
+    Q --> D{Native 1280×720<br/>generation?}
+    D -->|"Decode wall,<br/>undocumented on 8GB"| X4[✗ not reliable]
+    Q --> W["✓ Generate ~1024×576<br/>+ AI-upscale to 720p"]
+    style W fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style Q fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+```
+
+<div class="callout danger"><span class="t">The SageAttention trap we avoided</span>
+<p>SageAttention is a normal go-to for saving attention memory. But there's an <b>open ComfyUI bug specific to H3</b>: with <code>--use-sage-attention</code>, H3's attention routes through an int8 path and produces <b>pure noise</b> — a 55-minute render into garbage, with no error. Our research caught this before we wasted a run. Lesson: verify before enabling "known good" tricks on a new model.</p></div>
+
+## What actually works on 8 GB
+
+Three levers, applied together:
+
+<table>
+<tr><th>Optimization</th><th>What it does</th><th>Our setting</th></tr>
+<tr><td><b>Tiled VAE decode</b></td><td>Decodes the video in spatial tiles + temporal chunks, so the decode step (the usual OOM point at high res) is bounded by tile size, not full clip</td><td><code>VAEDecodeTiled</code> — tile 128, overlap 32, temporal 32/4</td></tr>
+<tr><td><b><code>--disable-smart-memory</code></b></td><td>Stops ComfyUI caching that triggered the H3 low-VRAM decode crash</td><td>on (in the systemd service)</td></tr>
+<tr><td><b><code>--reserve-vram 0.6</code></b></td><td>Leaves headroom so the OS/decoder isn't squeezed → fewer OOMs</td><td>on</td></tr>
+<tr><td><b><code>expandable_segments</code></b></td><td>PyTorch allocator setting that reduces memory fragmentation</td><td>on (env var)</td></tr>
+</table>
+
+**Result:** generating **1024×576** now uses only ~**5.7 GB VRAM** — comfortable headroom where 720p would have OOM'd.
+
+## The 720p pipeline: generate small, upscale smart
+
+This is how the whole field ships HD AI video on consumer cards — cascaded generation + upscaling is standard, not a hack.
+
+```mermaid
+flowchart LR
+    G["Generate<br/>1024×576 · 73 frames<br/>(fits 8 GB)"] --> V["Tiled VAE decode<br/>→ frames"]
+    G --> AU["Audio VAE decode<br/>→ 32 kHz stereo"]
+    V --> U["4×-UltraSharp upscale<br/>→ 4096×2304"]
+    U --> D["Downscale (lanczos)<br/>→ 1280×720"]
+    D --> M["Mux with original audio"]
+    AU --> M
+    M --> OUT[[genuine 720p mp4]]
+    style G fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style OUT fill:#14342c,stroke:#5ee0c0,color:#eafff8
+```
+
+**The upscaler:** `4x-UltraSharp.pth` (from `Kim2091/UltraSharp`, ~64 MB) → `models/upscale_models/`. The 4× overshoot then downscale-to-720p is what turns a soft generation into a crisp final frame and hides model artifacts. ESRGAN upscaling is chosen over diffusion refine because it's **temporally stable** (no frame-to-frame flicker) and cheap on 8 GB.
+
+## Speed: the Turbo-LoRA lever (future)
+
+Our research also found **MiniMax-H3-Turbo-LoRA** (`larryvrh/MiniMax-H3-Turbo-Lora`), which distills sampling from ~20 steps down to **4–8 steps — roughly 5× faster**, with no resolution loss. Not yet wired into our pipeline, but it's the single biggest *speed* win available and would cut a 17-minute render to ~3–4 minutes.
+
+## Honest bottom line
+
+<div class="callout warn"><span class="t">The real limits of this box</span>
+<ul>
+<li><b>Native max ≈ 1024×576</b> for a short clip. Native 1280×720 is not reliable on 8 GB.</li>
+<li><b>720p output is achieved by upscaling</b> — a real, production-standard route to a genuine 720p file.</li>
+<li><b>2K is impossible locally in any stack</b> — it requires H3-Regenerate-2K, which MiniMax hasn't open-sourced (API only).</li>
+<li><b>Readable on-screen text remains impossible</b> — no diffusion video model can spell.</li>
+<li>For long <em>and</em> high-res, the honest answer is a bigger GPU (24 GB+) or a rented cloud one.</li>
+</ul>
+</div>
+
+This chapter is the template for the mindset the whole guide teaches: don't accept "it can't" or assume "it can" — research the specific mechanism, verify on your hardware, and build the pipeline the constraints actually allow.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

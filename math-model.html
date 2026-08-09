@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MiniMax-H3 — Math Model</title>
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['$','$'],['\\(','\\)']], displayMath: [['$$','$$'],['\\[','\\]']] },
+  svg: { fontCache: 'global' }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" id="MathJax-script" async></script>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#151a22; --border:#242c38;
+    --ink:#e8edf3; --muted:#9aa7b8; --accent:#5ee0c0; --accent2:#7aa2ff;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font:17px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:820px;margin:0 auto;padding:56px 24px 120px}
+  h1{font-size:2rem;letter-spacing:-.02em;margin:0 0 .1em}
+  .sub{color:var(--muted);margin:0 0 2em;font-size:15px}
+  h2{font-size:1.15rem;color:#fff;margin:2.4em 0 .4em;padding-top:1em;border-top:1px solid var(--border)}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:.5em;font-family:ui-monospace,monospace;font-size:.85em}
+  p{color:var(--ink)}
+  .note{color:var(--muted);font-size:15px}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.86em;background:#0a0d12;padding:.12em .4em;border-radius:5px;border:1px solid var(--border);color:#d6e7ff}
+  mjx-container{overflow-x:auto;overflow-y:hidden;max-width:100%}
+  .eq{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent2);
+    border-radius:10px;padding:6px 20px;margin:1.1em 0}
+  .box{border-left-color:var(--accent)}
+  .final{background:linear-gradient(180deg,#14201d,#131a22);border:1px solid var(--accent);border-radius:12px;padding:8px 22px;margin:2em 0}
+  hr{border:none;border-top:1px solid var(--border);margin:2.4em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>MiniMax-H3 — Math Model</h1>
+<p class="sub">Prompt → Video, as formulas. &nbsp;$d$ = hidden dim, $N$ = sequence length, bold = tensors.</p>
+
+<div class="eq">$$\text{prompt } P \;\longrightarrow\; \text{tokens } \mathbf{t} \;\longrightarrow\; \text{condition } \mathbf{c} \;\longrightarrow\; \text{latent } \mathbf{z} \;\longrightarrow\; \text{video } \mathbf{V},\ \text{audio } \mathbf{A}$$</div>
+
+<h2><span class="n">1</span>Text → tokens → embedding</h2>
+<p class="note">Tokenize the string, then look each token up in the embedding table $E$.</p>
+<div class="eq">$$\mathbf{t} = \text{tok}(P) \in \mathbb{N}^{L}, \qquad \mathbf{x}^{(0)} = E[\mathbf{t}] \in \mathbb{R}^{L \times d}$$</div>
+
+<h2><span class="n">2</span>Encoder (Qwen3-VL-32B) → conditioning</h2>
+<p class="note">Transformer stack; H3 taps the hidden state at layer 50.</p>
+<div class="eq">$$\mathbf{x}^{(\ell)} = f_\ell\!\left(\mathbf{x}^{(\ell-1)}\right),\ \ \ell = 1 \dots 50 \qquad\Longrightarrow\qquad \mathbf{c} = \mathbf{x}^{(50)} \in \mathbb{R}^{L \times d}$$</div>
+<p class="note">Each layer = attention + feed-forward with residuals:</p>
+<div class="eq">$$f_\ell(\mathbf{x}) = \mathbf{x} + \mathrm{FFN}\big(\mathbf{x} + \mathrm{Attn}(\mathbf{x})\big)$$</div>
+<p class="note">Attention (score matrix is $N\times N$ → the $\mathcal{O}(N^2)$ cost):</p>
+<div class="eq">$$\mathrm{Attn}(\mathbf{x}) = \mathrm{softmax}\!\left(\frac{\mathbf{Q}\mathbf{K}^\top}{\sqrt{d_k}}\right)\mathbf{V}, \qquad \mathbf{Q}=\mathbf{x}W_Q,\ \mathbf{K}=\mathbf{x}W_K,\ \mathbf{V}=\mathbf{x}W_V$$</div>
+<p class="note">Feed-forward (token-wise; the memory culprit, see §7):</p>
+<div class="eq">$$\mathrm{FFN}(\mathbf{x}) = \sigma\!\left(\mathbf{x}W_1 + b_1\right)W_2 + b_2, \qquad W_1 \in \mathbb{R}^{d \times 4d}$$</div>
+
+<h2><span class="n">3</span>Noise initialization (latent space)</h2>
+<p class="note">Start from pure Gaussian noise in the compressed latent (space 16×, time 4×).</p>
+<div class="eq">$$\mathbf{z}_1 \sim \mathcal{N}(\mathbf{0}, \mathbf{I}), \qquad \mathbf{z}_1 \in \mathbb{R}^{F' \times H' \times W' \times C}, \qquad H'=\tfrac{H}{16},\ W'=\tfrac{W}{16},\ F'=\tfrac{F}{4}$$</div>
+
+<h2><span class="n">4</span>Flow matching — the generator is an ODE</h2>
+<p class="note">H3 (<code>FLOW_AV</code>) learns a velocity field $v_\theta$. Generation integrates an ODE from noise ($t{=}1$) to data ($t{=}0$), steered by $\mathbf{c}$:</p>
+<div class="eq box">$$\frac{d\mathbf{z}_t}{dt} = v_\theta(\mathbf{z}_t,\ t,\ \mathbf{c}) \qquad \mathbf{z}_1 = \text{noise} \ \longrightarrow\ \mathbf{z}_0 = \text{clean latent}$$</div>
+<p class="note">Training target (why it's <em>regression</em>, not classification) along the straight path $\mathbf{z}_t = t\,\mathbf{z}_1 + (1-t)\,\mathbf{z}_0$:</p>
+<div class="eq">$$\mathcal{L} = \mathbb{E}_{t,\mathbf{z}_0,\mathbf{z}_1}\Big\|\, v_\theta(\mathbf{z}_t, t, \mathbf{c}) - (\mathbf{z}_1 - \mathbf{z}_0)\,\Big\|^2$$</div>
+
+<h2><span class="n">5</span>Sampling = discretizing the ODE (Euler)</h2>
+<p class="note">Split $t\in[0,1]$ into $S$ steps; each step is one full DiT forward pass.</p>
+<div class="eq">$$\mathbf{z}_{t-\Delta t} = \mathbf{z}_t - \Delta t \cdot v_\theta(\mathbf{z}_t, t, \mathbf{c}), \qquad \Delta t = \tfrac{1}{S}$$</div>
+<p class="note">Base $S=20$ (error $\sim\mathcal{O}(\Delta t)$). Turbo-LoRA distills $v_\theta\to v_\theta'$ so $S=4$–$6$ suffices.</p>
+<div class="eq">$$\text{NFE} = S \times (\text{solver order})$$</div>
+
+<h2><span class="n">6</span>Latent → pixels & sound (VAE decode)</h2>
+<p class="note">Continuous output (regression), then rescaled to bytes. No softmax over colors.</p>
+<div class="eq">$$\mathbf{V} = \left\lfloor \big(\tanh(\mathrm{Dec}_{\text{vid}}(\mathbf{z}_0)) + 1\big)\cdot 127.5 \right\rceil \in [0,255]$$</div>
+<div class="eq">$$\mathbf{A} = \left\lfloor \mathrm{Dec}_{\text{aud}}(\mathbf{z}_0)\cdot 32767 \right\rceil \in [-32768,\,32767]$$</div>
+
+<h2><span class="n">7</span>Cost model (why 8 GB is the fight)</h2>
+<p class="note">Time:</p>
+<div class="eq">$$T_{\text{total}} = \underbrace{\text{NFE}\cdot T_{\text{fwd}}(\text{res}\times\text{frames})}_{\text{sampling}} \;+\; \underbrace{T_{\text{enc}} + T_{\text{dec}} + T_{\text{up}}}_{\text{fixed}}$$</div>
+<p class="note">Speedup is bounded (Amdahl); $p$ = sampling fraction, $s$ = Turbo factor:</p>
+<div class="eq">$$\text{speedup} = \frac{1}{(1-p) + \dfrac{p}{s}}$$</div>
+<p class="note">Peak memory (measured):</p>
+<div class="eq">$$M_{\text{peak}} = \underbrace{M_{\text{fixed}}}_{\approx\,6.5\text{ GB}} + M_{\text{frames}}(F)$$</div>
+<p class="note">~88% of the real-tensor part was one int8 GEMM temporary:</p>
+<div class="eq">$$M_{\text{int8mm}} = \underbrace{M \times N}_{\text{output } [M,N]} \times \underbrace{4\text{ bytes}}_{\text{int32}} \;\approx\; 2.24\text{ GB (one shot)}$$</div>
+
+<h2><span class="n">8</span>The exact optimization (bit-identical)</h2>
+<p class="note">Rows are independent (per-row scale $s_i$), so block over rows $R_i$ — never materialize the full $[M,N]$:</p>
+<div class="eq box">$$\mathbf{Y}[R_i,:] = \big(\mathbf{X}_8[R_i,:]\; W_8^\top\big) \cdot (s_{R_i}\, s_w), \qquad \bigcup_i R_i = \{1..M\}$$</div>
+<div class="eq">$$\Rightarrow\quad M_{\text{peak}}:\ 5.9\text{ GB} \to 3.9\text{ GB}, \qquad \Delta Q = 0 \ (\text{proven } \texttt{torch.equal})$$</div>
+
+<h2><span class="n">9</span>What the freed memory buys (resolution)</h2>
+<div class="eq">$$\frac{\text{pixels}_{\text{after}}}{\text{pixels}_{\text{before}}} = \frac{768 \times 448}{576 \times 320} = \frac{344064}{184320} = 1.87\times$$</div>
+
+<hr>
+<h2 style="border:none">The chain, one line</h2>
+<div class="final">$$P \xrightarrow{\text{tok},E} \mathbf{x}^{(0)} \xrightarrow{f_{1:50}} \mathbf{c};\quad \mathbf{z}_1\!\sim\!\mathcal{N} \xrightarrow[\text{Euler }S\text{ steps}]{\;\dot{\mathbf{z}}=v_\theta(\mathbf{z},t,\mathbf{c})\;} \mathbf{z}_0 \xrightarrow{\text{VAE}} (\mathbf{V},\mathbf{A})$$</div>
+
+</div>
+</body>
+</html>

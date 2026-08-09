@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>05 · Our Build — The True Story</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 05 · The Build</span>
+
+# Our Build — The True Story
+
+<p class="lede">Tutorials show the clean path. Real builds are a series of walls you climb over. Here's exactly what happened on your box — including the parts that failed — because the failures are where the learning is.</p>
+
+## The whole journey at a glance
+
+```mermaid
+flowchart TD
+    S([Start: SSH into the box]) --> H1
+    H1{"Enough hardware?"} -->|"3.2 GB RAM, no GPU"| UP["You upgraded:<br/>+RAM to 60 GB, +RTX 3060 Ti"]
+    UP --> LAN["(LAN cable was unplugged 😄)"]
+    LAN --> DRV["Install NVIDIA driver 595 → reboot"]
+    DRV --> PY["System Python 3.14 unusable<br/>→ uv installs Python 3.12"]
+    PY --> ENG["Install ComfyUI + PyTorch cu128 + nodes"]
+    ENG --> DL["Download ~46 GB of weights"]
+    DL --> T1{"trap: /tmp is a 31 GB RAM-disk"} -->|re-point to disk| DL2["Encoder re-downloaded"]
+    DL2 --> T2{"trap: GGUF wrong architecture"} -->|switch to native int8| DL3["Correct DiT downloaded"]
+    DL3 --> T3{"trap: HF throttles the download"} -->|curl --http1.1| OK
+    OK["All 4 files in place"] --> RUN["Run generation"]
+    RUN --> WIN([✅ Clip with sound])
+    style S fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style WIN fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style T1 fill:#241a1a,stroke:#ff6b6b,color:#ffdede
+    style T2 fill:#241a1a,stroke:#ff6b6b,color:#ffdede
+    style T3 fill:#241a1a,stroke:#ff6b6b,color:#ffdede
+```
+
+## Phase 1 — Getting in, and getting hardware
+
+The very first hurdle was mundane: the **SSH password login kept dropping its first character** on a slow prompt, reading as "wrong password." Fix: a 2-second pause before sending it, then we installed an **SSH key** so it never happened again.
+
+Then the honest hardware check. The box started with **3.2 GB RAM and no GPU** — nowhere near enough for a 33B video model. You physically **added 60 GB of RAM and an RTX 3060 Ti**. (One reboot came back with "network unreachable" — the LAN cable wasn't plugged in. It happens to everyone.)
+
+<div class="callout truth"><span class="t">Lesson</span>
+<p>Always measure the real machine before planning. We nearly scoped the whole project around a 3.2 GB box. Ten minutes of <code>free -h</code>, <code>nvidia-smi</code>, and <code>df -h</code> saves hours.</p></div>
+
+## Phase 2 — Drivers and Python
+
+Installed the recommended **`nvidia-driver-595`** (headless/compute build — no desktop bloat), rebooted, and confirmed with `nvidia-smi`: RTX 3060 Ti, **8192 MiB**, CUDA 13.2. The GPU was alive.
+
+Then the Python wall: the system had only **Python 3.14**, too new for PyTorch. We used **`uv`** to drop in an isolated **Python 3.12**, created a virtual environment, and installed **PyTorch (cu128)**. First check that mattered:
+
+```
+cuda_avail  True
+device      NVIDIA GeForce RTX 3060 Ti
+vram_GB     7.7
+```
+
+PyTorch could see and use the GPU. Green light.
+
+## Phase 3 — The engine
+
+Cloned **ComfyUI 0.30**, installed its requirements, and added the node packs the H3 workflow needed (**ComfyUI-GGUF, KJNodes, rgthree, ComfyMath**). ComfyUI booted, detected the GPU, and — helpfully — reported **DynamicVRAM offload** support, the exact feature that makes 8 GB viable.
+
+## Phase 4 — The download gauntlet (three traps)
+
+Getting 46 GB of weights down was, honestly, the hardest part. Three separate failures:
+
+<div class="callout danger"><span class="t">Trap 1 — /tmp is a RAM-disk</span>
+<p>The 26 GB encoder failed with "Disk quota exceeded" despite 100 GB free. Cause: <code>/tmp</code> was a <b>31 GB tmpfs</b> (backed by RAM), and staging a 26 GB file there overflowed it. Fix: download straight to the real disk under <code>~</code>.</p></div>
+
+<div class="callout danger"><span class="t">Trap 2 — the GGUF wouldn't load</span>
+<p>The first transformer file (a GGUF) errored: <em>"Unknown model architecture."</em> It was built for stable-diffusion.cpp, not ComfyUI. Fix: switch to the official <b>native int8 safetensors</b> from <code>Comfy-Org/MiniMax-H3</code> — cost a 20 GB re-download, but loaded first try. (See <a href="04-software-stack.html">Chapter 4</a>.)</p></div>
+
+<div class="callout danger"><span class="t">Trap 3 — HuggingFace throttling</span>
+<p>Unauthenticated downloads of the big file kept dying — a CDN <code>500</code>, then HTTP/2 stream cancels (rate-limiting). Two fixes: forcing <b>HTTP/1.1</b> with <code>curl -L --http1.1 -C - --retry</code> got it flowing at ~4–10 MB/s, and later your <b>HF token</b> raised the limits for good.</p></div>
+
+## Phase 5 — It runs
+
+With all four files in place and the workflow pointed at the **native `UNETLoader`**, the generation ran clean. The logs told the story:
+
+```
+model_type FLOW_AV
+Model MiniMaxH3 ... 19995 MB Staged   (streaming via offload)
+Native ops: convrot_w4a4, int8_tensorwise
+ 20/20 [########] sampling complete
+```
+
+<div class="callout spec"><span class="t">The measured results — your actual outputs</span>
+<table>
+<tr><th>Clip</th><th>Spec</th><th>Render time</th><th>File</th></tr>
+<tr><td>Smoke test</td><td>512×320, 5 frames, h264 + 32 kHz stereo AAC</td><td>~57 s</td><td><code>h3_smoke_00001_.mp4</code></td></tr>
+<tr><td>Ocean demo</td><td>768×448, 73 frames (3.0 s), 20 steps</td><td><b>348 s (5.8 min)</b></td><td><code>h3_demo_00001_.mp4</code></td></tr>
+</table>
+Both are on your Desktop. Both have synchronized generated audio — proof the full omni-modal pipeline works on an 8 GB card.
+</div>
+
+## What we'd do differently next time
+
+- Set the **HF token first** — avoids the whole throttling saga.
+- Download models straight to disk paths, never `/tmp`.
+- Prefer the **official ComfyUI repack** of any model; match **quantization to the GPU generation** (int8 for Ampere).
+- Budget realistically: on 8 GB, think **short clips**, and expect **minutes per render**.
+
+Last chapter: a staged roadmap so you can go from running someone else's model to genuinely understanding and building your own.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

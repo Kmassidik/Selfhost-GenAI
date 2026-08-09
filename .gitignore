@@ -1,0 +1,19 @@
+# never commit — model weights, media, envs, secrets
+*.mp4
+*.mov
+*.png
+*.jpg
+*.safetensors
+*.gguf
+*.pth
+*.pickle
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+# secrets — never
+*.token
+id_*
+*.pem
+.env
+secrets*

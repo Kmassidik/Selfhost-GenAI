@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>06 · Your Learning Roadmap</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 06 · Roadmap</span>
+
+# Your Learning Roadmap
+
+<p class="lede">You've now run a frontier video model on a budget GPU. That's further than most people ever get. Here's a staged path to turn "I made it work" into "I understand it and can build my own."</p>
+
+## The five stages
+
+```mermaid
+flowchart LR
+    L0["Stage 0<br/>Foundations"] --> L1["Stage 1<br/>Run models<br/>confidently"]
+    L1 --> L2["Stage 2<br/>Hardware &<br/>optimization"]
+    L2 --> L3["Stage 3<br/>Understand<br/>the models"]
+    L3 --> L4["Stage 4<br/>Serve, scale<br/>& automate"]
+    style L0 fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style L2 fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style L4 fill:#241f14,stroke:#ffb454,color:#fff0d9
+```
+
+You are already standing at the border of **Stage 1 → Stage 2**. Don't restart at zero — fill gaps as you go.
+
+## Stage 0 · Foundations (the "why")
+
+Goal: be comfortable with the ideas in Chapters 1–3 without hand-waving.
+
+- **3Blue1Brown — Neural Networks** (YouTube): the best visual intuition for what a network *is*.
+- **Jay Alammar — The Illustrated Transformer** (blog): attention, explained with pictures.
+- **Computerphile — Stable Diffusion** (YouTube): diffusion in plain language.
+
+<div class="callout spec"><span class="t">Checkpoint</span><p>You can explain to a friend: what a parameter is, what "inference" means, and why diffusion starts from noise.</p></div>
+
+## Stage 1 · Run models confidently (you're here)
+
+Goal: comfortably run and tweak models locally without following a script blindly.
+
+- Re-run your H3 workflow and **change one thing at a time**: seed, steps, resolution, prompt. Watch how each affects output and time.
+- Try a **smaller, faster model** to iterate quickly — e.g. an image model like **SDXL** or a light video model — so you're not waiting 6 minutes per experiment.
+- Learn the **ComfyUI UI**: load our saved workflow (`MiniMax-H3-FL2VA-8GB.json`), see the nodes you built by hand.
+- Read: **HuggingFace** model cards — learn to read a repo's files and pick the right quant.
+
+<div class="callout spec"><span class="t">Project</span><p>Generate five clips exploring one variable (e.g. steps 6 → 30) and write down what changed. This builds real intuition fast.</p></div>
+
+## Stage 2 · Hardware & optimization (your natural next step)
+
+Goal: understand the resource game you're already playing — and win it.
+
+- Master the trio from Chapter 2: **GPU vs VRAM vs RAM**, and offloading.
+- Learn **quantization** hands-on: try int8 vs fp8 versions of a model, compare quality and speed.
+- Learn **attention optimizations**: SageAttention / FlashAttention (the workflow referenced SageAttention — it speeds up the attention step).
+- Understand **what limits clip length** on your card (Chapter 2's quadratic cost).
+
+<div class="callout spec"><span class="t">Project</span><p>Install SageAttention in your ComfyUI env and measure the render-time drop on the same ocean prompt. Real, measurable optimization.</p></div>
+
+## Stage 3 · Understand the models (the "how")
+
+Goal: read a model's architecture and know what each part does.
+
+- Study **VAEs**, **latent diffusion**, and **flow matching** (H3 is `FLOW_AV`).
+- Read the **MiniMax-H3 model card** end to end — you now have the vocabulary for it.
+- Explore **diffusers** (HuggingFace's Python library) to run a model in ~15 lines of code, so you see the pipeline without ComfyUI's abstraction.
+- Optional but golden: **Andrej Karpathy — "Let's build GPT"** (YouTube) to demystify transformers by coding one.
+
+<div class="callout spec"><span class="t">Project</span><p>Write a short Python script using <code>diffusers</code> that generates an image from a prompt — no UI. When it runs, you understand the pipeline for real.</p></div>
+
+## Stage 4 · Serve, scale & automate (the "for real")
+
+Goal: run it like a service, not a science experiment.
+
+- **Persistent service:** a `systemd` unit so ComfyUI auto-starts on boot and survives reboots.
+- **Remote access:** SSH tunnel (`ssh -L 8188:localhost:8188 dalang@<box>`) or bind to the LAN — understand the security trade-off.
+- **APIs:** drive ComfyUI via its `/prompt` HTTP API (exactly how we submitted your clips) to automate generation.
+- **Cloud GPUs:** when 8 GB isn't enough (long/2K video), learn to rent a 24–80 GB GPU by the hour (RunPod, Vast.ai, Lambda). Same skills, bigger canvas.
+
+<div class="callout spec"><span class="t">Project</span><p>Turn ComfyUI into a systemd service and generate a clip from your laptop through an SSH tunnel. Now it's infrastructure.</p></div>
+
+## Concrete next steps for *your* box
+
+Things we can do right now, whenever you want:
+
+<table>
+<tr><th>Want to…</th><th>What it takes</th></tr>
+<tr><td>Make the lyric video</td><td>Download the <b>Ref2VA</b> model (~20 GB) + you provide the song and performer image(s)</td></tr>
+<tr><td>Stop re-launching ComfyUI by hand</td><td>A <b>systemd service</b> (auto-start on boot)</td></tr>
+<tr><td>Use the web UI from your laptop</td><td>SSH tunnel, or bind to the LAN (I'll explain the security side)</td></tr>
+<tr><td>Faster renders</td><td>Install <b>SageAttention</b>; keep clips short; lower steps for drafts</td></tr>
+<tr><td>Long / 2K video</td><td>Rent a bigger cloud GPU — your 8 GB card can't hold it</td></tr>
+</table>
+
+<div class="callout truth"><span class="t">The mindset that matters most</span>
+<p>Everything here is learnable by <b>changing one variable and watching what happens</b>. You already debugged a RAM-disk, a wrong file format, and a throttling CDN — that's the actual skill of self-hosting. Models will change; that problem-solving won't. Keep a log, stay curious, and build small projects. You're well on your way.</p></div>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

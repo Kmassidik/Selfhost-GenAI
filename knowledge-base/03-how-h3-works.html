@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>03 · How MiniMax-H3 Works</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 03 · The Model</span>
+
+# How MiniMax-H3 Works
+
+<p class="lede">MiniMax-H3 isn't one blob — it's a small factory of specialized parts. Knowing which part does what makes the file downloads, the loaders, and the errors all make sense.</p>
+
+## What H3 is (and isn't)
+
+H3 is an **omni-modal generative system**: give it text (and optionally images, audio, or reference video) and it produces **video with synchronized stereo audio**. Per MiniMax's own spec:
+
+<div class="callout spec"><span class="t">H3 official capabilities</span>
+<table>
+<tr><td>Output duration</td><td><b>4–15 seconds</b> (this is the trained range — beyond it, quality drops)</td></tr>
+<tr><td>Resolution</td><td>shorter side 768 by default; up to 2K with a separate module</td></tr>
+<tr><td>Frame rate</td><td>24 fps</td></tr>
+<tr><td>Audio</td><td>32 kHz stereo, synchronized</td></tr>
+<tr><td>Languages</td><td>11 (English, Chinese, Japanese, Korean, Arabic, …)</td></tr>
+</table>
+</div>
+
+<div class="callout warn"><span class="t">Why your "30 second" request needs a rethink</span>
+<p>H3 was trained for up to <b>15 seconds</b>. Asking for 30 pushes it outside what it learned — it tends to drift, loop, or lose coherence — and on 8 GB VRAM the memory likely won't hold it. This isn't a setup limitation; it's the model's design. 10–15 s is the honest maximum to aim for.</p></div>
+
+## The four parts, and what each file is for
+
+When we downloaded weights, we grabbed **four** things. Here's why each exists:
+
+<table>
+<tr><th>Part</th><th>Job</th><th>The file we used</th><th>Size</th></tr>
+<tr><td><b>Text/Vision Encoder</b><br/>(Qwen3-VL-32B)</td><td>Reads your prompt (and any images) and turns it into rich meaning the generator can follow. H3 taps its <b>50th layer</b>'s hidden states.</td><td><code>qwen3vl_32b_minimax_h3_int8_convrot.safetensors</code></td><td>26 GB</td></tr>
+<tr><td><b>Omni-Transformer</b><br/>(the "DiT", 33B)</td><td>The actual generator. Denoises the joint video+audio latent over the sampling steps. Type <code>FLOW_AV</code> (flow-matching, audio+video).</td><td><code>minimax_h3_fl2va_pruned_int8_convrot.safetensors</code></td><td>20 GB</td></tr>
+<tr><td><b>Visual VAE</b></td><td>Translates between real pixels and the compact "latent" the transformer works in. 16× smaller in space, 4× in time.</td><td><code>minimax_h3_video_vae_fp16.safetensors</code></td><td>4.9 GB</td></tr>
+<tr><td><b>Audio VAE</b></td><td>Same idea for sound: compresses/expands 32 kHz stereo audio to and from latents.</td><td><code>minimax_h3_audio_vae_fp32.safetensors</code></td><td>0.6 GB</td></tr>
+</table>
+
+<div class="callout truth"><span class="t">A "VAE" in one sentence</span>
+<p>A <b>VAE</b> (variational autoencoder) is a translator between the messy real world (pixels, sound waves) and a small coded form (the <em>latent</em>) that's cheap to compute on. The transformer never touches pixels directly — it works in latent space, and the VAE decodes back to a watchable frame at the end.</p></div>
+
+## How a clip actually flows through it
+
+This is the pipeline your ComfyUI graph ran, end to end:
+
+```mermaid
+flowchart TD
+    P["Your prompt<br/>'ocean at sunset, waves, gulls'"] --> ENC
+    ENC["Qwen3-VL-32B Encoder<br/>→ meaning vectors (layer 50)"] --> DIT
+    NOISE["Random noise latent<br/>(seed = 7)"] --> DIT
+    DIT["Omni-Transformer · 33B<br/>denoise 20 steps<br/>(video + audio together)"] --> LAT["Clean joint latent"]
+    LAT --> VVAE["Visual VAE decode"] --> FR["73 video frames"]
+    LAT --> AVAE["Audio VAE decode"] --> AU["32 kHz stereo audio"]
+    FR --> MUX["Mux to MP4 (h264 + aac)"]
+    AU --> MUX
+    MUX --> OUT[[h3_demo_00001_.mp4]]
+    style ENC fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style DIT fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style OUT fill:#0d1017,stroke:#5ee0c0,color:#5ee0c0
+    style NOISE fill:#241a1a,stroke:#ff6b6b,color:#ffdede
+```
+
+Notice the encoder (26 GB) and the transformer (20 GB) are the two heavyweights — that's the 46 GB your RAM has to hold and stream. The VAEs are small and run only at the very end.
+
+## The two "modes": FL2VA vs Ref2VA
+
+H3 ships as two variants of the transformer. This matters because **they need different files**:
+
+<table>
+<tr><th>Variant</th><th>What it takes in</th><th>Good for</th></tr>
+<tr><td><b>FL2VA</b> (what we installed)</td><td>Text, and optionally a first and/or last frame image</td><td>Text→video, image→video</td></tr>
+<tr><td><b>Ref2VA</b></td><td>Multiple reference images (≤9), reference audio, even reference video</td><td>Using a real song + a character image — e.g. your lyric-video idea</td></tr>
+</table>
+
+<div class="callout warn"><span class="t">Why your lyric-video prompt needs a second download</span>
+<p>Your lyric-performance prompt ("use Audio1 for vocals, Image1 as the performer") is a <b>Ref2VA</b> task — it feeds in a real song and character images. We installed <b>FL2VA</b>, which can't accept a reference audio track. Doing the lyric video means downloading the Ref2VA transformer (~20 GB) <em>and</em> supplying the actual song + image files. The encoder and VAEs we already have are reused.</p></div>
+
+Next: the software layer that ties the GPU to the model — drivers, CUDA, PyTorch, ComfyUI — and the "quantization" that shrank a 66 GB model to 20.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>08 · How a Prompt Becomes a Video</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 08 · The Data's Journey</span>
+
+# How a Prompt Becomes a Video
+
+<p class="lede">Follow one sentence — "a woman singing" — as it turns from text into moving pictures with sound. No retrieval, no stitching of old clips. The video is <em>hallucinated</em> from static, and this is the exact path the data takes.</p>
+
+## The one idea to hold onto
+
+The model is **not** a search engine. It never looks up a video of a woman singing. It starts from **pure random noise** and, guided by the meaning of your words, **removes the noise** until what's left happens to look like a woman singing. Every frame is invented. That's the whole magic — and every cost we measured comes from it.
+
+```mermaid
+flowchart LR
+    P["'a woman singing'"] --> ENC["① Encoder<br/>words → meaning"]
+    N["pure noise<br/>(random static)"] --> DIT
+    ENC --> DIT["③ DiT<br/>remove noise,<br/>guided by meaning<br/>(repeat N steps)"]
+    DIT --> LAT["clean latent<br/>(compressed dream)"]
+    LAT --> VV["④ Visual VAE<br/>latent → pixels"]
+    LAT --> AV["④ Audio VAE<br/>latent → sound"]
+    VV --> OUT[[frames + audio<br/>= video]]
+    AV --> OUT
+    style ENC fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style DIT fill:#14342c,stroke:#5ee0c0,color:#eafff8
+    style N fill:#241a1a,stroke:#ff6b6b,color:#ffdede
+    style OUT fill:#0d1017,stroke:#5ee0c0,color:#5ee0c0
+```
+
+---
+
+## ① The words become meaning (the Encoder)
+
+Your sentence is first chopped into **tokens** (roughly: pieces of words) and each token becomes a number. Those numbers flow through the **text/vision encoder** — for H3, that's **Qwen3-VL-32B**.
+
+The encoder's job isn't to store your words; it's to **understand** them. Layer by layer it builds a high-dimensional vector — think of it as a coordinate in a giant "meaning space" — that captures *person, female, singing, music, motion, a mouth that moves with sound.* This bundle of meaning is called the **conditioning**. It's the instruction sheet the generator will obey.
+
+> **This is our fixed ~6.5 GB VRAM floor.** The encoder is huge, and it runs before a single frame exists. That's why the profiler saw the same peak whether the video was 5 frames or 181 — this step doesn't care how long the video is.
+
+---
+
+## ② The blank canvas is static (the Noise)
+
+The generator does **not** start from a black screen. It starts from a block of **pure random numbers** — TV static — but in a compressed form called **latent space**.
+
+Instead of full pixels (1280×720×3 per frame × hundreds of frames = enormous), it works on a small coded grid: the video is squished **16× smaller in space and 4× in time**. A 15-second clip becomes a manageable little tensor of random noise. This compression is the only reason a 33B model can touch video at all.
+
+---
+
+## ③ The sculptor removes the noise (the DiT — the heart)
+
+Now the **Omni-Transformer** (the 33-billion-parameter DiT) goes to work. In a loop:
+
+1. It looks at the current noisy latent **and** the meaning-vector from ①.
+2. It predicts: *"to make this look more like 'a woman singing', nudge the numbers in **this** direction."* (Mathematically, a velocity field — see [Chapter — Sampling Math].)
+3. Apply the nudge. The static gets 1 notch less random, 1 notch more structured.
+4. Repeat — **4 steps** (with Turbo) to **20 steps** (base).
+
+Picture fog slowly clearing into a figure. Step 1: vague blobs. Step 5: a person-shape. Step 20: a woman, mid-note, mouth open.
+
+**Three things happen here that explain everything we measured:**
+
+- **Video and audio are sculpted together.** H3 denoises the picture latent *and* the sound latent in **one shared sequence**. That's why the singing voice and the lip movements are born synchronized — they were never separate.
+- **Every patch looks at every other patch (attention).** To keep frame 2 consistent with frame 1, and the mouth matched to the sound, each little piece of each frame "attends to" all the others across space and time. This is the $\mathcal{O}(N^2)$ cost — the reason more frames × more resolution means more compute and memory.
+- **Each step = one full pass of the 33B model.** So 20 steps = 20 passes. **Turbo-LoRA** retrains the sculptor to get there in 4 confident strokes instead of 20 timid ones — same statue, 5× fewer passes.
+
+---
+
+## ④ The dream is decoded into reality (the VAEs)
+
+After the last step we have a **clean latent** — but it's still the compressed code, not watchable. Two decoders expand it back to reality:
+
+- **Visual VAE:** blows the latent grid back up into actual RGB frames (undoing the 16×/4× compression) → real pixels.
+- **Audio VAE:** turns the audio latent into a **32 kHz stereo waveform** → real sound.
+
+> **This is the frame-count spike** the profiler caught at 362 frames — decoding hundreds of full-resolution frames at once is memory-heavy, and it scales with frame count. It's *after* the sculpting, a separate cost.
+
+---
+
+## ⑤ Our additions (mux + upscale)
+
+The frames and the waveform get **muxed** into an MP4. Then — because 8 GB forces us to generate small — we **AI-upscale** the frames to 720p/1080p and re-attach the original audio. (See Chapter 07.)
+
+---
+
+## The whole story, in one breath
+
+> Your words become a **coordinate in meaning-space** (encoder, the fixed floor). A block of **static** in compressed space (noise) is **repeatedly nudged** toward that meaning by a 33B sculptor that watches every patch attend to every other (the DiT, the loop — Turbo cuts the loop count). The result is a **clean compressed dream**, which two decoders **expand into pixels and sound** (the VAEs, the frame-count spike). We upscale and mux.
+
+Every number we chased — the 6.5 GB floor, the 362-frame ceiling, the 5× Turbo win, the "resolution is cheap but not free" — is just a consequence of *where* in this journey the data is heaviest. Understand the journey, and the whole cost profile stops being mysterious.
+
+---
+
+## The pixel question: regression, not classification
+
+If you know how an **LLM** outputs text, you might expect an image model to work the same way. It does **not**, and this is the single most-missed idea.
+
+<table>
+<tr><th></th><th>LLM (text)</th><th>Image/Video model</th></tr>
+<tr><td>Final act</td><td><b>Classification</b> — logits over a ~50k vocabulary → softmax → <b>sample one discrete token</b></td><td><b>Regression</b> — directly <b>compute continuous numbers</b> (floats), all at once</td></tr>
+<tr><td>Output type</td><td>discrete symbol (1 of 50,000)</td><td>continuous values, no vocabulary</td></tr>
+<tr><td>Randomness</td><td>every token is sampled from a distribution</td><td>only the <b>initial noise seed</b>; the rest is deterministic math</td></tr>
+</table>
+
+**There is no softmax over 0–255. The network never "picks" a pixel value from a distribution.** It regresses continuous numbers, and the 0–255 is a dumb rescale at the very end:
+
+```
+DiT            → latent floats            (~ -4 … +4)
+Visual VAE     → RGB floats (via tanh)    ( -1 … +1 )
+final rounding → pixel = round((x+1) * 127.5)   → 0 … 255   ← the "bits"
+Audio VAE      → audio floats [-1,1] → × 32767  → int16     ← the audio "bits"
+```
+
+That last line is where "every bit is 0–255" comes from — plain arithmetic, **not learned, not sampled.** The intelligence is in producing the right *floats*; turning them into bytes is just quantization for the file format.
+
+**Why the difference is fundamental:** words are discrete symbols (128 ≠ 129 are unrelated), so you *classify*. Pixels are a continuous signal (128 vs 129 is nearly identical), so you *regress* — and diffusion trains the network to **predict the continuous noise to remove**, an MSE regression target, never a per-pixel classification.
+
+One more trap: the word **"sampling"** means two different things. In an LLM it's *drawing a token from a distribution*. In diffusion it's *the denoising loop* (integrating the ODE) — nothing to do with per-pixel probability. Same seed + same prompt = the same video, pixel for pixel.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
