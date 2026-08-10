@@ -10,6 +10,42 @@ Last updated: **2026-08-09**
 
 ---
 
+## Quality Findings (2026-08-10) — the "why does it look broken" investigation
+
+**RAM correction:** the box is **64 GB DDR3-1600 ECC LRDIMM** (2×32 GB Hynix), NOT generic "60 GB". ~60 GB usable. It's an older server/workstation board (many empty DIMM slots report DDR2 default). DDR3-1600 ≈ ~25 GB/s dual-channel — 2-3.5× slower than DDR4/DDR5 — which is a secondary bottleneck on the RAM→VRAM weight streaming. Roomy but slow; well-suited to the offload strategy, but caps streaming speed.
+
+**RunPod: ARCHIVED.** Decision — optimize this 8 GB box, don't rent. `runpod-plan.md` banner-archived.
+
+**The "broken video" root cause (measured, not guessed):**
+1. File not corrupt (ffmpeg decodes clean).
+2. Upscaler innocent — adds only 1.02× temporal change (measured).
+3. Turbo steps innocent for *motion* (6-step ≈ 20-step frame-diff).
+4. **Motion jitter** → fixed by **RIFE** (24→48 fps, 1.8× smoother, measured).
+5. **Melty faces** → it's **pixels-per-face**, not the model. Root cause = 8 GB forces low native res → small faces get ~20 px → melt.
+
+**The pixels-per-face rule (the key insight):**
+- 1 person, face fills frame → flawless even at 480p.
+- 10 people framed as a group photo, 1080p → all foreground faces good.
+- 30-person wide crowd, 576×320 → tiny faces (~20 px) → melt.
+- It's face SIZE in pixels that matters, not people count.
+
+**A single still fits FAR higher res than video** (no 362-frame temporal cost). On 8 GB: **1920×1080 single frame fits** and looks photoreal. Ladder (single person): 480p flawless, 720p magazine-grade, 1080p indistinguishable from a photo.
+
+**Teeth fix (scored the 10-person image down to 6/10):**
+- ⭐ **Turbo was the main culprit** — its 6-step distillation under-renders fine detail; teeth are the finest. **Full 20-step euler (no Turbo) forms teeth properly.**
+- Fewer/bigger faces (5 not 10) → each tooth gets ~4× pixels.
+- **CodeFormer** restore (low fidelity) rebuilds teeth better than GFPGAN.
+- Combined → crisp teeth, approved.
+
+**Quality-first hero recipe (PROVEN for stills/portraits):**
+> single 1080p still · full 20-step euler (NO Turbo) · ≤5-6 framed faces · CodeFormer restore
+
+**Post-processing nodes installed:** ComfyUI-Frame-Interpolation (RIFE VFI), facerestore_cf (GFPGAN + CodeFormer + facexlib + lpips), ComfyUI-ClipProj (4B encoder swap — see docs/clipproj-benchmark.md).
+
+**Turbo vs quality tradeoff (the meta-lesson):** Turbo-LoRA is ~5× faster but trades away fine detail (teeth, small features). Use Turbo for drafts/motion tests; use **full 20-step for hero shots**. Speed and quality were trading off and Turbo was on the wrong side for quality work.
+
+---
+
 ## Video Production Log (2026-08-09)
 
 Techniques proven while producing the deliverables (promos + the 2-min Pip film):

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>12 · Pushing Past 8GB — What the Research Says</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 12 · Research, honestly</span>
+
+# Pushing Past 8GB — What the Papers Actually Say
+
+<p class="lede">We asked the real question: can we optimize the <em>code</em> to break the 8GB ceiling, and contribute it back to the community? So we read the actual research. This chapter is what we learned — including the parts that killed our own ideas. That's the point: measure and read <em>before</em> you build.</p>
+
+<div class="callout truth"><span class="t">The one lesson that governs everything below</span>
+<p>A big model has two kinds of memory cost: the <b>weights</b> (the model's stored numbers) and the <b>activations</b> (the temporary working data during a render). <b>Quantization shrinks the weights. It does almost nothing for activations.</b> And for <em>video</em>, the activations — especially attention over hundreds of frames — are the real wall. This is exactly what we measured on our own box, and every paper confirms it.</p></div>
+
+## Why this matters for us specifically
+
+We wanted to know: could a smarter quantization (W4A8) let us render **native 720p** on 8GB, killing the upscale-crutch that causes our boil, soft eyes, and judder? The papers give an honest answer, and it's nuanced.
+
+## The three papers, in plain words
+
+<table>
+<tr><th>Paper</th><th>What it does</th><th>What it teaches us</th></tr>
+<tr><td><b>ViDiT-Q</b><br/>(2024)</td><td>Post-training <b>W4A8 / W8A8</b> quantization built specifically for Diffusion Transformers. <b>2–2.5× memory saving, 1.4–1.7× speedup, "negligible" quality loss.</b></td><td>W4A8 on a DiT is <b>proven near-lossless</b> — so shrinking H3's weights 4-bit is a real, safe option, not a gamble.</td></tr>
+<tr><td><b>QuantSparse</b><br/>(2025)</td><td>W4A8 <b>+ attention sparsification</b> (keep only 15% of attention) on Wan2.1-14B & HunyuanVideo. Model storage <b>26.6 → 7.0 GB</b>.</td><td>The killer number: even after all that, <b>peak inference memory only drops 42 → 28 GB.</b> The weights shrank 3.8×; the <em>activations barely moved</em>. Proof that quantization alone can't fit big video on tiny VRAM.</td></tr>
+<tr><td><b>Native INT8 GEMM<br/>for Consumer GPUs</b> (2026)<br/>(the Ideogram paper)</td><td>A fused <b>Triton INT8 kernel</b> that actually uses Ampere's INT8 tensor cores instead of secretly falling back to bf16.</td><td>This is <b>almost exactly our int8 finding</b> — independently published. Confirms our instincts were right, and that this ground is already claimed.</td></tr>
+</table>
+
+<div class="callout warn"><span class="t">The number that ends the "native 720p on 8GB" dream (honestly)</span>
+<p>QuantSparse quantized a 14B video model to 4-bit <em>and</em> threw away 85% of its attention — the most aggressive compression in the literature — and it <b>still needed 28 GB</b> of peak memory for a high-res clip. H3 is bigger (33B). The paper itself says 8GB is <b>"likely infeasible without aggressive resolution/frame reduction."</b> Translation: no known technique fits native 720p, 15-second video into 8 GB. The wall is real, and it's activations, not weights.</p></div>
+
+## Two of our own ideas — one survived, one died
+
+<div class="callout spec"><span class="t">DIED: "just use torch.compile to go faster"</span>
+<p>The Ideogram paper tried exactly this and reported: <b>"torch.compile graph-breaks at the custom [int8] linears — zero gain."</b> Our int8 path is custom kernels; torch.compile can't fuse through them. So the ~20% speedup I floated earlier <b>isn't real for us.</b> Good thing we read first instead of burning a day on it.</p></div>
+
+<div class="callout truth"><span class="t">SURVIVED: shrink the weights to free VRAM for a bit more resolution</span>
+<p>ViDiT-Q proves W4A8 is near-lossless on DiTs. Our DiT is 20 GB at int8; a good W4A8 quant is ~10-12 GB. That freed VRAM won't get us to native 720p (activations still block it), but it <em>could</em> let us nudge the native generation resolution up a notch (e.g. 576×320 → 704×384) — which directly sharpens the source and reduces the very artifacts we've been fighting. That's a <b>real, testable, honest win</b>, just a modest one.</p></div>
+
+## The honest verdict for our build
+
+```mermaid
+flowchart TD
+    Q["Can code get us to<br/>native 720p on 8GB?"] --> A["Quantize weights<br/>(W4A8, ViDiT-Q)"]
+    A --> B{"Does it fit?"}
+    B -->|"No — activations<br/>still ~28GB (QuantSparse)"| C["native 720p = blocked on 8GB"]
+    A --> D["But weights 20GB → ~11GB<br/>frees VRAM"]
+    D --> E["Push native res a notch<br/>576×320 → 704×384"]
+    E --> F["Sharper source →<br/>less boil / softer-eye / judder"]
+    style Q fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
+    style C fill:#241a1a,stroke:#ff6b6b,color:#ffdede
+    style F fill:#14342c,stroke:#5ee0c0,color:#eafff8
+```
+
+- **The dream (native 720p on 8GB):** not achievable with any published method. The activation/attention wall is fundamental to long video. Honest.
+- **The realistic win:** W4A8 weights → free ~8-9 GB → raise native resolution a notch → sharper source. Modest but real.
+- **The community contribution:** not a novel algorithm (that's claimed), but a genuinely useful <b>applied</b> thing — "MiniMax-H3 on 8GB: a measured memory recipe + activation-buffer chunk patch + W4A8 weights for higher native res," packaged as a ComfyUI node + a HF writeup. Nobody has published that for H3.
+
+<div class="callout spec"><span class="t">"We have spare RAM — can't we just up the DiT?" (a great question, honest no)</span>
+<p><b>RAM = warehouse</b> (huge, stores the model). <b>VRAM = workbench</b> (tiny 8 GB, where each layer actually computes). Streaming means one layer at a time moves from warehouse to workbench. A <em>bigger/higher-precision</em> DiT (bf16) has (a) <b>bigger parts</b> — 2× layer size — and (b) <b>bigger material on the bench</b> — 2× activations, and for video the activations already fill the 8 GB. So a bigger DiT needs a bigger <b>workbench (VRAM)</b>, not a bigger <b>warehouse (RAM)</b>. Spare RAM can't change what fits in VRAM to compute — which is exactly why we measured 30 GB of it sitting idle. On 8 GB the move isn't "up the DiT," it's <b>down-the-weights (W4A8), up-the-resolution.</b> "Up the DiT" is what the 24 GB card is for.</p></div>
+
+<div class="callout warn"><span class="t">Honesty rule for anything we publish</span>
+<p>The HF community will check our numbers. Every claim — bit-identical, VRAM freed, resolution gained — must be <b>re-measured on the box and reproducible</b>. We share what we can prove, and we cite the papers our work stands on. No overclaiming. Ever.</p></div>
+
+## Sources
+- ViDiT-Q — Efficient Quantization of Diffusion Transformers: <code>arxiv.org/abs/2406.02540</code>
+- QuantSparse — Compressing Video DiTs with Quantization + Attention Sparsity: <code>arxiv.org/html/2509.23681</code>
+- Realizing Native INT8 Compute for DiTs on Consumer GPUs: <code>arxiv.org/abs/2606.14598</code>
+
+Next: we pick the realistic win — get a W4A8 H3 quant loaded, re-measure the freed VRAM, and see how far up the native resolution can safely go. Every number measured, every step documented here.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

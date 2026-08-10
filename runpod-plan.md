@@ -1,3 +1,8 @@
+> # ⚠️ ARCHIVED — do not pursue (2026-08-10)
+> Decision: optimize the existing 8 GB box instead of renting cloud GPUs.
+> Renting wastes money/time when the constraint-first approach keeps working.
+> Kept only as reference. The goal is: make it work HERE.
+
 # RunPod H100 Plan — MiniMax-H3 "Full Quality" Deployment
 
 > **Status:** parked for later (next week). This is the recipe to run H3 *properly* on a rented H100, where our entire 8 GB bottleneck disappears. Written now so it's ready.

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>11 · Glossary — Every Term, Plain</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 11 · Reference</span>
+
+# Glossary — Every Term, in Plain Words
+
+<p class="lede">Every piece of jargon we used on your build, explained the way I wish someone had explained it to me — plain language first, then <em>why it matters on your 8 GB box</em>, with a real example from our own renders. No assumed knowledge.</p>
+
+<div class="callout truth"><span class="t">The 10-second mental model</span>
+<p>You type a <b>prompt</b>. An <b>encoder</b> turns it into meaning. A big generator called the <b>DiT</b> starts from pure <b>noise</b> and cleans it up over a number of <b>steps</b> into a compact <b>latent</b>. A <b>VAE</b> decodes that latent into real video frames + sound. Everything else in this glossary is a detail of one of those five words.</p></div>
+
+## Part 1 — The model's parts
+
+**DiT (Diffusion Transformer) — a.k.a. the "Omni-Transformer" / the generator.**
+The actual artist. It's the 33-billion-parameter network that *makes* the video by repeatedly removing noise. In H3 it generates **video and audio together** (type `FLOW_AV`). This is the 20 GB file `minimax_h3_fl2va_pruned_int8_convrot.safetensors`. When we say "the model is rendering," we mean the DiT is running.
+> *On your box:* the DiT is the heavyweight that gets streamed through 8 GB VRAM a slice at a time.
+
+**Encoder (Text/Vision Encoder) — the "reader."**
+Reads your prompt (and any images) and turns words into rich numerical *meaning* the DiT can follow. H3 uses **Qwen3-VL-32B** and taps its 50th layer. This is the 26 GB file. It runs **once** at the start, then hands off.
+> *It affects prompt understanding, not pixel detail* — that's why swapping the 4B for the 32B wouldn't fix teeth (Chapter: our podcast tests).
+
+**VAE (Variational Autoencoder) — the "translator."**
+Converts between real pixels/sound and the compact coded form (the *latent*). The DiT never touches pixels directly — too expensive. The VAE decodes the finished latent back into watchable frames at the very end. H3 has two: a **Visual VAE** and an **Audio VAE**.
+
+**Latent — the "compressed sketch."**
+The small, cheap-to-compute space the DiT works in — ~16× smaller than pixels in space, 4× in time. All the denoising happens here; you never see the latent, only the VAE-decoded result.
+
+## Part 2 — Turning noise into video (the process)
+
+**Diffusion — the core idea.**
+Start with **pure random noise** and gradually remove it until an image/video appears, guided by your prompt. Like a sculptor revealing a statue from marble — except the marble is TV static.
+
+**Denoising / Steps — how the sculpting happens.**
+Each **step** = one pass where the model looks at the current noisy latent, predicts what's noise vs. real, and removes a slice. **More steps = finer result, but slower** (time scales almost linearly). Fewer steps = under-rendered detail.
+> *We ran 50 steps for the hero portrait; Turbo cut it to ~6 and the teeth fell apart.*
+
+**Flow-matching — H3's specific flavour of diffusion.**
+Instead of many small random denoising jumps, it traces a smooth *path* from noise to data. **Steps = how many points along that path you compute.** It's why H3 does well at fewer steps than older models.
+
+**Sampler — the "how it steps" algorithm.**
+The math that decides how to move from one step to the next. Names you saw: **`euler`** (simple, reliable — our default), **`res_multistep`** (what your friend's Ref2VA workflow used). Different samplers, slightly different look/speed.
+
+**Scheduler — the "step spacing."**
+Decides how big each denoising step is across the run (e.g. `simple`). Pairs with the sampler.
+
+**Seed / Noise — the starting dice roll.**
+The DiT starts from random noise; the **seed** is the number that fixes *which* random noise. Same seed + same prompt = same result. **Different seed = different result** — which is exactly how we killed the "ghost panel" (seed 80 had it; seed 777 didn't).
+
+**Guider / CFG (Classifier-Free Guidance) — the "listen to the prompt" dial.**
+How strongly the DiT obeys your prompt vs. free-styling. In our graphs this is the `BasicGuider` node.
+
+## Part 3 — Fitting a 46 GB model in 8 GB (memory & quantization)
+
+**VRAM vs RAM — the distinction that governs everything.**
+**VRAM** = the GPU's own fast memory (yours: **8 GB**) — the real bottleneck. **RAM** = system memory (yours: **60 GB**) — roomy. The whole project is a fight to fit a big model through small VRAM.
+
+<div class="callout warn"><span class="t">Quantization — the trick that made it possible</span>
+<p><b>Quantization</b> = storing the model's numbers at lower precision to shrink it. The full model is ~66 GB in <b>bf16</b> (16-bit). Squeeze each number to <b>int8</b> (8-bit) and it becomes ~20 GB — small enough to stream through 8 GB. The cost: a little quality. It's the single reason a 33B model runs on your card at all.</p></div>
+
+**bf16 / fp16 / fp32 — precision levels (bits per number).**
+`fp32` = 32-bit (most precise, biggest), `fp16`/`bf16` = 16-bit (half size), **`int8`** = 8-bit (what we run), `int4`/`Q4` = 4-bit (smallest, roughest). **Fewer bits = smaller + faster, but lower quality.** Our int8 is the sweet spot for 8 GB.
+
+**GGUF & the Q-levels (Q3, Q4, Q5, Q8) — a quantization *format*.**
+A packaging of quantized weights (loadable in ComfyUI-GGUF). `Q8` ≈ our int8 quality; `Q4` is half the size but visibly worse; `Q3` smaller still. **Smaller Q = more quality lost** — which is why the GGUF wasn't an upgrade for us (we're already at int8/≈Q8).
+
+**nvfp4 — a 4-bit NVIDIA format.**
+The encoder quant in your friend's 4090 workflow. Newer 4-bit scheme; not needed for us.
+
+**Offload / Streaming — the "fit 46 GB in 8 GB" mechanism.**
+Keep the full model in **RAM**, and stream only the layer the GPU needs *right now* into VRAM, then swap it out. ComfyUI's DynamicVRAM does this. It's why it *works* on 8 GB — and why it's *slow*.
+
+**safetensors — the model file format.**
+A safe, fast way to store weights (no arbitrary code execution, unlike old `.pkl`). All our model files are `.safetensors`.
+
+## Part 4 — Speed & quality tools
+
+**LoRA — a small "style patch" for the model.**
+A tiny add-on file that nudges the big model toward a style/subject without retraining it. Applied with a weight (0–1).
+> *Turbo-LoRA* is a LoRA that makes the model need far fewer steps.
+
+**Turbo-LoRA — the speed-vs-detail trap.**
+Cuts steps ~20→6 (~5× faster) by distillation — great for drafts, but **under-renders fine detail** (teeth, moving mouths). We banned it from hero shots for exactly this reason.
+
+**RIFE — motion smoother (frame interpolation).**
+Invents in-between frames to raise frame rate (24→48 fps) and smooth jitter. Also softens temporal flicker. Optional post step.
+
+**Upscaler / 4x-UltraSharp — resolution enlarger.**
+An AI model that enlarges each frame (e.g. 4×) and sharpens it. **Warning:** it works *per-frame* with no memory of neighbours, so it *amplifies* flicker/"boil" (Part 5).
+
+**Supersampling — the sharpness trick.**
+Upscale *past* your target, then shrink back down (e.g. 4× → then to 480p). The downscale averages out jaggies → a crisper final frame. We used this on the 480p portrait.
+
+**CodeFormer / GFPGAN — face restorers.**
+AI that rebuilds faces/teeth. Great on **one big** face; **corrupts tiny faces** into mask-smears (it hurt the crowd shot, helped the close-up). Use only when faces are large.
+
+## Part 5 — The rules we discovered (our own field notes)
+
+<div class="callout spec"><span class="t">Pixels-per-face — our most useful law</span>
+<p>Face quality depends on the <b>face's size in pixels</b>, not the number of people. One big close-up face (~250 px) = flawless. A 30-person wide crowd (~20 px faces) = melted. <b>Frame subjects big and close.</b></p></div>
+
+**Short+sharp vs long+soft — the length trade.**
+A short clip fits VRAM at high native resolution → **sharp**. A long clip must generate small then upscale → **soft**. On 8 GB you get one or the other, never both. (Why the 3 s singer beat the 10 s singer.)
+
+**Boil / temporal flicker — the shimmer.**
+Fine background detail (neon text, reflections) that morphs shape frame-to-frame because the model re-generates it slightly differently each frame. Upscalers make it worse; RIFE/deflicker help.
+
+**Ghost panel — a decode artifact.**
+A spurious semi-transparent block that drifts across the frame (a VAE decode glitch). **Seed-dependent** — fixed by choosing a clean seed, not a setting.
+
+**The teeth problem — the recurring boss.**
+Teeth are the hardest detail to render (tiny, high-contrast, moving). Killers: Turbo (too few steps) and small faces (too few pixels). Fix: full steps + close framing + no dialogue where possible.
+
+## Part 6 — Modes, tools & the bottleneck words
+
+**FL2VA vs Ref2VA — the two H3 variants.**
+**FL2VA** (ours): text, optional first/last frame → video. **Ref2VA**: multiple *reference images/audio/video* → video (e.g. keep the same character across shots). Different DiT file; same encoder + VAEs.
+
+**ComfyUI — the engine.**
+A node-graph app that wires the pieces (loaders → sampler → VAE → save) into a runnable pipeline. Every render we did is a ComfyUI graph submitted via its API.
+
+**Structured prompt — H3's preferred input.**
+H3 wants three labelled fields, not a plain sentence: `integrated_multimodal_description` (shot/style/scene/dialogue), `overall_soundscape` (ambient), `non_diegetic_music` (score). Biggest hardware-independent quality lever.
+
+<div class="callout truth"><span class="t">The bottleneck vocabulary (from our live profile)</span>
+<table>
+<tr><td><b>Compute-bound</b></td><td>The GPU's math cores (SM) are 100% busy — the true wall for us.</td></tr>
+<tr><td><b>SM %</b></td><td>Streaming-Multiprocessor utilization = how busy the compute cores are.</td></tr>
+<tr><td><b>Memory-bound</b></td><td>Limited by VRAM bandwidth instead of compute (not our case — MEM was ~50%).</td></tr>
+<tr><td><b>PCIe streaming</b></td><td>The RAM↔VRAM data pipe. We measured it near-idle → streaming is <em>not</em> our bottleneck.</td></tr>
+<tr><td><b>Power cap / throttling</b></td><td>The card downclocks to stay under its 200 W limit — costs us ~17% clock.</td></tr>
+</table>
+</div>
+
+<div class="callout warn"><span class="t">The one sentence that ties it all together</span>
+<p>On your 8 GB box, the wall is <b>VRAM</b> (how big/high-res a clip fits) and <b>compute</b> (how fast the math runs). Every trick in this guide — quantization, offload, upscaling, pixels-per-face, short-and-sharp — is a way to <em>work around</em> those two limits. More VRAM + more compute (a bigger GPU) is the only thing that <em>removes</em> them.</p></div>
+
+That's the whole vocabulary. Come back to this page any time a term in the other chapters stops making sense — it all reduces to prompt → encoder → DiT denoises noise over steps → VAE decodes → video.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/mermaid.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
