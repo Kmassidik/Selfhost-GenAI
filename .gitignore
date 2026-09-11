@@ -1,0 +1,35 @@
+# ---- never commit: huge, downloadable, or regenerable ----
+models/
+loras/
+upscale/
+outputs/
+state/
+logs/
+_archive/
+runtime/h3-consumer-bench/h3-lab/
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.mp4
+*.mov
+*.wav
+*.log
+# ---- envs and caches ----
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+# ---- secrets ----
+*.token
+.hf_token
+id_*
+*.pem
+.env
+secrets*
+# ---- os ----
+.DS_Store
+
+# third-party engine - cloned from upstream, not ours to redistribute
+runtime/h3-consumer-bench/
