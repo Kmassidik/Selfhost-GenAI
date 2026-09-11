@@ -17,3 +17,19 @@ id_*
 *.pem
 .env
 secrets*
+
+# added before publishing — regenerable artifacts, never source
+*.pt          # latent dumps + phase-A embeds (can be 69 MB each)
+*.wav          # rendered audio
+h3-lab/          # render outputs + embeds
+outputs/          # finished renders
+
+# box artefacts - never source, always regenerable
+models/           # 205 GB of weights - re-download from Hugging Face
+loras/            # adapter weights
+upscale/          # realesrgan / rife binaries and their models
+state/            # latent dumps - regenerable, and huge
+logs/             # run logs
+*.log             # stray run logs
+_archive/         # superseded material
+h3-lab/embeds/    # phase-A embeddings - regenerate with h3_encode_local.py
