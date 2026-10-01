@@ -1,0 +1,57 @@
+{
+  "id": "qwen-image-2.1-uc",
+  "enabled": false,
+  "name": "Qwen-Image 2.1 (Uncensored)",
+  "engine": "sdcpp",
+  "blurb": "Alibaba Qwen-Image 2.1, ~20B, GGUF Q8. Text to image on one 8 GB card.",
+  "run": {
+    "diffusion_model": "models/diffusion_models/qwen-image-2.1-UC-Q8_0.gguf",
+    "vae": "models/vae/qwen_image_2.1_vae_bf16.safetensors",
+    "llm": "models/text_encoders/Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+    "args": [
+      "--diffusion-model",
+      "{diffusion_model}",
+      "--vae",
+      "{vae}",
+      "--llm",
+      "{llm}",
+      "-p",
+      "{prompt}",
+      "--cfg-scale",
+      "{cfg}",
+      "--steps",
+      "{steps}",
+      "-W",
+      "{width}",
+      "-H",
+      "{height}",
+      "--seed",
+      "{seed}",
+      "--sampling-method",
+      "euler",
+      "--offload-to-cpu",
+      "-o",
+      "{out}"
+    ],
+    "negative_arg": [
+      "-n",
+      "{negative}"
+    ]
+  },
+  "defaults": {
+    "width": 1024,
+    "height": 1024,
+    "steps": 20,
+    "cfg": 6.0
+  },
+  "limits": {
+    "min_side": 256,
+    "max_side": 1536,
+    "max_steps": 60
+  },
+  "device": 1,
+  "notes": [
+    "sd.cpp (leejet) native, no ComfyUI. --offload-to-cpu keeps Q8 on an 8 GB card via 125 GB RAM.",
+    "device 1 \u2014 GPU 0 is the audio service, never touch it."
+  ]
+}

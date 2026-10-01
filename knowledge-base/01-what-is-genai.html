@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>01 · What Is Generative AI</title>
+<meta name="description" content="Generative AI: what it is, how it differs from earlier AI, the main families of generative model, and how diffusion turns random noise into video and sound.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
@@ -12,65 +14,230 @@
 
 # What Is Generative AI
 
-<p class="lede">Before touching hardware, it helps to know what kind of thing we're actually running. A video model isn't a database of clips — it's a machine that <em>predicts</em>, and we lean on that prediction to conjure something new.</p>
+<p class="lede"><b>Generative AI</b> is a class of machine-learning system that <b>produces new data</b> — text, images, audio, video, code — rather than analysing data that already exists. Given a description, it outputs an example matching that description which did not exist before and is not stored anywhere inside it.</p>
 
-## From "recognize" to "generate"
+That distinction is not marketing. It is a real difference in what the system computes, and every practical constraint in this guide follows from it: why a render takes hours, why fifteen seconds costs so much more than five, why the same prompt never gives the same answer twice.
 
-Older AI mostly **classified**: shown a photo, it answered "cat." Generative AI runs that in reverse — shown the word "cat," it **produces** a plausible new picture of one. Same underlying machinery (a neural network), pointed the other way.
+## Generative vs. discriminative
 
-A neural network is just a very large math function with millions-to-billions of tunable numbers called **parameters** (also "weights"). During *training*, those numbers are nudged over and over until the function turns inputs into good outputs. Once trained, running it is called *inference* — that's what your box does. **We are only doing inference here; we did not train anything.**
+Machine-learning models divide roughly into two kinds.
 
-<div class="callout spec"><span class="t">Scale, in concrete terms</span>
-<p>MiniMax-H3's core has <b>33 billion</b> parameters. Each is a number that must be stored and multiplied. That single fact is why we needed 46 GB of files and an offload trick — <a href="02-your-hardware.html">Chapter 2</a> — to run it on 8 GB.</p></div>
+A **discriminative** model learns the boundaries between things. Shown a photograph, it answers *cat* or *dog*. Formally it estimates the probability of a **label given the data** — how likely is "cat", given these pixels? Spam filters, medical image classifiers and face recognition are all discriminative.
 
-## The transformer: the shape of modern AI
+A **generative** model learns what the data itself looks like. Rather than separating cats from dogs, it models the distribution of cat pictures well enough to draw a new one. Formally it estimates the probability of **the data itself**, usually conditioned on something — how likely is this arrangement of pixels, given the words "a cat on a windowsill"?
 
-Almost every model you'll hear about — ChatGPT, Llama, and the text-understanding part of H3 — is a **transformer**. Its superpower is **attention**: when processing one piece of input, it can "look at" every other piece and weigh how relevant each is. That's how a model keeps track of context across a whole sentence, image, or video.
+<div class="callout spec"><span class="t">The distinction in one line</span>
+<p><b>Discriminative:</b> given data, produce a label. &nbsp;·&nbsp; <b>Generative:</b> given a label, produce data.</p>
+<p>The same underlying machinery — a neural network — serves both. What changes is what it is trained to predict.</p></div>
 
-One thing to file away now, because it bites us later:
+Because a generative model must represent the whole space of plausible outputs rather than just the line dividing categories, it is a substantially harder problem. That is much of why generative models are so much larger, and so much slower to run, than the classifiers that came before them.
 
-<div class="callout warn"><span class="t">Attention cost grows with the square of length</span>
-<p>If a clip is twice as long, attention does roughly <b>four times</b> the work; ten times as long, ~<b>100×</b>. This is exactly why a 3-second clip is doable on your card but 30 seconds is a different universe. Keep this in your back pocket.</p></div>
+## How the field arrived here
 
-## Diffusion: how you make a picture out of noise
+Generating content is not new. Doing it *well* is.
 
-Language models predict the next word. **Image and video models use a different idea called diffusion**, and H3 is a diffusion model. The concept is beautiful and worth really understanding:
+- **Rule-based systems** (mid-20th century onward) produced text and music from hand-written grammars. Output was correct and lifeless, because a person had to author every rule.
+- **Statistical models** such as n-grams and Markov chains learned patterns from data — the ancestors of predictive text. They captured local structure but forgot context almost immediately.
+- **Deep learning** (2010s) replaced hand-designed features with learned ones. Recurrent networks could generate sequences but struggled to hold long-range context.
+- **Generative adversarial networks** (2014) trained two networks against each other — one producing images, one judging them. Sharp results, but notoriously unstable to train and hard to steer with text.
+- **The transformer** (2017) introduced attention, letting a model relate every part of its input to every other part directly. It is the backbone of essentially every modern large model.
+- **Diffusion models** (reaching practical image quality around 2020–2022) displaced GANs for images and video by generating through gradual refinement rather than one forward pass.
 
-1. **Training:** take a real image, add a tiny bit of random static, repeat until it's pure noise. Teach the network to undo one step — "given this slightly noisy image, guess what it looked like one step cleaner."
-2. **Generating:** start from *pure random noise* and ask the trained network to clean it up, step by step, steered by your text prompt. After enough steps, a coherent image emerges that matches the prompt.
+MiniMax-H3 — the model this guide runs — is a diffusion model with a transformer inside it, which is the dominant shape of modern video generation.
 
-Each cleanup pass is a **step** (you saw `20 steps` in our render). More steps = more refinement = more time.
+## The main families of generative model
 
-```mermaid
-flowchart LR
-    N["Pure noise<br/>(random)"] -->|step 1| S1[less noisy]
-    S1 -->|step 2| S2[clearer]
-    S2 -->|"... × 20"| S3[coherent frames]
-    P["Your prompt<br/>'ocean at sunset'"] -.steers every step.-> S1
-    P -.-> S2
-    P -.-> S3
-    S3 --> V[[Finished clip]]
-    style N fill:#241a1a,stroke:#ff6b6b,color:#ffdede
-    style V fill:#14342c,stroke:#5ee0c0,color:#eafff8
-    style P fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-```
+Different output types have converged on different mechanisms.
+
+<div class="callout spec"><span class="t">Four approaches, and what each is good at</span>
+<table>
+<tr><th>Family</th><th>How it generates</th><th>Typically used for</th></tr>
+<tr><td><b>Autoregressive</b></td><td>Predicts the next token, then the next, conditioned on everything before it</td><td>Text, code, some audio</td></tr>
+<tr><td><b>Diffusion</b></td><td>Starts from random noise and refines it over many passes</td><td>Images, video, audio</td></tr>
+<tr><td><b>GAN</b></td><td>A generator and a critic trained in opposition</td><td>Images; largely superseded</td></tr>
+<tr><td><b>VAE</b></td><td>Compresses data to a latent code and reconstructs from it</td><td>Rarely alone — used <em>inside</em> diffusion systems</td></tr>
+</table></div>
+
+Those last two rows matter here. H3 uses a **VAE as a component**, not as its generator: the diffusion process works on compressed latents, and the VAE expands them back into pixels at the end. More on that below.
+
+## Training and inference are different activities
+
+Every generative model has two distinct phases, and confusing them causes most misunderstandings about what hardware you need.
+
+**Training** adjusts the model's **parameters** — the millions or billions of tunable numbers, also called *weights*, that define the function. The model is shown enormous quantities of data and its parameters are nudged repeatedly until its outputs improve. This takes datacentre-scale compute, happens once, and costs millions.
+
+**Inference** is running the finished function. The parameters never change; they are read, multiplied against your input, and produce an output.
+
+<div class="callout truth"><span class="t">Everything in this guide is inference</span>
+<p>We never trained anything, and on this hardware we never could. Every chapter here is about <em>running</em> a model somebody else trained — which is a genuinely hard and quite separate problem, and the one a person with consumer hardware can actually attack.</p></div>
+
+<div class="callout spec"><span class="t">Scale, concretely</span>
+<p>MiniMax-H3's core has <b>33 billion</b> parameters. Each is a number that must be stored somewhere and multiplied on every step. That single fact is why its weights fill roughly <b>46 GB</b> on disk, and why running them on an 8 GB graphics card needs the technique in <a href="02-your-hardware.html">Chapter 2</a>.</p></div>
+
+## The transformer, and the property that decides everything
+
+Nearly every large model you have heard of — and the text-understanding half of H3 — is a **transformer**. Its central mechanism is **attention**: when processing one element of the input, the model looks at every other element and weighs how relevant each is. That is how context is carried across a sentence, an image, or a sequence of video frames.
+
+Attention's power comes from comparing everything with everything. So does its cost. Double the sequence length and there are four times as many pairs to compare; ten times the length, a hundred times the work. Cost grows with the **square** of length.
+
+<div class="callout warn"><span class="t">Not abstract — this is the wall the whole project runs into</span>
+<p>Measured on our own hardware. Same scene, same quality settings, native 1280×704:</p>
+<table>
+<tr><th>Clip length</th><th>Render time</th></tr>
+<tr><td>5 seconds</td><td><b>55 minutes</b></td></tr>
+<tr><td>15 seconds</td><td><b>44 hours</b></td></tr>
+</table>
+<p>Three times the length, roughly <b>48×</b> the time — steeper even than the square, because fitting the longer sequence also forced a slower way of splitting work across cards (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>). Every cost in <a href="47-the-scorecard.html">the scorecard</a> traces back to this one property.</p></div>
+
+## Diffusion: making a picture out of noise
+
+Language models predict the next word. Image and video models generally use **diffusion**, and H3 is a diffusion model. It is worth understanding properly, because it is what the GPU spends hours doing.
+
+1. **Training.** Take a real image. Add a little random static. Repeat until nothing remains but noise. Then teach the network to undo *one* step — *given this slightly noisy picture, what did it look like one step cleaner?*
+2. **Generating.** Start from pure random static and ask that trained network to clean it up, over and over, steered at every stage by the prompt.
+
+<div class="callout truth"><span class="t">Why this produces something new rather than a copy</span>
+<p>The obvious objection: if the network only learned to remove noise, shouldn't it just rebuild the picture the noise was added to? No — because <b>you start from different noise</b>. The network memorised no particular image. What it learned is a <em>direction</em>: from anywhere in the space of noisy pictures, which way is more plausible? Start from static it has never seen, follow that direction far enough, and you arrive somewhere plausible that never existed.</p>
+<p>That is also exactly why a fixed <code>seed</code> makes a result repeatable. Same starting static, same path, same destination.</p></div>
+
+### Why not do it in one jump?
+
+If the network can guess a cleaner image, why not ask for the finished picture immediately? Because that guess would be bad. From pure static, the most accurate single answer is a vague average of everything plausible — a blur. Each small step is a *modest* correction the network can make accurately, and those corrections compound. Many small confident moves beat one enormous uncertain one.
+
+That is what a **step** is, and it is the main quality dial in this entire guide.
+
+### It does not work on pixels
+
+One detail changes everything downstream: during those steps the model never touches pixels. It works on a compressed grid called a **latent**.
+
+A 1280×704 frame is about 2.7 million numbers. Its latent is an **80×44 grid** — roughly **32× fewer numbers**. The whole denoising loop runs inside that small space, and only at the very end does a separate network, the **decoder** (a VAE), expand the finished latent back into real pixels.
+
+<svg viewBox="0 0 760 272" width="100%" style="max-width:920px" role="img" aria-label="Diffusion pipeline: pure noise is cleaned step by step in latent space, steered by the prompt, into a clean latent; the decoder then expands that latent into the finished clip.">
+  <defs>
+    <marker id="g1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="g2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+    <marker id="g3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="12" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">LATENT SPACE — 80 × 44, NOT PIXELS</text>
+  <rect x="2" y="26" width="156" height="56" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="80" y="49" text-anchor="middle" fill="#ffdede" font-size="13" font-family="Inter,sans-serif">Pure noise</text>
+  <text x="80" y="66" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">random static</text>
+  <rect x="200" y="26" width="156" height="56" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="278" y="59" text-anchor="middle" fill="#aab4c5" font-size="13" font-family="Inter,sans-serif">less noisy</text>
+  <rect x="398" y="26" width="156" height="56" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="476" y="59" text-anchor="middle" fill="#aab4c5" font-size="13" font-family="Inter,sans-serif">clearer</text>
+  <rect x="596" y="26" width="162" height="56" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="677" y="49" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">clean latent</text>
+  <text x="677" y="66" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">still not a picture</text>
+  <line x1="160" y1="54" x2="196" y2="54" stroke="#6f7b8f" marker-end="url(#g1)"/>
+  <line x1="358" y1="54" x2="394" y2="54" stroke="#6f7b8f" marker-end="url(#g1)"/>
+  <line x1="556" y1="54" x2="592" y2="54" stroke="#6f7b8f" marker-end="url(#g1)"/>
+  <text x="178" y="20" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">step 1</text>
+  <text x="376" y="20" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">step 2</text>
+  <text x="574" y="20" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">… × 23</text>
+  <rect x="150" y="128" width="256" height="44" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="278" y="147" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">the prompt</text>
+  <text x="278" y="163" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">steers every single step</text>
+  <path d="M240,128 L278,88" stroke="#7aa2ff" stroke-dasharray="3 3" marker-end="url(#g2)"/>
+  <path d="M330,128 L462,88" stroke="#7aa2ff" stroke-dasharray="3 3" marker-end="url(#g2)"/>
+  <line x1="677" y1="86" x2="677" y2="126" stroke="#5ee0c0" marker-end="url(#g3)"/>
+  <rect x="596" y="130" width="162" height="48" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="677" y="150" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">decoder (VAE)</text>
+  <text x="677" y="166" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">latent → pixels</text>
+  <line x1="677" y1="182" x2="677" y2="216" stroke="#5ee0c0" marker-end="url(#g3)"/>
+  <rect x="596" y="220" width="162" height="48" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="677" y="249" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">finished clip</text>
+</svg>
+
+### Walking one render, start to finish
+
+The diagram shows the shape. Here is what actually happens, with real numbers from our own renders.
+
+**Before step 1, three things have to exist.**
+
+1. **The prompt becomes numbers.** A separate 32-billion-parameter encoder reads your text once and turns it into a block of numbers representing its meaning. This happens a single time, before any denoising, and is then reused by every step.
+2. **A latent is filled with random numbers.** Not an image — a grid. On one of our 5-second renders the latent was literally shaped `(1, 24, 37, 30, 52)`: one clip, 24 channels, 37 latent frames, 30 tall, 52 wide. That is about **1.4 million random numbers** drawn from a bell curve. This is the "pure noise" box.
+3. **A schedule is chosen.** If you asked for 23 steps, the scheduler lays out 23 noise levels, from "completely noisy" down to "clean", and decides how far to move at each one.
+
+**Step 1 — the part worth understanding**
+
+The model receives three inputs: the current noisy latent, *which* noise level it is at, and the prompt numbers. It pushes them through **50 transformer blocks** in sequence.
+
+What comes out is not a picture. It is a **prediction of which part of the current latent is noise** — a grid the same shape as the input, saying "this much of what you gave me is static, not signal."
+
+The scheduler then does the actual update. It subtracts a *fraction* of that predicted noise. Not all of it, deliberately — a partial move is more reliable than a full jump.
+
+<div class="callout spec"><span class="t">What changed after one step</span>
+<p>The latent has exactly the same shape — <code>(1, 24, 37, 30, 52)</code>, still 1.4 million numbers. Nothing got bigger, nothing became an image. The numbers are simply <b>slightly less random</b> and slightly more like a video that matches the prompt. That is the entire operation, and it is all a step ever does.</p></div>
+
+**Steps 2 through 23 — the same thing, getting easier**
+
+Every step is identical in structure: look at the current latent, predict the noise, subtract a fraction. What changes is the difficulty. At step 1 the model is guessing from almost pure static, so its prediction is vague. By step 15 there is real structure to work with, so the prediction sharpens. This is why early steps set composition — where things are, roughly what is happening — and late steps set detail: edges, texture, the glint on a sword.
+
+It is also why **too few steps gives mud rather than a blurry-but-correct picture**. Stop at 3 and you have not just an unfinished image; you have one whose composition was never settled.
+
+**After the last step**
+
+The loop ends. The latent is now "clean" — meaning the model believes there is no noise left to remove. Its shape has not changed once during the entire process.
+
+**It is still not a picture.** Nothing you could open in a video player. Those 1.4 million numbers are a compressed *description* of a video.
+
+**Decode — the separate stage**
+
+The finished latent goes to the decoder (the VAE), which expands it:
+
+<table>
+<tr><th>Stage</th><th>What exists</th><th>Size</th></tr>
+<tr><td>Before decode</td><td>clean latent</td><td>80 × 44 grid, 24 channels</td></tr>
+<tr><td>After decode</td><td>actual pixels</td><td>1280 × 704, 3 colour channels</td></tr>
+</table>
+
+The decoder expands each dimension roughly 16-fold spatially and about 4-fold in time, turning ~100 latent frames into 345 real ones. Only now do numbers become colours. Those frames get written to an `.mp4`, the audio latents go through their own decoder to become a `.wav`, and the render is done.
+
+<div class="callout truth"><span class="t">The whole thing in one paragraph</span>
+<p>Fill a small grid with random numbers. Twenty-three times in a row, ask a 33-billion-parameter network "which of these numbers are noise?" and remove a fraction of what it points at, keeping the prompt in view the whole time. When it says there is no noise left, hand the grid to a second network that expands it into pixels. That is the render. Everything else in this guide — the offloading, the quantization, the splitting across three cards — exists only to make those 23 passes physically fit on hardware too small for them.</p></div>
+
+That separation matters more than it sounds. The slow, expensive part is the loop on the left; the decoder runs once at the end. It is also a genuine failure point — a bug in that final stage once destroyed six hours of completed denoising, because the two stages are separate and only one had been verified ([ch.46](46-the-first-15-seconds.html)).
+
+### How many steps?
+
+Not a property of the model — a property of the **scene**.
+
+<div class="callout spec"><span class="t">Measured on this build</span>
+<table>
+<tr><th>Content</th><th>Steps needed</th></tr>
+<tr><td>Tight close-up portrait</td><td><b>4</b></td></tr>
+<tr><td>Character, mid-shot</td><td><b>23</b></td></tr>
+<tr><td>Wide vista, small distant subject</td><td><b>49</b></td></tr>
+</table>
+<p>Fine detail everywhere plus a small subject means more steps. We learned this by rendering a wide landscape at 3 steps and getting mud — five and a half hours for an unusable clip.</p></div>
 
 ## Video is images with a time axis — plus sound
 
-A video model does the same denoising, but the thing it cleans up is a **stack of frames** that must stay consistent over time (the puppy in frame 2 must match frame 1). H3 goes one step further: it denoises **video and audio together**, so the sound lines up with the picture. That's why your clips came out with a real 32 kHz stereo track, not silent.
+A video model denoises the same way, except the thing being cleaned is a **stack of frames** that must stay consistent through time: the puppy in frame 2 has to match frame 1. That temporal consistency is the hard part, and it is why video models are so much heavier than image models — attention has to relate elements across space *and* time.
 
-<div class="callout truth"><span class="t">What this means for you</span>
-<p>You are not "downloading videos." You are running a predictor that paints frames out of noise, guided by your words, and it invents the audio to match. Every clip is brand new. That's also why results vary run to run — the starting noise is random (we set a <code>seed</code> to make it repeatable).</p></div>
+H3 goes further and denoises **video and audio together**, so the soundtrack is generated jointly with the picture rather than added afterwards. That is why these clips arrive with a real 32 kHz stereo track that matches what is on screen.
+
+## What generative models cannot do
+
+Being clear about limits is as useful as describing capabilities.
+
+- **They do not retrieve.** There is no library of clips inside. Nothing is looked up.
+- **They have no notion of truth.** The objective is plausibility. A confident wrong output is not a malfunction — it is the system working as designed.
+- **They cannot reliably render text.** No current video diffusion model spells dependably; letters come out as plausible-looking marks.
+- **They do not guarantee consistency between runs.** A character rendered twice will drift, which is why long-form work needs extra technique ([ch.33](33-long-video-small-card.html)).
+- **They are bounded by their training data.** Genuinely novel concepts outside that distribution get approximated, not invented.
 
 ## The vocabulary you now own
 
 <div class="callout spec"><span class="t">Terms used everywhere from here on</span>
-<p><span class="badge">parameters / weights</span><span class="badge">inference</span><span class="badge">transformer</span><span class="badge">attention</span><span class="badge">diffusion</span><span class="badge">steps</span><span class="badge">prompt</span><span class="badge">seed</span><span class="badge">latent</span> — if these feel solid, you're ready for the hardware.</p></div>
+<p><span class="badge">parameters / weights</span><span class="badge">training</span><span class="badge">inference</span><span class="badge">discriminative</span><span class="badge">generative</span><span class="badge">transformer</span><span class="badge">attention</span><span class="badge">diffusion</span><span class="badge">steps</span><span class="badge">prompt</span><span class="badge">seed</span><span class="badge">latent</span><span class="badge">VAE / decoder</span></p>
+<p>If those feel solid, the hardware will make sense.</p></div>
 
-Next we get physical: what the GPU, VRAM, and RAM each do, and the single clever idea that let a 46 GB model run on your 8 GB card.
+Next: what the GPU, VRAM and system RAM each actually do — and the one idea that lets 46 GB of weights run on an 8 GB card.
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

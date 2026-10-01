@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>23 · The Math, From Scratch</title>
+<meta name="description" content="Every symbol in the render pipeline named and said aloud, calculus built from zero, and each formula worked through with real numbers — then checked against five measured renders.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 23 · Technical Deep-Dive</span>
+
+# The Math, From Scratch
+
+<p class="lede">The mathematics of a video render is five equations, none of which is harder than arithmetic once every symbol has been named — and this chapter names all of them, builds the calculus behind $d\mathbf{x}/dt$ from zero, and works each formula through with real numbers.</p>
+
+Start with the smallest possible piece of evidence for that claim. Here is a complete denoise step, applied to one number out of the roughly 1.4 million in a five-second latent:
+
+$$3.0 \;-\; 0.1 \times 11.0 \;=\; 1.9$$
+
+That is it. A subtraction. Fifty transformer blocks and 143 seconds of a graphics card's life go into computing the `11.0`, and every remaining hour of a render goes into doing that same subtraction to every number in the grid, twenty-three times over. The hard part of this subject is not the algebra. It is knowing what each symbol stands for, and that is entirely learnable in one sitting.
+
+<div class="callout truth"><span class="t">The mindset</span>
+<p>An equation is a <b>very short sentence</b> written in a compressed alphabet. Once each symbol has a spoken name, the sentence can be read out loud in plain English — and every equation below is then <b>worked with real numbers</b>, because plugging values in is how mathematics stops being intimidating and starts being arithmetic.</p>
+<p>Nothing here assumes prior mathematics. <a href="22-pipeline-in-detail.html">Chapter 22</a> showed where each equation sits in the pipeline; this one takes them apart.</p></div>
+
+## Part 1 · The symbol dictionary
+
+Read the middle column out loud. Half of mathematical intimidation is not knowing how to pronounce something.
+
+<table>
+<tr><th>Symbol</th><th>Said aloud</th><th>What it means</th><th>Tiny example</th></tr>
+<tr><td><b>x</b></td><td>"x"</td><td>a variable — a number, or a whole grid of numbers. Here, the video-in-progress.</td><td>x = 3</td></tr>
+<tr><td><b>x<sub>t</sub></b></td><td>"x at t"</td><td>the value of x <em>at moment t</em>. A subscript labels <em>which</em> one, it is not a multiplication.</td><td>x₀ = clean, x₁ = noise</td></tr>
+<tr><td><b>θ</b></td><td>"theta"</td><td>the model's <b>weights</b> — the billions of learned numbers. A model "named θ".</td><td>v<sub>θ</sub> = the velocity θ predicts</td></tr>
+<tr><td><b>t</b></td><td>"t"</td><td>time, here doubling as noise level: 1 is pure noise, 0 is clean.</td><td>t = 0.5 is halfway</td></tr>
+<tr><td><b>c</b></td><td>"c"</td><td>the conditioning — the prompt after the encoder has turned it into numbers.</td><td>c = the meaning of "a singer"</td></tr>
+<tr><td><b>Δ</b>, Δt</td><td>"delta", "delta t"</td><td>a <b>small change</b> in something. Δt is a tiny step of t.</td><td>Δt = 0.02</td></tr>
+<tr><td><b>≈</b></td><td>"approximately equals"</td><td>close, not exact.</td><td>π ≈ 3.14</td></tr>
+<tr><td><b>∼</b></td><td>"is drawn from"</td><td>randomly sampled from a distribution.</td><td>x ∼ 𝒩(0,1)</td></tr>
+<tr><td><b>𝒩(0, I)</b></td><td>"normal, mean zero"</td><td>the bell curve — random numbers clustered around 0. The <b>I</b> means "independently, in every dimension".</td><td>most samples near 0</td></tr>
+<tr><td><b>∈</b></td><td>"is in", "lives in"</td><td>is a member of a set.</td><td>x ∈ ℝ</td></tr>
+<tr><td><b>ℝ</b>, ℝ<sup>d</sup></td><td>"the reals", "R-d"</td><td>ordinary numbers; ℝ<sup>d</sup> is a list of d of them.</td><td>c ∈ ℝ<sup>5120</sup></td></tr>
+<tr><td><b>[L, d]</b></td><td>"shape L by d"</td><td>a grid's size: L rows, d columns.</td><td>[4, 5120]</td></tr>
+<tr><td><b>Σ</b></td><td>"sum", "sigma"</td><td>add a list of things up.</td><td>Σ[1,2,3] = 6</td></tr>
+<tr><td><b>𝔼</b></td><td>"expectation", "the average of"</td><td>the average value over many random draws.</td><td>𝔼 of a fair die = 3.5</td></tr>
+<tr><td><b>‖·‖²</b></td><td>"norm squared"</td><td>square every element and add them up — a measure of how big a mistake is.</td><td>‖[3,4]‖² = 25</td></tr>
+<tr><td><b>⊙</b></td><td>"elementwise times"</td><td>multiply two grids slot by slot. Not matrix multiplication.</td><td>[2,3] ⊙ [4,5] = [8,15]</td></tr>
+<tr><td><b>·</b> or juxtaposition</td><td>"times", "matmul"</td><td>multiply; for grids, matrix multiply.</td><td>QKᵀ</td></tr>
+<tr><td><b>ᵀ</b></td><td>"transpose"</td><td>flip a grid's rows and columns.</td><td>[[1,2]]ᵀ = [[1],[2]]</td></tr>
+<tr><td><b>√</b></td><td>"square root"</td><td>the number that squares to this one.</td><td>√9 = 3</td></tr>
+<tr><td><b>e</b>, e<sup>z</sup></td><td>"e to the z"</td><td>the exponential — turns any number into a positive one, and turns differences into ratios.</td><td>e² ≈ 7.39</td></tr>
+<tr><td><b>⌊ ⌉</b></td><td>"round"</td><td>round to the nearest whole number.</td><td>⌊204.3⌉ = 204</td></tr>
+<tr><td><b>𝒪(·)</b></td><td>"order of", "big-O"</td><td>how a cost grows as something gets bigger, ignoring constants.</td><td>𝒪(N²) = quadruple N, sixteen times the cost</td></tr>
+<tr><td><b>softmax</b></td><td>"softmax"</td><td>turn a list of scores into positive weights that <b>add up to 1</b>.</td><td>worked in Part 5-B</td></tr>
+<tr><td><b>v<sub>θ</sub>(x<sub>t</sub>, t, c)</b></td><td>"v-theta of x-t, t, c"</td><td>a <b>function</b>: hand the model θ the current latent, the noise level, and the prompt; it returns a velocity.</td><td>the transformer's entire job</td></tr>
+</table>
+
+<div class="callout spec"><span class="t">How to read any expression of the form name(inputs)</span>
+<p>Anything written as <b>name(inputs)</b> is a <b>machine</b>: feed it whatever sits inside the parentheses, and it hands back an answer. So <code>v_θ(x_t, t, c)</code> reads: <em>"the model θ, given the current noisy latent, given how noisy it is, and given the prompt, returns a velocity."</em></p>
+<p>That is a twenty-billion-parameter transformer, fifty blocks deep, compressed into eleven characters. The parentheses hide the whole machine — which is exactly what notation is for.</p></div>
+
+## Part 2 · Shapes, dot products, and what a matrix multiply is
+
+Two ideas underpin everything above and are almost never explained: what a **shape** describes, and what it means to multiply two grids.
+
+### Reading a shape
+
+A shape is a set of nesting instructions. Take the real one from a crashed render, `(1, 24, 37, 30, 52)`, and read it outside-in:
+
+<table>
+<tr><th>Number</th><th>Means</th></tr>
+<tr><td>1</td><td>one clip in this batch — a single video, not a stack of them</td></tr>
+<tr><td>24</td><td>each position carries <b>24 channels</b> — not red, green, blue, but 24 learned quantities</td></tr>
+<tr><td>37</td><td>37 latent frames along the time axis</td></tr>
+<tr><td>30</td><td>30 cells tall</td></tr>
+<tr><td>52</td><td>52 cells wide</td></tr>
+</table>
+
+Multiplying them out gives $1 \times 24 \times 37 \times 30 \times 52 = 1{,}385{,}280$ — the "about 1.4 million numbers" quoted everywhere in this guide. Nothing mystical is happening: a tensor is a list of lists of lists, and the shape says how deep the nesting goes and how long each level is.
+
+The single most useful habit when reading model code is to track shapes rather than values. A shape mismatch is the most common failure mode there is, and the [848-pixel trap](22-pipeline-in-detail.html) — where a width gives an odd number of latent cells and 2×2 patching becomes impossible — is exactly a shape error wearing a disguise.
+
+### The dot product — similarity as arithmetic
+
+Take two lists of the same length and multiply them slot by slot, then add the results up. That is a **dot product**:
+
+$$[1,\;3,\;-2] \cdot [4,\;0,\;5] = (1)(4) + (3)(0) + (-2)(5) = 4 + 0 - 10 = \mathbf{-6}$$
+
+Why anyone cares: the dot product is large and positive when two lists have big values in the *same* places, near zero when their patterns are unrelated, and negative when they oppose each other. It is, in one operation, a **measure of agreement**.
+
+That is the whole reason attention works. When a query vector meets a key vector, the dot product between them asks: *do these two tokens have matching patterns?* A big answer means "yes, look here". The entire mechanism of a transformer paying attention to the right word is this multiply-and-add, run over every pair.
+
+### Matrix multiply — many dot products at once
+
+A matrix multiply is nothing more than a full table of dot products. Every row of the left grid meets every column of the right grid, and the answer goes in the corresponding cell:
+
+$$\begin{bmatrix}1 & 2\\ 3 & 4\end{bmatrix}\begin{bmatrix}5 & 6\\ 7 & 8\end{bmatrix} = \begin{bmatrix}1(5)+2(7) & 1(6)+2(8)\\ 3(5)+4(7) & 3(6)+4(8)\end{bmatrix} = \begin{bmatrix}19 & 22\\ 43 & 50\end{bmatrix}$$
+
+Check the top-left cell by hand: 5 + 14 = 19. Every entry is one dot product, and there is no other content to the operation.
+
+<div class="callout truth"><span class="t">Why this one operation is the whole story</span>
+<p>$QK^{\top}$ in the attention formula is a matrix multiply, so it produces a table with <b>one entry for every pair of tokens</b>. That is where $\mathcal{O}(N^2)$ comes from — it is not a metaphor for complexity, it is literally the size of that table.</p>
+<p>On a real render with 14,430 tokens, that table has about <b>208 million entries</b>, and it is built fifty times per step, every step. Meanwhile a feed-forward layer multiplying a 5,376-wide token by a 5,376 × 14,336 weight matrix is doing 77 million multiply-adds for <em>one token</em>.</p>
+<p>A GPU is, to a first approximation, a machine for doing enormous numbers of independent multiply-and-adds at once. That is the entire reason this hardware exists and the reason it is the right hardware for this job.</p></div>
+
+## Part 3 · What dx/dt actually means
+
+This is the symbol that looks frightening and is not. **A derivative is a rate: how fast one thing changes as another changes.**
+
+$$\frac{dx}{dt}\;=\;\text{"how much } x \text{ changes for a tiny change in } t\text{"}$$
+
+Say it as **"d-x by d-t"**. The lowercase **d** means *a tiny bit of*. So $dx/dt$ is *(a tiny bit of x) divided by (a tiny bit of t)* — a rate of change, which drawn on a graph is a **slope**.
+
+<svg viewBox="0 0 760 240" width="100%" style="max-width:920px" role="img" aria-label="A curve of position against time, with two points joined by a secant line; the vertical rise and horizontal run between them form the fraction that is the derivative, and the tangent at the first point is the instantaneous rate.">
+  <defs>
+    <marker id="m1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">RISE OVER RUN — THAT FRACTION IS THE DERIVATIVE</text>
+  <line x1="60" y1="200" x2="716" y2="200" stroke="#232c3b" marker-end="url(#m1)"/>
+  <line x1="60" y1="200" x2="60" y2="36" stroke="#232c3b" marker-end="url(#m1)"/>
+  <text x="700" y="220" text-anchor="end" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">t — time</text>
+  <text x="66" y="32" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">x — position</text>
+  <path d="M60,186 C 180,180 260,158 340,132 C 400,112 440,100 480,90 C 560,72 620,60 700,52" fill="none" stroke="#7aa2ff" stroke-width="1.6"/>
+  <line x1="340" y1="132" x2="480" y2="90" stroke="#5ee0c0" stroke-width="1.4"/>
+  <line x1="340" y1="132" x2="480" y2="132" stroke="#6f7b8f" stroke-dasharray="3 3"/>
+  <line x1="480" y1="132" x2="480" y2="90" stroke="#6f7b8f" stroke-dasharray="3 3"/>
+  <circle cx="340" cy="132" r="4" fill="#5ee0c0"/>
+  <circle cx="480" cy="90" r="4" fill="#5ee0c0"/>
+  <text x="410" y="150" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">run — a small change in t</text>
+  <text x="492" y="114" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">rise — the change in x</text>
+  <line x1="276" y1="152" x2="404" y2="114" stroke="#ffb454" stroke-dasharray="5 3"/>
+  <text x="252" y="168" text-anchor="middle" fill="#ffb454" font-size="10.5" font-family="Inter,sans-serif">the tangent</text>
+  <text x="560" y="192" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">shrink the run toward zero and the</text>
+  <text x="560" y="208" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">green line becomes the orange one</text>
+</svg>
+
+**The everyday version is a speedometer.** Let $x$ be a car's position and $t$ be the time. Then $dx/dt$ is its velocity — literally the number on the dial.
+
+<div class="callout spec"><span class="t">Worked example — a speedometer read as dx/dt</span>
+<p>A car at <b>t = 2.0 s</b> is at position <b>x = 20 m</b>. At <b>t = 2.1 s</b> it is at <b>x = 21 m</b>. Then:</p>
+$$\frac{dx}{dt}\;\approx\;\frac{21 - 20}{2.1 - 2.0}\;=\;\frac{1\ \text{m}}{0.1\ \text{s}}\;=\;10\ \text{m/s}$$
+<p>One metre in a tenth of a second is ten metres per second. <b>That fraction — change in x over change in t — <em>is</em> the derivative.</b> Making the gap smaller and smaller gives the exact instantaneous rate rather than an average over the interval; that limiting process is the only thing calculus adds to the arithmetic above.</p></div>
+
+**Why a video model lives on this.** As $t$ slides from 1 (noise) down to 0 (clean), the latent $\mathbf{x}$ *changes* — it morphs from static into something watchable. So there is a velocity: how fast, and in which direction, the latent is moving toward its final form. That velocity is exactly $d\mathbf{x}/dt$, and predicting it is the transformer's whole job:
+
+$$\mathbf{v}_\theta(\mathbf{x}_t, t, c)\;\approx\;\frac{d\mathbf{x}_t}{dt}$$
+
+Read aloud: *"the velocity the model predicts is approximately the rate at which the latent is changing."*
+
+One thing to hold onto: $\mathbf{x}$ here is not a single number. It is a grid of about 1.4 million of them, and $\mathbf{v}_\theta$ returns a grid of exactly the same shape. Every one of those numbers gets its own velocity. The bold type is the only thing distinguishing "a number moving" from "a million numbers each moving independently", and the arithmetic is identical either way.
+
+**The step that uses it** is the "distance equals speed times time" from school physics, run backwards:
+
+$$\mathbf{x}_{t-\Delta t}\;=\;\mathbf{x}_t\;-\;\underbrace{\Delta t}_{\text{tiny time}}\cdot\underbrace{\mathbf{v}_\theta}_{\text{speed}}$$
+
+*"To move one small step, travel (speed × small time), in the cleaning direction."* That is an **Euler step**, named after Leonhard Euler, and it is the entire generation loop.
+
+## Part 4 · Flow matching — the picture behind the equation
+
+Here is the idea in one image. Somewhere in the space of all possible latents sits pure noise. Somewhere else sits the finished video. Training taught the model a **velocity field**: standing anywhere in that space, at any noise level, which way is toward plausible video.
+
+<svg viewBox="0 0 760 260" width="100%" style="max-width:920px" role="img" aria-label="Two panels comparing step counts: with three Euler steps the straight chords cut across the curved true trajectory and the render lands far from the target; with twenty-three steps the chords hug the curve and arrive at the target.">
+  <defs>
+    <marker id="m2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+    <marker id="m3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <rect x="2" y="26" width="368" height="210" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="18" y="48" fill="#ff9d9d" font-size="11.5" font-family="Inter,sans-serif">3 steps — the chords miss the curve</text>
+  <path d="M40,206 C 120,196 180,164 240,128 C 288,100 320,84 344,72" fill="none" stroke="#6f7b8f" stroke-width="1.4" stroke-dasharray="4 4"/>
+  <polyline points="40,206 148,180 252,150 344,124" fill="none" stroke="#ff6b6b" stroke-width="1.6" marker-end="url(#m2)"/>
+  <circle cx="40" cy="206" r="4" fill="#ff6b6b"/>
+  <circle cx="344" cy="72" r="4" fill="#5ee0c0"/>
+  <circle cx="344" cy="124" r="4" fill="#ff6b6b"/>
+  <line x1="344" y1="80" x2="344" y2="116" stroke="#ffb454" stroke-dasharray="3 3"/>
+  <text x="336" y="102" text-anchor="end" fill="#ffb454" font-size="10" font-family="Inter,sans-serif">the error</text>
+  <text x="30" y="228" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">the composition was never settled — this is what mud looks like</text>
+  <rect x="386" y="26" width="372" height="210" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="402" y="48" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">23 steps — the chords hug the curve</text>
+  <path d="M424,206 C 504,196 564,164 624,128 C 672,100 704,84 728,72" fill="none" stroke="#6f7b8f" stroke-width="1.4" stroke-dasharray="4 4"/>
+  <polyline points="424,206 458,198 492,188 524,176 556,160 586,144 614,130 642,116 668,102 694,88 728,72" fill="none" stroke="#5ee0c0" stroke-width="1.6" marker-end="url(#m3)"/>
+  <circle cx="424" cy="206" r="4" fill="#ff6b6b"/>
+  <circle cx="728" cy="72" r="4" fill="#5ee0c0"/>
+  <text x="414" y="228" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">same model, same prompt, same seed — only the step count differs</text>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">GREY DASH = THE TRUE PATH · SOLID = WHAT EULER ACTUALLY WALKS</text>
+</svg>
+
+The dashed grey line is the trajectory the model's velocity field defines. Each solid segment is one Euler step — a straight chord across a curve. Straight chords across a curve accumulate error, and the error is proportional to how long each chord is:
+
+$$\text{error} \sim \mathcal{O}(\Delta t), \qquad \Delta t = \frac{1}{\text{number of steps}}$$
+
+Halve the steps, roughly double the error. This is not an abstract bound. The render logged as `g4k` was given **3 steps** at 1280×704 across 345 frames, ran for about five and a half hours, and produced mud — not a blurry version of the right video, but a video whose large-scale structure had been decided by three badly-aimed chords.
+
+### Where the velocity field came from
+
+Training is worth one paragraph, because it explains why this is a **regression** problem rather than anything more exotic.
+
+Take a real video's latent $\mathbf{z}_0$ and a sample of noise $\mathbf{z}_1$. Draw the straight line between them and pick a point on it at fraction $t$. Then ask the model to predict the direction from one end to the other, and penalise it by how far off it is:
+
+$$\mathcal{L} = \mathbb{E}\Big\|\, \mathbf{v}_\theta(\mathbf{z}_t, t, c) - (\mathbf{z}_1 - \mathbf{z}_0)\,\Big\|^2$$
+
+Read aloud: *"on average, over many videos, many noises and many values of t, how far is the predicted velocity from the true one, squared."* The model is being taught to point in a direction. Nothing here classifies anything, nothing here rolls dice — the only randomness in generation is the noise that gets fed in at the start, which is why a fixed seed reproduces a video exactly.
+
+### Solver order, and the trick that changes the question
+
+Euler is a **first-order** method: one evaluation of $\mathbf{v}_\theta$ per step, error proportional to $\Delta t$. Better methods exist. A **second-order** solver evaluates twice per step (or reuses history) and has error proportional to $\Delta t^2$ — square a small number and it gets much smaller.
+
+That sets up a real trade, and the useful unit for reasoning about it is **NFE**, the number of function evaluations:
+
+$$\text{NFE} = \text{steps} \times \text{solver order}$$
+
+Six Euler steps and three second-order steps both cost six evaluations. Which produces the better video? Higher order cuts the error per step but pays for two evaluations to get it, and for a trajectory that is already fairly straight the extra accuracy may buy nothing. **This was never A/B tested on this build.** It is written down here as an open question rather than dressed up as a finding.
+
+The more interesting move does not improve the solver at all. **Distillation** — the technique behind "Turbo" variants — retrains the velocity field itself so that the trajectory is *straight enough* for a coarse solver to follow accurately.
+
+<div class="callout truth"><span class="t">The mental shift worth having</span>
+<p>A distilled model is not integrating the same equation badly with fewer steps. It has been trained to define a <b>different, straighter path</b> between noise and data — one that a four-step Euler walk can follow without falling off. The mathematics moved, not just the step count.</p>
+<p>That is why four distilled steps can look like twenty base steps instead of looking like garbage, and it is a genuinely different kind of optimisation from anything else in this guide: it changes the problem rather than solving it faster.</p></div>
+
+Measurements from the earlier single-card phase of this project, at the resolutions noted, give the shape of it:
+
+<table>
+<tr><th>Clip</th><th>Resolution × frames</th><th>Steps</th><th>Solver</th><th>Wall-clock</th></tr>
+<tr><td>3 s, base model</td><td>1024×576 × 73</td><td>20</td><td>euler</td><td>~10 min</td></tr>
+<tr><td>15 s, base model</td><td>512×288 × 362</td><td>20</td><td>euler</td><td>~17.5 min</td></tr>
+<tr><td>15 s, base model</td><td>576×320 × 362</td><td>20</td><td>euler</td><td>~28 min</td></tr>
+<tr><td><b>3 s, distilled</b></td><td>512×288 × 73</td><td><b>4</b></td><td>turbo-euler</td><td><b>3 min</b></td></tr>
+</table>
+
+And the counterweight, found by inspecting frames rather than clocks: **distillation under-renders fine detail**. Teeth were the tell — the finest structure in a face, and the first thing a four-step trajectory loses. Full twenty-step sampling formed them properly. The rule that came out of it is a workflow rule, not a mathematical one: distilled sampling for drafts and motion tests, full step counts for anything meant to be looked at closely.
+
+## Part 5 · The formulas, worked with real numbers
+
+### A · One Euler step
+
+Formula: $\;\mathbf{x}_{t-\Delta t}=\mathbf{x}_t-\Delta t\cdot\mathbf{v}$. Take one number out of the latent, $x_t = 3.0$; the model predicts velocity $v = 4.0$; the step size is $\Delta t = 0.1$:
+
+$$x_{t-\Delta t}=3.0-0.1\times 4.0 = 3.0 - 0.4 = \mathbf{2.6}$$
+
+**Meaning:** that number moved from 3.0 to 2.6 this step. The identical arithmetic happens to all 1.4 million numbers in the grid simultaneously — which is precisely what a GPU is for. That is all a "step" ever is.
+
+### B · Softmax
+
+Softmax turns arbitrary scores into weights that are positive and add to one:
+
+$$\text{softmax}(z)_i = \frac{e^{z_i}}{\sum_j e^{z_j}}$$
+
+Take scores $z = [2,\,1,\,0]$:
+
+$$e^2\approx 7.39,\quad e^1\approx 2.72,\quad e^0 = 1,\qquad \text{total} \approx 11.11$$
+
+$$\text{softmax} \approx \left[\tfrac{7.39}{11.11},\ \tfrac{2.72}{11.11},\ \tfrac{1}{11.11}\right] = [\,0.665,\ 0.245,\ 0.090\,]$$
+
+<svg viewBox="0 0 760 220" width="100%" style="max-width:920px" role="img" aria-label="Softmax worked as bars: scores of two, one and zero become exponentials of 7.39, 2.72 and 1.00, which normalise to weights of 0.665, 0.245 and 0.090 shown as bars of proportional length, and those weights blend three values into a single output of 14.25.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SCORES BECOME WEIGHTS THAT ADD TO ONE</text>
+  <text x="2" y="42" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">token</text>
+  <text x="86" y="42" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">score</text>
+  <text x="152" y="42" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">e to the score</text>
+  <text x="262" y="42" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">weight</text>
+  <text x="8" y="70" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">first</text>
+  <text x="94" y="70" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">2</text>
+  <text x="160" y="70" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">7.39</text>
+  <rect x="262" y="58" width="266" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="538" y="70" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">0.665</text>
+  <text x="8" y="106" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">second</text>
+  <text x="94" y="106" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">1</text>
+  <text x="160" y="106" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">2.72</text>
+  <rect x="262" y="94" width="98" height="16" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="370" y="106" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">0.245</text>
+  <text x="8" y="142" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">third</text>
+  <text x="94" y="142" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">0</text>
+  <text x="160" y="142" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">1.00</text>
+  <rect x="262" y="130" width="36" height="16" rx="3" fill="#151b26" stroke="#3a4a63"/>
+  <text x="308" y="142" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">0.090</text>
+  <line x1="262" y1="158" x2="742" y2="158" stroke="#232c3b"/>
+  <text x="8" y="184" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">the three weights add to 1.000, so nothing is created or lost</text>
+  <text x="8" y="206" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">blending values 10, 20 and 30 by those weights: 6.65 + 4.90 + 2.70 = 14.25</text>
+</svg>
+
+**Check:** 0.665 + 0.245 + 0.090 = 1.000. The largest score took the largest share, but nothing was thrown away — the "soft" in softmax is exactly that. This is the mechanism by which attention decides what to look at most.
+
+### C · Attention, in miniature
+
+Formula: $\;\text{softmax}\!\big(\tfrac{QK^\top}{\sqrt{d_k}}\big)V$. Suppose one token's query matched three tokens with raw scores $QK^\top = [4,\,2,\,0]$, and the head dimension is $d_k = 4$ so $\sqrt{d_k}=2$:
+
+$$\frac{QK^\top}{\sqrt{d_k}} = [2,\,1,\,0]\ \xrightarrow{\ \text{softmax}\ }\ [0.665,\,0.245,\,0.090]$$
+
+Now blend the three value vectors by those weights. Taking $V=[\,10,\,20,\,30\,]$:
+
+$$0.665(10)+0.245(20)+0.090(30)=6.65+4.90+2.70=\mathbf{14.25}$$
+
+**Meaning:** this token's new value is a weighted mix of what the others hold, mostly the first. That is the whole of attention — a lookup where every key matches a little and the best match matches most.
+
+The $\sqrt{d_k}$ in the denominator is housekeeping. Dot products of long vectors grow with their length, and large scores push softmax toward putting all its weight on one entry, which stops the model learning nuance. Dividing by $\sqrt{d_k}$ keeps the scores in a sane range. In the actual model $d_k = 128$, so the divisor is $\sqrt{128} \approx 11.3$, and this happens 56 times in parallel — one per attention head.
+
+### D · Classifier-free guidance
+
+Formula: $\;\mathbf{v}=\mathbf{v}_\varnothing+s(\mathbf{v}_c-\mathbf{v}_\varnothing)$. Say the velocity *with* the prompt is $v_c=5$, *without* it is $v_\varnothing=2$, and the guidance scale is $s=3$:
+
+$$v = 2 + 3(5-2) = 2 + 9 = \mathbf{11}$$
+
+**Meaning:** the prompt's contribution — the difference between 5 and 2 — is amplified threefold and added back. At $s=1$ the result is exactly $v_c$; at $s=0$ the prompt is ignored entirely; typical working values are 2.5 to 3. Push it much higher and the exaggerated velocity overshoots every step, which is what burnt colours and plastic skin actually are.
+
+Note the cost hidden in the notation: $v_c$ and $v_\varnothing$ are two separate evaluations of a twenty-billion-parameter stack. Guidance is why a "step" can be two full passes rather than one.
+
+### E · Sigma-shift
+
+Formula: $\;t' = \dfrac{s\,t}{1+(s-1)t}$. At $t=0.5$ with shift $s=6$:
+
+$$t' = \frac{6(0.5)}{1+(6-1)(0.5)} = \frac{3}{1+2.5} = \frac{3}{3.5} \approx \mathbf{0.857}$$
+
+A step that would have landed at 0.5 lands at 0.857 instead — deeper into the noisy end. Applying the same formula to nine evenly spaced steps shows what it does to the whole schedule:
+
+<svg viewBox="0 0 760 224" width="100%" style="max-width:920px" role="img" aria-label="The same nine evenly spaced steps mapped onto the noise axis under two shift values: a shift of six clusters them near the noisy end, spending compute on structure, while a shift below one clusters them near the clean end, spending compute on fine detail.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SAME NINE STEPS — DIFFERENT PLACES TO SPEND THEM</text>
+  <text x="2" y="62" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">shift 6</text>
+  <text x="2" y="78" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">structure</text>
+  <line x1="80" y1="70" x2="700" y2="70" stroke="#232c3b"/>
+  <g stroke="#ffb454" stroke-width="2"><line x1="328" y1="58" x2="328" y2="82"/><line x1="452" y1="58" x2="452" y2="82"/><line x1="526" y1="58" x2="526" y2="82"/><line x1="576" y1="58" x2="576" y2="82"/><line x1="610" y1="58" x2="610" y2="82"/><line x1="638" y1="58" x2="638" y2="82"/><line x1="658" y1="58" x2="658" y2="82"/><line x1="676" y1="58" x2="676" y2="82"/><line x1="690" y1="58" x2="690" y2="82"/></g>
+  <text x="2" y="150" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">shift below 1</text>
+  <text x="2" y="166" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">fine detail</text>
+  <line x1="80" y1="158" x2="700" y2="158" stroke="#232c3b"/>
+  <g stroke="#5ee0c0" stroke-width="2"><line x1="114" y1="146" x2="114" y2="170"/><line x1="148" y1="146" x2="148" y2="170"/><line x1="190" y1="146" x2="190" y2="170"/><line x1="236" y1="146" x2="236" y2="170"/><line x1="286" y1="146" x2="286" y2="170"/><line x1="346" y1="146" x2="346" y2="170"/><line x1="414" y1="146" x2="414" y2="170"/><line x1="494" y1="146" x2="494" y2="170"/><line x1="588" y1="146" x2="588" y2="170"/></g>
+  <text x="80" y="200" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">t = 0 — clean, where eyes and teeth are decided</text>
+  <text x="700" y="200" text-anchor="end" fill="#ffb454" font-size="10.5" font-family="Inter,sans-serif">t = 1 — noise, where composition is decided</text>
+  <line x1="80" y1="208" x2="700" y2="208" stroke="#232c3b" stroke-dasharray="3 3"/>
+</svg>
+
+**Meaning:** the step count is not the only dial. *Where* the steps land matters as much as how many there are, and moving them costs nothing at all. A sampler can even run two clocks — one schedule for the video latent, another for the audio latent — because the two have different curvature, and stepping audio on the video's schedule at low step counts corrupts the sound.
+
+### F · Float to pixel
+
+Formula: $\;\text{pixel}=\big\lfloor (x+1)\cdot 127.5 \big\rceil$. The decoder emits a float in $[-1,1]$; take $x=0.6$:
+
+$$\lfloor (0.6+1)\times 127.5 \rceil = \lfloor 1.6 \times 127.5 \rceil = \lfloor 204 \rceil = \mathbf{204}$$
+
+The endpoints check out: $x=-1$ gives 0 (black), $x=+1$ gives 255 (white). **Meaning:** the model's real output is the float. The 0-to-255 byte is a rescale performed after all the intelligence has happened — no probability distribution over colours, no sampling. Audio gets the same treatment with a factor of 32,767 instead of 127.5.
+
+### G · Sampling the noise
+
+$\mathbf{x}_1 \sim \mathcal{N}(0,1)$ says: fill the latent with numbers drawn from the bell curve. A handful might look like
+
+$$[\,0.31,\ -1.20,\ 0.05,\ 0.88,\ -0.42,\ \ldots\,]$$
+
+Most land near 0, few beyond ±3. **Meaning:** "pure noise" is a grid of about 1.4 million of these. The seed is what picks exactly which ones — the same seed produces the same grid, the same trajectory, and the same video.
+
+## Part 6 · The cost model, and how well it holds
+
+Two equations describe what a render costs. The first is almost embarrassingly simple:
+
+$$T_{\text{sampling}} = \text{NFE} \times T_{\text{forward}}$$
+
+**NFE** is the number of function evaluations — the number of times the transformer is run. $T_{\text{forward}}$ is how long one run takes, which depends on the sequence length and therefore on resolution and frame count.
+
+That equation is testable against every render this project has logged.
+
+<div class="callout spec"><span class="t">The cost model against five measured renders</span>
+<table>
+<tr><th>Render</th><th>Steps</th><th>s/step</th><th>Steps × s/step</th><th>Measured total</th></tr>
+<tr><td><code>an1</code> — 1280×704 × 124</td><td>23</td><td>143</td><td>3,289 s</td><td><b>3,295 s</b></td></tr>
+<tr><td><code>e720hq</code> — 1280×704 × 124</td><td>23</td><td>152</td><td>3,496 s</td><td><b>3,486 s</b></td></tr>
+<tr><td><code>cp15sd</code> — 512×288 × 345</td><td>49</td><td>81</td><td>3,969 s</td><td><b>3,965 s</b></td></tr>
+<tr><td><code>e1h-15s</code> — 832×480 × 345</td><td>3</td><td>193</td><td>579 s</td><td><b>578 s</b></td></tr>
+<tr><td><code>g4k</code> — 1280×704 × 345</td><td>3</td><td>6,600</td><td>19,800 s</td><td><b>about 5.5 h</b></td></tr>
+</table>
+<p>Five renders, five agreements to within rounding. Multiplication is the whole model — which is exactly why step count is such a blunt and expensive dial.</p></div>
+
+The second equation says why the *forward* pass costs what it does. Attention compares every token with every other token, so:
+
+$$\text{attention cost} \sim \mathcal{O}(N^2), \qquad N \propto \text{width} \times \text{height} \times \text{frames}$$
+
+That $N$ is countable for a real render. The measured latent for 832×480 across 124 frames was `(1, 24, 37, 30, 52)`; patching by 2×2 gives $37 \times 15 \times 26 = 14{,}430$ tokens, so attention is comparing on the order of 208 million pairs, in every one of 50 blocks, on every step.
+
+<div class="callout warn"><span class="t">Where the model stops predicting — an honest disagreement</span>
+<p>Going from 832×480 to 1280×704 at 345 frames multiplies the token count by <b>2.26×</b>. Quadratic scaling therefore predicts about $2.26^2 \approx 5\times$ the time.</p>
+<p>The measured cost was <b>34×</b>.</p>
+<p>The mathematics is not wrong; it is incomplete. The larger sequence no longer fits the single-card path, so it was run split across three cards, and that path carries roughly <b>7× overhead</b> beyond what the arithmetic predicts — overhead that lives in the wire between the cards rather than in any equation here. Quantifying that gap is the whole of <a href="24-pcie-nvlink-interconnect.html">ch.24</a>.</p></div>
+
+### Amdahl's law — why making one part faster does less than expected
+
+A render is sampling plus fixed costs: encoding, decoding, muxing, writing files. Speeding up only the sampling has a ceiling, and the ceiling has a formula:
+
+$$\text{speedup} = \frac{1}{(1-p) + \dfrac{p}{s}}$$
+
+where $p$ is the fraction of total time that *was* the part being sped up, and $s$ is how much faster that part became. Work it with numbers: if sampling was 60% of the time and it is made **five times** faster,
+
+$$\text{speedup} = \frac{1}{0.4 + \frac{0.6}{5}} = \frac{1}{0.52} \approx 1.9\times$$
+
+Five times faster at the expensive part bought less than twice overall. **Meaning:** an optimisation cannot be evaluated without knowing what fraction of the time it touches. Optimising something that is 10% of the runtime cannot ever return more than about 11%, no matter how brilliant it is.
+
+This has a corollary that reordered the work on this project: **measure the phase breakdown before optimising anything.** The intuitive suspect is rarely the largest term. When the memory profile was finally measured, the peak turned out not to be resident weights at all but a single temporary buffer inside an int8 matrix multiplication, 2.24 GB on its own — and blocking that one operation over rows freed two gigabytes with a result proven bit-identical by `torch.equal`.
+
+## Part 7 · One full step, end to end
+
+Follow a single latent number through one complete step, with every number visible:
+
+$$\text{start:} \quad x_t = 3.0, \qquad t = 0.5$$
+$$\text{the model runs twice:} \quad v_c = 5.0 \ \text{(with the prompt)}, \qquad v_\varnothing = 2.0 \ \text{(without)}$$
+$$\text{guidance, } s=3: \quad v = 2.0 + 3(5.0-2.0) = 11.0$$
+$$\text{Euler step, } \Delta t = 0.1: \quad x_{t-\Delta t} = 3.0 - 0.1\times 11.0 = \mathbf{1.9}$$
+
+One number went from 3.0 to 1.9. Do that to 1.4 million numbers at once, twenty-three times in a row, with fifty blocks of streamed weights behind each `v`, and static becomes a five-second film with a soundtrack.
+
+<div class="callout truth"><span class="t">The whole pipeline, now readable</span>
+<p>$\mathbf{v}_\theta(\mathbf{x}_t,t,c)\approx \frac{d\mathbf{x}}{dt}$ — "the model predicts how fast the latent is changing." $\mathbf{x}_{t-\Delta t}=\mathbf{x}_t-\Delta t\,\mathbf{v}$ — "step a little that way." $\text{softmax}(QK^\top/\sqrt{d_k})V$ — "decide what to look at, then blend it." $\mathbf{v}_\varnothing+s(\mathbf{v}_c-\mathbf{v}_\varnothing)$ — "amplify what the prompt changed." $\lfloor(x+1)\cdot127.5\rceil$ — "turn the float into a pixel." $\text{NFE}\times T_{\text{forward}}$ — "and here is the bill."</p>
+<p>That is the entire model, in six sentences, every one of which has now been worked with real numbers.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">variable</span><span class="badge">subscript</span><span class="badge">theta / weights</span><span class="badge">tensor shape</span><span class="badge">dot product</span><span class="badge">matrix multiply</span><span class="badge">derivative</span><span class="badge">dx/dt</span><span class="badge">slope / tangent</span><span class="badge">velocity field</span><span class="badge">Euler step</span><span class="badge">truncation error</span><span class="badge">flow matching</span><span class="badge">regression loss</span><span class="badge">expectation</span><span class="badge">norm squared</span><span class="badge">softmax</span><span class="badge">query / key / value</span><span class="badge">scaling by root d</span><span class="badge">guidance scale</span><span class="badge">sigma-shift</span><span class="badge">NFE</span><span class="badge">solver order</span><span class="badge">distillation</span><span class="badge">big-O</span><span class="badge">Amdahl's law</span></p>
+<p>If those feel solid, the reason the mathematics under-predicted that 34× will make sense — and it is not mathematics at all.</p></div>
+
+Next: the wire between the chips — what PCIe actually moves, why this box has no NVLink, and how a link measured at 4.9 GB/s decides which multi-GPU tricks are worth attempting.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>36 · Splitting the Video — Context Parallelism</title>
+<meta name="description" content="Putting one render on three cards means splitting the video, not the model — ring attention over a slow link, what came back green, and the RAM wall that stopped ring-3.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 36 · Distributing one render across three cards — what worked, what broke, and why</span>
+
+# Splitting the Video — Context Parallelism
+
+<p class="lede">Putting one render on three cards means splitting the <b>video</b>, not the model — every card runs the full 50 blocks, each on its own third of the token sequence, and they cooperate only where attention forces them to. This is the staged build log of that idea on a box with no NVLink: the stages that came back green, the wall that stopped it, and the measured difference between two cards and three.</p>
+
+The number that makes the case, before any of the explanation: a sequence that was **15,067 tokens on one card** became **5,022 tokens per card** on three. The activation memory that had been the hard 8 GB wall for a year of this project split three ways on the first attempt.
+
+The chapter is also an honest failure log. That same run was killed by the Linux out-of-memory killer minutes later, for a reason that had nothing to do with the GPUs.
+
+<div class="callout truth"><span class="t">Two completely different things can be split</span>
+<p>When people say "split the render across GPUs" they mean one of two things, and confusing them is where most multi-GPU plans die. Either the <b>weights</b> get split — the model itself — or the <b>activations</b> get split — the video being processed as it flows through those weights. They are not the same object, they live in different places, and their costs run in opposite directions.</p>
+<table>
+<tr><th>What gets split</th><th>The name</th><th>What each card then holds</th></tr>
+<tr><td>The <b>weights</b> (the model)</td><td>Tensor / pipeline parallelism</td><td>a slice of the model, the whole video</td></tr>
+<tr><td>The <b>activations</b> (the video in flight)</td><td>Context parallelism (CP)</td><td>the whole model, a slice of the video</td></tr>
+</table>
+<p>This build does <b>context parallelism</b>. The rest of the chapter is why there was no choice, what CP actually does at the level of a single transformer block, and how the staged validation went.</p></div>
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Two panels compared. On the left, tensor parallelism gives each card one third of the model weights and the whole video, requiring an all-reduce every layer. On the right, context parallelism gives each card the whole model streamed from RAM and one third of the video tokens, requiring only a key-value pass around a ring at the attention step.">
+  <defs>
+    <marker id="cp1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#ff6b6b"/></marker>
+    <marker id="cp2" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">TWO AXES  ·  ONLY ONE SURVIVES A BOX WITH NO NVLINK</text>
+  <rect x="4" y="30" width="366" height="222" rx="10" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="24" y="54" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">Split the WEIGHTS — tensor parallelism</text>
+  <rect x="24" y="70" width="100" height="54" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="136" y="70" width="100" height="54" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="248" y="70" width="100" height="54" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="74" y="92" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">1/3 of model</text>
+  <text x="74" y="110" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">whole video</text>
+  <text x="186" y="92" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">1/3 of model</text>
+  <text x="186" y="110" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">whole video</text>
+  <text x="298" y="92" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">1/3 of model</text>
+  <text x="298" y="110" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">whole video</text>
+  <line x1="124" y1="140" x2="136" y2="140" stroke="#ff6b6b" marker-end="url(#cp1)"/>
+  <line x1="236" y1="140" x2="248" y2="140" stroke="#ff6b6b" marker-end="url(#cp1)"/>
+  <text x="186" y="166" text-anchor="middle" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">all-reduce EVERY layer</text>
+  <text x="186" y="190" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">wants about 300 GB/s of NVLink</text>
+  <text x="186" y="212" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">this box has about 4.9 GB/s</text>
+  <text x="186" y="238" text-anchor="middle" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">and 1/3 of the model still exceeds 8 GB</text>
+  <rect x="390" y="30" width="366" height="222" rx="10" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="410" y="54" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">Split the ACTIVATIONS — context parallelism</text>
+  <rect x="410" y="70" width="100" height="54" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="522" y="70" width="100" height="54" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="634" y="70" width="100" height="54" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="460" y="92" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">whole model</text>
+  <text x="460" y="110" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">1/3 of video</text>
+  <text x="572" y="92" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">whole model</text>
+  <text x="572" y="110" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">1/3 of video</text>
+  <text x="684" y="92" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">whole model</text>
+  <text x="684" y="110" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">1/3 of video</text>
+  <line x1="510" y1="140" x2="522" y2="140" stroke="#5ee0c0" marker-end="url(#cp2)"/>
+  <line x1="622" y1="140" x2="634" y2="140" stroke="#5ee0c0" marker-end="url(#cp2)"/>
+  <text x="572" y="166" text-anchor="middle" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">pass K/V around a ring, at attention only</text>
+  <text x="572" y="190" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">one shard in flight at a time</text>
+  <text x="572" y="212" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">tolerant of a slow link</text>
+  <text x="572" y="238" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">the activation, which was the wall, splits by N</text>
+</svg>
+
+## 1 · Why the weights cannot be split on this box
+
+The obvious move is to cut the model into thirds and give one third to each card. It fails here for two independent reasons, and either one alone would be fatal.
+
+<div class="callout warn"><span class="t">Weight-splitting is off the table on this hardware</span>
+<p><b>(a) It still does not fit.</b> The int8 model the CP work was built against is <b>33 GB</b>; a third of that is about <b>11 GB</b> per card, and each 3060 Ti has <b>8 GB</b>. Splitting a thing that does not fit into three things that also do not fit solves nothing — and the reason the weights get streamed from RAM in the first place is precisely that they never fit ([ch.24](24-pcie-nvlink-interconnect.html), [ch.29](29-where-numbers-live.html)).</p>
+<p><b>(b) It needs a link this box does not have.</b> Tensor parallelism must <b>all-reduce</b> partial results at <em>every single layer</em> — the cards continuously trade intermediate sums. That pattern is designed for NVLink speeds, around <b>300 GB/s</b>. Here the card-to-card path is about <b>4.9 GB/s</b>, and for one of the three cards it routes through the CPU. At that bandwidth the per-layer all-reduce costs far more than the compute it saves ([ch.16](16-multi-gpu-and-nvlink.html)).</p></div>
+
+<div class="callout spec"><span class="t">A note on 33 GB, and on 20 GB</span>
+<p>Every RAM figure in this chapter uses <b>33 GB</b>, the size of the int8 model the context-parallel work was designed and measured against. The transformer file measured later — int8 and pruned — is <b>20 GB</b> ([ch.03](03-how-h3-works.html)). Both numbers are real, from different points in the project, and it is worth keeping them straight rather than quietly retrofitting the newer one. The <em>shape</em> of the argument below does not depend on which figure is used: N ranks means N copies, and N copies is what breaks.</p></div>
+
+## 2 · What CP does instead
+
+Context parallelism leaves the weights alone and splits the video. The packed sequence of tokens that represents the clip — every frame, every audio slice, the text — is cut into thirds. Each card runs the *full* model over about **one third of the tokens**, and all three compute at the same time.
+
+The structural picture that carries this properly: three people are given one long contract to answer questions about, and each is handed a third of the pages. Most of the work — reading a clause, noting a date, summarising a paragraph — happens entirely within one person's own pages. But some questions ("does anything in here contradict clause 12?") require every page to be compared against every other. For those, and only those, they pass their notes around the table in turn.
+
+That is exactly the shape of a transformer block. Read one, line by line:
+
+```
+norm1               per-token   — each row independent
+adaLN modulation    per-token
+attn = self.attn()  CROSS-TOKEN  ← the only line that mixes rows
+residual + gate     per-token
+norm2               per-token
+ff = self.ff()      per-token
+residual + gate     per-token
+```
+
+Everything except attention operates on each row in isolation. So sharding the sequence costs nothing anywhere else in the block. Only attention needs each token to see every other one, and for that the cards pass their key/value tensors around a **ring** — each hands its K/V to the next, folds it into a running result, passes again. This is *ring attention*, run by NCCL over the slow link. Because a ring moves only one shard of K/V per hop, it tolerates 4.9 GB/s where an all-reduce would not.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="Three cards arranged in a ring, each holding one third of the token sequence and its own key-value shard. Arrows show each card passing its key-value shard clockwise to the next; each card folds the arriving shard into a running result using online softmax, so no card ever holds the full score matrix.">
+  <defs>
+    <marker id="cp3" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">RING ATTENTION  ·  THE ONE LINE THAT NEEDS THE OTHER CARDS</text>
+  <rect x="4" y="30" width="752" height="40" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="6" y="32" width="248" height="36" rx="5" fill="#151b26" stroke="#5ee0c0"/>
+  <rect x="256" y="32" width="248" height="36" rx="5" fill="#151b26" stroke="#5ee0c0"/>
+  <rect x="506" y="32" width="248" height="36" rx="5" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="130" y="55" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">tokens 0 to 5021</text>
+  <text x="380" y="55" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">tokens 5022 to 10043</text>
+  <text x="630" y="55" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">tokens 10044 to 15066</text>
+  <text x="4" y="90" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">one packed sequence of 15,067 tokens, cut in three</text>
+  <circle cx="160" cy="196" r="58" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="380" cy="196" r="58" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="600" cy="196" r="58" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="160" y="182" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">cuda:0</text>
+  <text x="160" y="202" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">own Q, K, V</text>
+  <text x="160" y="220" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">running max, sum</text>
+  <text x="380" y="182" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">cuda:1</text>
+  <text x="380" y="202" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">own Q, K, V</text>
+  <text x="380" y="220" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">running max, sum</text>
+  <text x="600" y="182" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">cuda:2</text>
+  <text x="600" y="202" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">own Q, K, V</text>
+  <text x="600" y="220" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">running max, sum</text>
+  <path d="M218,178 L318,178" fill="none" stroke="#7aa2ff" marker-end="url(#cp3)"/>
+  <path d="M438,178 L538,178" fill="none" stroke="#7aa2ff" marker-end="url(#cp3)"/>
+  <path d="M600,256 C440,290 300,290 160,256" fill="none" stroke="#7aa2ff" marker-end="url(#cp3)"/>
+  <text x="268" y="168" text-anchor="middle" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif">K/V shard</text>
+  <text x="488" y="168" text-anchor="middle" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif">K/V shard</text>
+  <text x="380" y="286" text-anchor="middle" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif">and round again — one shard in flight per hop, never the whole score matrix</text>
+</svg>
+
+This attacks exactly the wall [ch.34](34-open-use-close-flashattention.html) identified. The out-of-memory failures on this box were never the weights — the weights already stream. They were the **activations**: the linear transients that scale with token count. Split the tokens by three and that footprint splits by three too.
+
+<div class="callout spec"><span class="t">CP is not the idle pipeline of ch.32</span>
+<p>These look superficially similar and are opposites:</p>
+<table>
+<tr><th></th><th>Pipeline parallelism (ch.32, dead)</th><th>Context parallelism (this chapter)</th></tr>
+<tr><td>Who computes</td><td>the cards take <b>turns</b> — one busy, two idle</td><td>all three compute at <b>the same time</b></td></tr>
+<tr><td>Speed effect</td><td>about 1.0× — idle cards do not help one render</td><td>real parallelism, no idle cards</td></tr>
+<tr><td>Memory effect</td><td>none — the activation still lives on one card</td><td>the activation is split by N</td></tr>
+</table>
+<p>The pipeline made cards wait their turn and relieved nothing: a card can hold a large block cache only <em>while idle</em>, and the instant it becomes the compute stage it must evict that cache to make room for the activation. CP keeps every card working on its own shard <em>and</em> shrinks the memory wall. That is why it is the real single-render lever and the block-cache pipeline never was.</p></div>
+
+## 3 · Ring or Ulysses — the hardware chose
+
+Diffusers ships two flavours of context parallelism, and the choice was made for us by two numbers.
+
+**Ulysses** splits the *attention heads* across ranks with an all-to-all exchange every layer. It is low-latency and bandwidth-hungry. It also requires the degree to divide the head count — and H3 has **56 heads**, while $56 = 8 \times 7$ has no factor of 3. Plain Ulysses at degree 3 is arithmetically invalid, and even the relaxed variant would put an all-to-all on the worst link in the building.
+
+**Ring** splits the *sequence* and passes K/V around, which is the pattern above. Lower per-step bandwidth, tolerant of slow links, and better the longer the sequence is. Diffusers' own published benchmark for ring runs on four RTX 4090s over PCIe with no NVLink — consumer cards, the same topology class as this box.
+
+So: `ContextParallelConfig(ring_degree=3, ring_anything=True)`, with `ring_anything` because the packed sequence length is not guaranteed divisible by three, and `set_attention_backend("_native_cudnn")` because `enable_parallelism()` hard-errors if the active backend does not support CP.
+
+## 4 · The plan H3 does not ship
+
+Then the first real obstacle. `enable_parallelism()` does not shard anything by itself. It reads a **`cp_plan`** — a dictionary mapping module names to which forward inputs to split and which outputs to gather — and installs hooks that do the splitting. Every DiT that officially supports CP declares its own plan in its transformer file.
+
+**H3 declares none.** The base class default is `_cp_plan = None`, and the call raises unless a plan is passed in. So one had to be written by hand, and H3 makes that harder than usual.
+
+<div class="callout spec"><span class="t">Why the plan could not be written the easy way</span>
+<p>For a straightforward DiT the input <code>hidden_states</code> <em>is</em> the sequence: split at the model root, gather at <code>proj_out</code>, done. H3's forward instead receives <b>three separate modality tensors</b> — video rows, audio, text — plus a set of full-length index tensors (<code>position_ids</code>, <code>token_tags</code>, <code>timestep_indices</code>, <code>video_indices</code>, <code>audio_indices</code>, <code>text_indices</code>). The packed sequence is built <em>inside</em> the forward with <code>index_copy</code>, and the output is pulled back out with <code>index_select</code> on <b>absolute global positions</b>.</p>
+<p>Those index tensors name positions in the <em>full</em> sequence. Shard them and every one of them is silently wrong. So the root is the wrong place to split.</p></div>
+
+The correct split point is **after packing, at the transformer-block stack**, where the tensor is finally a clean `(B, seq_len, hidden)` and attention is plain self-attention over `seq_len`. That gives a three-part plan:
+
+- Split `hidden_states` **once**, on entry to block 0 — the loop threads `hidden_states = block(...)`, so it stays sharded down the whole residual stream.
+- Split `adaln_indices` and the rotary `(cos, sin)` tables at **every** block, because those are re-supplied at full length to each one.
+- **Gather** back to full length at the last block's output, before `norm_out` and `proj_out`, which need the full-length index tensors again.
+
+<div class="callout warn"><span class="t">A wrong plan does not crash — it renders</span>
+<p>This is the quiet danger of the whole approach. A misplaced split produces a perfectly plausible video that is simply not the video the model would have made. There is no exception, no shape error, no warning. The only defence is a numerical comparison against a single-card render with the same seed, which is why §7 exists and why the comparison pair <code>cmp-ring</code> / <code>cmp-normal</code> matters more than any speed measurement in this chapter.</p></div>
+
+## 5 · The staged build — what was actually run, in order
+
+No full render was attempted on faith. Each stage answered one frightening question, and the plan was to stop at the first failure.
+
+**Stage 0 — NCCL smoke.** Does the collective work at all over a topology with no NVLink, where one card's path crosses the CPU? A three-rank all-reduce of `0, 1, 2` should sum to `3.0`. It did, with `NCCL_P2P_DISABLE=1` — required here because peer-to-peer is not available on the path that crosses the CPU. **The collective works over PCIe.**
+
+**Stage 1 — plan registration.** The hand-written plan was passed to `enable_parallelism(ring_degree=3, ring_anything=True, cp_plan=ours)` with the `_native_cudnn` backend. It **registered the split and gather hooks on all three ranks with no error.** A hand-authored plan is accepted.
+
+**Stage 2 — a real two-step denoise.** CP enabled, offload enabled, and the memory probe confirmed the sequence was genuinely **split three ways: about 5,022 tokens per card, down from 15,067 on one.** Per-GPU peak sat at about **5.2 GB**. The known CP-versus-offload hook-ordering bug (diffusers issue #12533) did **not** bite, because CP was enabled *before* offload — the order the issue's reporter had found as a workaround.
+
+<div class="callout spec"><span class="t">The three scary unknowns, and their verdicts</span>
+<pre>
+Stage 0   Does NCCL work with no NVLink?          green   0,1,2 all-reduced to 3.0
+Stage 1   Does CP init on H3, which ships no plan? green   hand-written plan registered on all 3 ranks
+Stage 2   Does it really split the sequence?       green   ~5,022 tok/GPU  (was ~15,067 on one)
+Stage 2   Does the #12533 hook bug break it?       green   did NOT bite — CP enabled BEFORE offload
+</pre></div>
+
+The per-card budget the design predicted, and roughly what the probe found:
+
+| Item | int8 | Note |
+|---|---|---|
+| One resident transformer block | ~0.66 GB | streamed in for its forward, then dropped |
+| Activation, was ~5.7 GB, divided by 3 | ~1.9 GB | the entire point of the exercise |
+| Ring K/V buffers and working set | ~1.2 GB | roughly one shard of K/V at a time |
+| **Per-GPU total** | **~3.8 GB** | comfortably inside 8 GB |
+
+## 6 · The wall — and it was not on the GPUs
+
+Stage 2 proved the sequence splits. Then the process died.
+
+<div class="callout warn"><span class="t">Killed by the out-of-memory killer</span>
+<p>Stage 2 ended with <code>exit -9 (SIGKILL)</code>. The cause is not CP; it is <b>weight replication</b>. CP shards activations and never touches weights, so each of the three ranks is a full independent process holding its <em>own</em> complete copy of the model to stream from. Three copies is $33 \times 3 = \mathbf{99\ GB}$ of host RAM before a single token is processed, and the forward pass's working memory pushed the total past the box's <b>125 GB</b>. The GPUs were fine at about 5.2 GB each. This is a memory-<b>replication</b> problem in host RAM, not a CP problem in VRAM. Loading was slow too: about <b>16 minutes</b> to bring 99 GB across three ranks.</p></div>
+
+Back to the three readers at the table. Each of them brought their own full copy of the dictionary. The pages were split perfectly — the *table* ran out of room.
+
+<svg viewBox="0 0 760 260" width="100%" style="max-width:920px" role="img" aria-label="A bar chart of host RAM by rank count against the 125 gigabyte limit. Ring-2 needs about 91 gigabytes and fits. Ring-3 needs about 136 gigabytes and does not. The bars are split into weight copies and forward-pass overhead, showing that the weights are the part that scales with rank count.">
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">HOST RAM, NOT VRAM  ·  EACH RANK BRINGS ITS OWN COPY OF THE WEIGHTS</text>
+  <line x1="120" y1="60" x2="756" y2="60" stroke="#ffb454" stroke-dasharray="6 4"/>
+  <text x="640" y="52" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">125 GB installed</text>
+  <text x="4" y="106" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">ring-2</text>
+  <text x="4" y="124" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">2 copies</text>
+  <rect x="120" y="86" width="304" height="46" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="424" y="86" width="116" height="46" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="272" y="115" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">weights 2 x 33 = 66 GB</text>
+  <text x="482" y="115" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">+25 GB</text>
+  <text x="556" y="115" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">about 91 GB — ran end to end</text>
+  <text x="4" y="186" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">ring-3</text>
+  <text x="4" y="204" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">3 copies</text>
+  <rect x="120" y="166" width="456" height="46" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="576" y="166" width="172" height="46" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="348" y="195" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">weights 3 x 33 = 99 GB</text>
+  <text x="662" y="195" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">+37 GB</text>
+  <text x="120" y="240" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">about 136 GB — past the line, SIGKILL. The GPUs were at 5.2 GB each and idle-handed.</text>
+</svg>
+
+This is the crucial distinction and it is easy to get backwards. The GPU-side mathematics *worked*: about 5,022 tokens and about 5.2 GB per card, comfortably inside 8 GB. What ran out was **RAM**, because three processes each keep a full weight set to stream from. The hard part was proven; what remained was a memory-management problem.
+
+## 7 · More cards is not free
+
+The natural next thought is that if three cards give a third, more cards give more relief. Yes — and no, and the two halves point in opposite directions.
+
+CP splits the activation across the cards present: three cards, a third of the video each. But **every added card adds a full weight copy to RAM**, because every rank replicates the model:
+
+$$\text{RAM} \;=\; 33\ \text{GB} \times N_{\text{GPUs}} \;+\; \text{overhead}$$
+
+| GPUs | Activation relief | Weight copies in RAM |
+|---|---|---|
+| 3 | ÷3 | **99 GB** |
+| 5 | ÷5 | **165 GB** |
+| 6 | ÷6 | **198 GB** |
+
+So on a RAM-limited box, more cards relieve the activation and worsen the RAM — and RAM is the one that already broke. Adding GPUs makes the exact failure above *worse*. If the goal is more memory relief without more cards, the lever is a different one entirely: tile the sequence *within* each card ([ch.34](34-open-use-close-flashattention.html)), which shrinks the per-card footprint without adding a copy of the weights anywhere.
+
+That observation is the seed of the whole later engine. Splitting **across** cards and chunking **within** each card are not competing options — they compose, and [ch.45](45-three-gpu-sequence-parallelism.html) is where they finally have to.
+
+## 8 · The two fixes, and what happened when both were run
+
+Two exits from the RAM wall were proposed before either was tried. One works. The other loaded exactly as designed and then broke somewhere nobody expected. Both are worth keeping.
+
+<div class="callout truth"><span class="t">Fix 1 — drop to ring-2: works</span>
+<p>CP enabled with <code>ring_degree=2</code>. The sequence split cleanly in half — <b>from about 15,067 tokens on one card to about 7,533 per card</b> — and the #12533 hook bug again did not bite. Per-GPU peak sat at about <b>5.9 GB</b>, inside 8 GB with room to spare.</p>
+<p>The RAM arithmetic is the whole story: two weight copies at 33 GB each is <b>66 GB</b>, plus roughly 25 GB of offload and forward-pass working memory, about <b>91 GB</b> — comfortably inside 125 GB. It <b>ran end to end, no OOM.</b> Ring-2 became the shipping configuration, and its halved activation headroom is what pushes the single-card ceiling of <b>209 frames (8.7 s)</b> toward roughly <b>16 s</b>.</p></div>
+
+<div class="callout warn"><span class="t">Fix 2 — free ring-3 by memory-mapping the weights: the loader worked, the offload broke it</span>
+<p>The idea was to kill weight replication without buying RAM. A custom loader initialises the model on an empty <b>meta</b> shell that allocates nothing, then calls <code>load_state_dict(..., assign=True)</code> pointed at safetensors <b>mmap views</b>. Zero-copy: all three ranks would share <em>one</em> page-cached copy of the weights instead of holding three private ones.</p>
+<p><b>Standalone it validated perfectly:</b> 638 tensors, <code>missing=0</code>, <code>meta=0</code>, loaded in <b>4 seconds</b>, and the weights sat in <code>buff/cache</code> rather than in per-process <code>used</code> RAM. Exactly the intended behaviour.</p>
+<p><b>Then it ran under ring-3 with block-streaming offload, and per-process <code>used</code> RAM climbed through the forward pass:</b> 9, then 45, 85, 92, 118 GB, then <b>SIGKILL</b>. The sequence probe read <code>seq=5,023</code>, so CP was genuinely splitting three ways — the kill was pure host RAM, nothing to do with VRAM.</p>
+<p><b>Root cause:</b> group-offload re-copies each block <em>out of the shared mmap into a per-process CPU buffer</em> on its way to the GPU, which defeats the sharing completely. This is the neighbourhood of diffusers issue #12533 and it was the recipe's own number-one risk, now <b>confirmed on hardware</b>: memory-mapped sharing and block-streaming offload fight each other.</p></div>
+
+The whole decision, end to end:
+
+<svg viewBox="0 0 760 340" width="100%" style="max-width:920px" role="img" aria-label="A decision tree. Context parallelism works on H3 and splits the sequence with no hook bug. Attempting ring-3 replicates weights at 33 gigabytes times three plus overhead, which runs out of memory. From there two branches: ring-2 at 66 gigabytes fits and reaches about 16 seconds, or free ring-3 via a custom memory-map loader, which loads shared in four seconds but is then defeated by offload re-copying each block per process, needing either a custom offload hook or more RAM.">
+  <defs>
+    <marker id="cp4" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE DECISION, END TO END</text>
+  <rect x="252" y="30" width="256" height="48" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="380" y="52" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">CP works on H3</text>
+  <text x="380" y="70" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">splits by N, no hook bug</text>
+  <line x1="380" y1="78" x2="380" y2="98" stroke="#6f7b8f" marker-end="url(#cp4)"/>
+  <rect x="252" y="102" width="256" height="48" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="124" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">try ring-3</text>
+  <text x="380" y="142" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">weights replicate: 33 x 3 + overhead</text>
+  <line x1="380" y1="150" x2="380" y2="170" stroke="#6f7b8f" marker-end="url(#cp4)"/>
+  <rect x="290" y="174" width="180" height="40" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="380" y="199" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">out of host RAM</text>
+  <path d="M310,214 L190,240" fill="none" stroke="#6f7b8f" marker-end="url(#cp4)"/>
+  <path d="M450,214 L570,240" fill="none" stroke="#6f7b8f" marker-end="url(#cp4)"/>
+  <rect x="20" y="244" width="300" height="72" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="170" y="268" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">ring-2</text>
+  <text x="170" y="288" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">66 GB of weights, about 91 GB total</text>
+  <text x="170" y="306" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">fits, runs end to end, toward 16 s</text>
+  <rect x="440" y="244" width="316" height="72" rx="8" fill="#151b26" stroke="#ffb454"/>
+  <text x="598" y="268" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">free ring-3 via mmap loader</text>
+  <text x="598" y="288" text-anchor="middle" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">loads shared in 4 s — then offload re-copies</text>
+  <text x="598" y="306" text-anchor="middle" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">per process: 9 to 118 GB, killed</text>
+</svg>
+
+The same story as arithmetic, per rank count:
+
+- **ring-2:** $2\times33 + 25 \approx \mathbf{91\ GB}$ — fits 125 GB.
+- **ring-3:** $3\times33 + 37 \approx \mathbf{136\ GB}$ — over budget, killed.
+- **mmap load:** the weights live in page cache, shared, about 33 GB — right up until the offload copies each block back into per-process RAM, and the sharing is gone.
+
+<div class="callout spec"><span class="t">Where that leaves ring-3</span>
+<p><b>Ring-2 delivers the goal with no new machinery.</b> The free ring-3 path is not dead, but it needs hook-level work that has not been proven: a <b>custom offload hook</b> that streams each block from the shared mmap straight to the GPU and, on offload, simply <em>drops</em> the GPU copy — never copying it back into a per-process CPU buffer, which is the exact step that killed the run. The alternative is blunt: about <b>32 GB more RAM</b>. Three full copies is 99 GB of weights plus roughly 37 GB of overhead, so ring-3 wants about <b>150 GB</b> to be comfortable — a cheap DDR3 stick and no code at all.</p></div>
+
+Note also that **fp16 was never on the table by this route**: $66 \times 3 = 198$ GB needs the shared-weights fix even more badly. Since fp16 and int8 were already measured as indistinguishable in quality ([ch.17](17-what-actually-improves-quality.html)), int8 is the path and fp16 is not worth the RAM.
+
+## 9 · Was the split correct?
+
+The frightening property from §4 — a wrong plan renders a plausible wrong video — deserves an answer rather than a shrug, and the answer came from a comparison pair rendered on the box.
+
+<div class="callout truth"><span class="t">cmp-ring against cmp-normal</span>
+<p>The same scene, the same seed, at <b>832×480 × 124 frames, 4 steps</b>, about two minutes each: one through the ring, one through the ordinary single-card path as reference. The result was <b>sharp, and the ring output matched the reference</b> ([ch.47](47-the-scorecard.html)). The ring is not degrading anything. That pair went on to earn its keep a second time in <a href="46-the-first-15-seconds.html">ch.46</a>, where it killed the hypothesis that the sharded path was responsible for a bad-looking render — a reference measured once and then reused as evidence for a completely different question.</p></div>
+
+## 10 · Where this leads
+
+The ring built here does not stay a diffusers configuration flag. In [ch.45](45-three-gpu-sequence-parallelism.html) the same idea is rebuilt by hand, in our own engine, because the framework path could not compose with everything else the engine needed — and there the sharded forward is validated block by block against a captured golden reference, then run at about **93,000 tokens** across all three cards, which is a sequence no single card can hold. The pieces that came out of this chapter — the split point after packing, the online-softmax ring, the K/V pass over a slow link, the rule that CP replicates weights — are the pieces that engine is made of.
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>There are two axes.</b> Split the <em>weights</em> (tensor or pipeline parallelism) or split the <em>activations</em> (context parallelism). Opposite costs. This build does CP.</li>
+<li><b>Weight-splitting is dead on this box.</b> A third of the model still exceeds 8 GB, and per-layer all-reduce wants about 300 GB/s where the box has about 4.9.</li>
+<li><b>A transformer block is per-token except attention</b>, so sharding the sequence is free everywhere but that one line — where a ring passes K/V instead.</li>
+<li><b>Ring, not Ulysses.</b> 3 does not divide 56 heads, and an all-to-all every layer is the worst possible pattern on this link.</li>
+<li><b>H3 ships no <code>cp_plan</code>.</b> One was hand-written: split <code>hidden_states</code> once at block 0, split <code>adaln_indices</code> and rotary at every block, gather at the last — because the model's index tensors name absolute positions and cannot be sharded.</li>
+<li><b>The core came back green.</b> NCCL fine, plan registered on all three ranks, sequence genuinely split (about 5,022 tokens from 15,067), about 5.2 GB per card, and the #12533 hook bug dodged by enabling CP before offload.</li>
+<li><b>The wall is RAM, not VRAM.</b> CP replicates weights — three copies is 99 GB — and the forward pushed past 125 GB. A replication problem, not a CP problem.</li>
+<li><b>More cards is not free.</b> Divide-by-N activation but N weight copies. On a RAM-limited box more cards worsen the real bottleneck; tiling within each card does not.</li>
+<li><b>Ring-2 is the working exit</b> — about 91 GB total, ran end to end at about 5.9 GB per card, sequence halved to about 7,533 tokens, pushing the 8.7 s ceiling toward roughly 16 s.</li>
+<li><b>Free ring-3 hit the offload wall.</b> The mmap loader shared one copy in 4 seconds, then group-offload re-copied each block per process and RAM climbed 9 to 118 GB before the kill. Bounded, not mysterious: a custom offload hook, or about 32 GB more RAM.</li>
+<li><b>The split was verified, not assumed.</b> <code>cmp-ring</code> matched <code>cmp-normal</code> at 832×480, which is the only evidence that matters when a wrong plan fails silently.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">context parallelism</span><span class="badge">tensor parallelism</span><span class="badge">ring attention</span><span class="badge">Ulysses</span><span class="badge">all-reduce</span><span class="badge">NCCL</span><span class="badge">rank</span><span class="badge">cp_plan</span><span class="badge">split and gather hooks</span><span class="badge">weight replication</span><span class="badge">mmap / page cache</span><span class="badge">group offload</span><span class="badge">SIGKILL / OOM-killer</span></p>
+<p>If those feel solid, the next question is what to do with three cards on an ordinary working day.</p></div>
+
+Next: the production line — what each of the three cards does when the job is not one heroic render but a batch of shots that has to become a film.
+
+<p class="small">Why one render will not spread by weight-splitting is <a href="16-multi-gpu-and-nvlink.html">ch.16</a>; the interconnect physics behind the 4.9 versus 300 GB/s gap is <a href="24-pcie-nvlink-interconnect.html">ch.24</a>; the idle pipeline this is <em>not</em> is <a href="32-thinking-like-a-circuit.html">ch.32</a>; the activation wall CP relieves, and the per-card tiling alternative, is <a href="34-open-use-close-flashattention.html">ch.34</a>; the hand-built successor to this ring is <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; the ownership question this build feeds is <a href="35-is-it-really-ours.html">ch.35</a>. The grounding is <code>planning/CP-RECIPE.md</code> (the code-level recipe and the staged feasibility test) and <code>planning/ENGINE-DESIGN.md</code> (why CP, and not the block cache, is the real single-render lever).</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>30 · The Render, Live</title>
+<meta name="description" content="What every part of the machine does during a live render: two processes, 50 blocks a step, 460 GB of PCIe traffic, and why a card at 20% utilisation is waiting rather than resting.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 30 · Who does what, from launch to file</span>
+
+# The Render, Live
+
+<p class="lede">A render is a relay: the disk hands the model to system RAM, RAM hands one block at a time to a graphics card over PCIe, the card does the arithmetic and hands the result back, and fifty of those hand-offs make one step. Everything slow about this machine is a consequence of how many times that relay runs.</p>
+
+The measured render `g4final` — 1280×704, 345 frames, 23 steps — took about **44 hours**, at **6845 seconds per step**. Almost two days of a machine doing one thing. It is tempting to imagine something enormously complicated happening in there. What is actually happening is the same short sequence, **1,150 times**: fetch a block, multiply, discard, fetch the next.
+
+This chapter follows that sequence from the moment a render is launched to the moment an `.mp4` appears, and says at each point which component is busy and which is waiting.
+
+## The cast
+
+Six components take part, and only one of them does arithmetic.
+
+<table>
+<tr><th>Component</th><th>This build</th><th>Its job in a render</th></tr>
+<tr><td><b>Disk</b></td><td>879 GB, 585 GB free</td><td>Holds the model files at rest. Read once at the start; written once at the end. Idle for everything in between</td></tr>
+<tr><td><b>System RAM</b></td><td>125 GB DDR3-1600</td><td>Holds the whole model for the duration. This is the <em>source</em> every streamed block is copied from</td></tr>
+<tr><td><b>PCIe</b></td><td>3.0 ×16, ~12 GB/s in practice</td><td>The road between RAM and a card. Every block drives across it, every step</td></tr>
+<tr><td><b>CPU</b></td><td>2 × Xeon E5-2665 — 16 cores, 32 threads</td><td>Chooses the next block, issues the copies, assembles inputs, runs ffmpeg at the end. <b>Never does the denoising arithmetic</b></td></tr>
+<tr><td><b>GPU chips</b></td><td>3 × RTX 3060 Ti, 200 W each</td><td>The arithmetic — attention and feed-forward for every block, then the VAE decode</td></tr>
+<tr><td><b>VRAM</b></td><td>8 GB per card, 448 GB/s</td><td>Holds only what a chip needs right now: one block (~0.4 GB) plus the video in progress</td></tr>
+</table>
+
+The structural analogy that survives contact with the details is a **kitchen with a pantry down the corridor**. The chef is the chip; the countertop is VRAM; the pantry is RAM; the corridor is PCIe. The pantry is enormous and the countertop is tiny, so nothing is ever "in the kitchen" for long — ingredients are carried in for one dish and cleared away. The corridor is what costs time, and the corridor does not get shorter when the chef gets faster.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="The machine drawn as a set of pipes with real bandwidths. The disk feeds system RAM once. RAM feeds a card's VRAM over PCIe at about 12 gigabytes per second. Inside the card, VRAM feeds the chip at 448 gigabytes per second. Card to card runs at only 4.9 gigabytes per second.">
+  <defs>
+    <marker id="r1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="r2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="r3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE ROADS, AND WHAT EACH ONE CARRIES PER SECOND</text>
+  <rect x="2" y="34" width="140" height="70" rx="8" fill="#12161f" stroke="#3a4a63"/>
+  <text x="72" y="60" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Disk</text>
+  <text x="72" y="80" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">879 GB</text>
+  <text x="72" y="96" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">read once</text>
+  <line x1="144" y1="68" x2="176" y2="68" stroke="#6f7b8f" marker-end="url(#r1)"/>
+  <text x="160" y="58" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">once</text>
+  <rect x="180" y="34" width="180" height="70" rx="8" fill="#151b26" stroke="#7aa2ff"/>
+  <text x="270" y="60" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">System RAM — 125 GB</text>
+  <text x="270" y="80" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">the whole model, resident</text>
+  <text x="270" y="96" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">DDR3-1600, ≈ 25 GB/s</text>
+  <line x1="362" y1="68" x2="428" y2="68" stroke="#5ee0c0" stroke-width="2" marker-end="url(#r2)"/>
+  <text x="396" y="58" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">PCIe</text>
+  <text x="396" y="88" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">~12 GB/s</text>
+  <rect x="432" y="24" width="326" height="132" rx="10" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="595" y="44" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE CARD</text>
+  <rect x="452" y="56" width="286" height="40" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="595" y="81" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">VRAM — 8 GB · one block + the latent</text>
+  <line x1="595" y1="100" x2="595" y2="112" stroke="#7aa2ff" stroke-width="3"/>
+  <text x="612" y="112" fill="#7aa2ff" font-size="10" font-family="Inter,sans-serif">448 GB/s</text>
+  <rect x="452" y="112" width="286" height="34" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="595" y="134" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">the chip — all of the arithmetic</text>
+  <path d="M540,160 L540,186 L250,186 L250,206" fill="none" stroke="#ffb454" stroke-dasharray="4 3" marker-end="url(#r3)"/>
+  <text x="556" y="180" fill="#ffb454" font-size="10.5" font-family="Inter,sans-serif">card ↔ card: 4.9 GB/s — slower than fetching from RAM</text>
+  <rect x="120" y="206" width="260" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="250" y="226" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">CPU — 16 cores / 32 threads</text>
+  <text x="250" y="244" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">issues the copies · never denoises</text>
+  <text x="400" y="228" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">The corridor between RAM and the card is the narrowest road</text>
+  <text x="400" y="246" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">that carries traffic on every single block.</text>
+</svg>
+
+Note the last road on that diagram. Card-to-card transfer on this board runs at about **4.9 GB/s** — slower than pulling the same block from system RAM at ~12 GB/s. On hardware with NVLink the ranking is reversed, and a great deal of multi-GPU folk wisdom assumes the reversed order. Here it does not hold, and that single inequality shapes every design decision downstream (<a href="24-pcie-nvlink-interconnect.html">ch.24</a>).
+
+## Phase A — reading the prompt, in its own process
+
+The encoder is 26 GB and the transformer is 20 GB. Rather than negotiate for space between them, the pipeline never lets them meet.
+
+A first process loads **only** the encoder blocks, reads the prompt, writes what it understood to a `.pt` file on disk, and exits. A second process then starts, loads **only** the transformer, and reads that file back. The 26 GB never enters the second process at all.
+
+<div class="callout truth"><span class="t">A side effect that turned out to matter more than the memory saving</span>
+<p>Prompt understanding is <b>reusable</b>. The embeddings for a scene are fixed; steps, resolution, seed and engine are not. Encode a scene once and it can be re-rendered indefinitely — at 480p to check the motion, at 720p for the final — without paying the encoder again.</p>
+<p>In practice this is why the working directory accumulates dozens of embedding files that get re-rendered constantly, and why the "cost of a render" in this guide almost never includes the encoder (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>).</p></div>
+
+## Phase B — the loop, where all the hours are
+
+The second process loads the int8 transformer, installs block-level offloading, and starts denoising. From here to the end, one pattern repeats.
+
+For each of the **50 blocks**, in order:
+
+1. The CPU issues a copy of that block's weights — about **0.4 GB** — from RAM into VRAM.
+2. The chip runs the block: attention, then the feed-forward network, then the residual adds.
+3. The result — the activation — stays on the card and becomes the input to the next block.
+4. The block's weights are freed. Their copy in RAM was never touched.
+
+When block 49 finishes, that is **one step**, and the whole thing begins again at block 0.
+
+<svg viewBox="0 0 760 274" width="100%" style="max-width:920px" role="img" aria-label="One denoise step drawn as a sawtooth: fifty times in a row, about 0.4 gigabytes of weights are copied across PCIe and then computed. Fifty blocks of 0.4 gigabytes is 20 gigabytes per step, and twenty-three steps is about 460 gigabytes of traffic for one render.">
+  <defs>
+    <marker id="r4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE STEP = 50 OF THESE, BACK TO BACK</text>
+  <text x="2" y="42" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">PCIe</text>
+  <text x="2" y="106" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">chip</text>
+  <rect x="46" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="110" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="174" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="238" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="302" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="380" y="48" fill="#6f7b8f" font-size="12" font-family="SF Mono,monospace">· · ·</text>
+  <rect x="420" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="484" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="548" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="612" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="676" y="30" width="56" height="26" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="46" y="72" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">0.4 GB copied per block · 50 blocks · every step</text>
+  <rect x="78" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="142" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="206" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="270" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="334" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="404" y="106" fill="#6f7b8f" font-size="12" font-family="SF Mono,monospace">· · ·</text>
+  <rect x="452" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="516" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="580" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="644" y="88" width="56" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="708" y="88" width="30" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="78" y="130" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">attention + feed-forward on the activation that is already resident</text>
+  <line x1="46" y1="146" x2="738" y2="146" stroke="#232c3b"/>
+  <text x="46" y="164" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">block 0</text>
+  <text x="738" y="164" text-anchor="end" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">block 49  →  one step done</text>
+  <rect x="2" y="182" width="368" height="86" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="20" y="206" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Per step</text>
+  <text x="20" y="228" fill="#8fd8c4" font-size="12.5" font-family="SF Mono,monospace">50 × 0.4 GB = 20 GB</text>
+  <text x="20" y="250" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the entire model, pulled over once</text>
+  <rect x="390" y="182" width="368" height="86" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="408" y="206" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Per 23-step render</text>
+  <text x="408" y="228" fill="#8fd8c4" font-size="12.5" font-family="SF Mono,monospace">23 × 20 GB ≈ 460 GB</text>
+  <text x="408" y="250" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">1,150 block fetches · the card holds 0.4 GB of it at a time</text>
+</svg>
+
+<div class="callout spec"><span class="t">The traffic, stated once</span>
+<p>Fifty blocks of 0.4 GB is <b>20 GB moved per step</b> — the whole model. A 23-step render moves about <b>460 GB</b> across PCIe; a 49-step render moves about <b>980 GB</b>. None of it is new data. It is the same twenty gigabytes, fetched again and again, because 8 GB of VRAM cannot keep it and 0.4 GB is what fits.</p></div>
+
+### One dangerous switch in this phase
+
+Offloading has an option to overlap copies with compute by pinning host memory. On this box it is left **off**, deliberately.
+
+<div class="callout danger"><span class="t">`use_stream=True` kills the process with no traceback</span>
+<p>Enabled, it pins tens of gigabytes of host RAM, the kernel's out-of-memory killer takes the process, and nothing is written to any log — the render simply ceases. The setting stays <code>False</code>. Transfers are slower and the render survives, which on a job measured in days is the only trade that matters.</p></div>
+
+## Phase C — decode, once
+
+When the last step ends, the latent is finished but unwatchable: 24 channels of numbers that mean nothing outside the model. The visual VAE expands it into pixels and the audio VAE into 32 kHz stereo. This happens **once**, and it is cheap relative to the loop — but it is where two of this project's most expensive failures happened, because "cheap" and "safe" are different words.
+
+The decode does not run on the whole clip at once. It works in **clips of latent frames**, and spatially it tiles at 256×256 with 64 pixels of overlap so that neighbouring tiles blend rather than seam.
+
+<div class="callout danger"><span class="t">Two real decode failures, both after the expensive part was done</span>
+<p><b>`g4j`</b> completed <b>6 hours 10 minutes</b> of denoise and then died on the <em>first line</em> of decode: the pipeline resolved its device as <code>cuda:0</code> while the sharded forward had returned latents on the CPU. Both decode entry points carried the same bug (<code>decoders.py:185</code> and <code>:245</code>). Six hours of correct arithmetic, discarded by a device-placement mismatch.</p>
+<p><b>`g4k`</b> ran out of memory at <code>[vae] clip 14</code>. The cause was not capacity: the decode appended every finished pixel chunk — about <b>216 MB</b> each at 1280×704 — to a list that lived on the GPU. Chunk fourteen had nowhere to go. Moving finished chunks to CPU memory on append fixed it. An accumulation bug, not a wall.</p>
+<p>Both are the reason the pipeline now dumps latents to disk <em>before</em> decode is allowed to run, and why a separate tool can rebuild the video from a dump (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>). On a two-day render, the recovery path is part of the design.</p></div>
+
+## Where the time actually goes
+
+The measured renders on this build, in one table, because the shape of the numbers is more instructive than any one of them.
+
+<table>
+<tr><th>Scene</th><th>Resolution × frames</th><th>Steps</th><th>Total</th><th>Per step</th><th>Result</th></tr>
+<tr><td>ocean demo</td><td>768×448 × 73 (3.0 s)</td><td>20</td><td>348 s</td><td>—</td><td>works</td></tr>
+<tr><td><code>cp15sd</code></td><td>512×288 × 345 (15 s)</td><td><b>49</b></td><td>3965 s (66 min)</td><td>81 s</td><td><b>beautiful</b></td></tr>
+<tr><td><code>an1</code></td><td>1280×704 × 124 (5 s)</td><td>23</td><td>3295 s (55 min)</td><td>143 s</td><td><b>beautiful</b></td></tr>
+<tr><td><code>e720hq</code></td><td>1280×704 × 124</td><td>23</td><td>3486 s (58 min)</td><td>152 s</td><td>good</td></tr>
+<tr><td><code>g4k</code></td><td>1280×704 × 345 (14.4 s)</td><td>3</td><td>~5.5 h</td><td>6600 s</td><td><b>mud</b></td></tr>
+<tr><td><code>g4final</code></td><td>1280×704 × 345</td><td>23</td><td>~44 h</td><td>6845 s</td><td>in progress</td></tr>
+</table>
+
+Two readings are worth making explicit.
+
+**Step count is a property of the scene, not the machine.** A tight close-up resolves in **4** steps; a character mid-shot needs about **23**; a wide vista with a small distant subject needs **49**. `g4k` is the counter-example that proves it: three steps at full 720p, five and a half hours of real compute, and the output was mud. Steps cannot be economised by asking nicely.
+
+**The cost of length is not linear.** `cp15sd` renders fifteen seconds at 512×288 in 81 seconds per step. `g4final` renders the same fifteen seconds at 1280×704 in 6845 seconds per step — 2.26× the tokens for **34×** the time. Attention's quadratic term predicts roughly 5×, so the sharded three-card path carries something like **7× overhead beyond the mathematics**. That overhead is the subject of <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>, and it is the honest reason native 720p×15 s is described here as a proven capability rather than a workflow (<a href="47-the-scorecard.html">ch.47</a>).
+
+<svg viewBox="0 0 760 246" width="100%" style="max-width:920px" role="img" aria-label="Two renders drawn to the same scale. The an1 render is 23 steps of 143 seconds, about 55 minutes, with encode and decode as slivers at each end. The g4final render is 23 steps of 6845 seconds, about 44 hours — the same step count on a job 48 times longer.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SAME PIPELINE, SAME 23 STEPS — DIFFERENT CLIP SIZE</text>
+  <text x="2" y="42" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">an1 · 1280×704 × 124 frames</text>
+  <rect x="2" y="52" width="8" height="34" rx="2" fill="#7aa2ff"/>
+  <rect x="12" y="52" width="30" height="34" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="52" y="74" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">3295 s — 23 steps × 143 s ≈ 55 minutes</text>
+  <text x="2" y="122" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">g4final · 1280×704 × 345 frames</text>
+  <rect x="2" y="132" width="8" height="34" rx="2" fill="#7aa2ff"/>
+  <rect x="12" y="132" width="726" height="34" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="375" y="154" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">23 steps × 6845 s ≈ 44 hours</text>
+  <text x="2" y="186" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">2.8× the frames · 2.26× the tokens · 34× the time</text>
+  <rect x="2" y="198" width="756" height="44" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="18" y="218" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">The blue slivers at the left of each bar are load and encode. On a 44-hour job they are a rounding error.</text>
+  <text x="18" y="236" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Nobody optimises the load. Everybody optimises the loop.</text>
+</svg>
+
+## Reading the machine while it runs
+
+Two numbers from `nvidia-smi` say more about a render than any log line: **utilisation** and **power draw**. A chip only pulls near its power limit when its arithmetic units are genuinely busy, so wattage is a live readout of which wall the job is hitting.
+
+The honest answer is that this build has produced *both* readings, on different work, and the difference is the useful part.
+
+<svg viewBox="0 0 760 290" width="100%" style="max-width:920px" role="img" aria-label="Two utilisation traces. On the streamed single-card path the trace is a sawtooth: brief bursts at high utilisation separated by long low troughs, averaging about 100 watts of a 200 watt limit. On the three-card sharded run the working card's trace is flat at 100 percent utilisation.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME CARD, TWO DIFFERENT JOBS</text>
+  <rect x="2" y="28" width="368" height="216" rx="10" fill="#151b26" stroke="#ffb454"/>
+  <text x="20" y="52" fill="#ffd9a0" font-size="12.5" font-family="Inter,sans-serif">Streamed, one card</text>
+  <text x="20" y="70" fill="#c9a06a" font-size="11" font-family="Inter,sans-serif">measured: ~100 W of 200 W, utilisation flickering</text>
+  <line x1="24" y1="196" x2="352" y2="196" stroke="#3a4a63"/>
+  <line x1="24" y1="96" x2="24" y2="196" stroke="#3a4a63"/>
+  <text x="14" y="100" text-anchor="end" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">100%</text>
+  <path d="M24,190 L44,190 L44,100 L64,100 L64,182 L104,182 L104,100 L124,100 L124,188 L164,188 L164,100 L184,100 L184,184 L224,184 L224,100 L244,100 L244,190 L284,190 L284,100 L304,100 L304,186 L344,186" fill="none" stroke="#ffb454" stroke-width="1.5"/>
+  <text x="24" y="214" fill="#c9a06a" font-size="11" font-family="Inter,sans-serif">brief bursts, long troughs</text>
+  <text x="24" y="232" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the troughs are PCIe transfers, not rest</text>
+  <rect x="390" y="28" width="368" height="216" rx="10" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="408" y="52" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">Sharded, the working card</text>
+  <text x="408" y="70" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">measured on g4final: 100% utilisation</text>
+  <line x1="412" y1="196" x2="740" y2="196" stroke="#3a4a63"/>
+  <line x1="412" y1="96" x2="412" y2="196" stroke="#3a4a63"/>
+  <text x="402" y="100" text-anchor="end" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">100%</text>
+  <path d="M412,100 L740,100" fill="none" stroke="#5ee0c0" stroke-width="2"/>
+  <text x="412" y="214" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">pinned — the chip is the limit here</text>
+  <text x="412" y="232" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">and a step still takes 6845 s</text>
+  <text x="2" y="266" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">Low utilisation during streaming is a queue, not a nap. High utilisation is not a promise of speed either.</text>
+  <text x="2" y="284" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Which of the two a given render shows depends on the work, not on the card — so it must be measured, not assumed.</text>
+</svg>
+
+<div class="callout truth"><span class="t">What a low reading means, and what it does not</span>
+<p>On the streamed single-card path, a card was measured drawing about <b>100 W of its 200 W limit</b>, with utilisation flickering between 100% and the low tens. That is not a card being lazy. It is a card <b>waiting for data</b> — most of the interval spent idle while PCIe drags the next 0.4 GB block over from RAM, spiking only during the compute burst. Low power, flickering utilisation and slow steps are one symptom with one name: <b>waiting on the bus</b>.</p>
+<p>On the three-card sharded run behind <code>g4final</code>, the card doing the work measured <b>100% utilisation</b>. Same hardware, same streaming design, different bound — because at 1280×704 × 345 frames there is vastly more arithmetic per block to hide the transfer behind.</p>
+<p>So the rule is real but conditional: a chip pinned near its power limit is <b>compute-bound</b>; a chip well under it, mid-render, is <b>waiting on data</b>. What is <em>not</em> safe is deciding in advance which one a given render will be. This project has asserted both and been half right each time.</p></div>
+
+That last sentence is not rhetorical modesty. A design study for the three-card engine reasoned from "the chip is pegged" that streaming was worth only a small fraction of step time, while the live single-card power reading pointed the other way. Both observations were real; they came from different workloads. The conclusion that survived is procedural: **separate kernel time from copy time on one known-good render before designing anything around the answer** (<a href="32-thinking-like-a-circuit.html">ch.32</a>).
+
+## The whole run, in one place
+
+<div class="callout truth"><span class="t">Five phases, and which component owns each</span>
+<ol>
+<li><b>Load</b> — disk to RAM, once. Disk and CPU busy, the cards idle. Minutes.</li>
+<li><b>Encode</b> — the 26 GB encoder reads the prompt in its own process and writes embeddings to disk, then exits. Reusable forever after.</li>
+<li><b>Denoise</b> — for every step, for every one of 50 blocks: copy 0.4 GB in, compute, discard. PCIe and the chips alternating. <b>Hours to days, and 99% of the wall-clock.</b></li>
+<li><b>Decode</b> — once. Latent to pixels in overlapping tiles, and to 32 kHz stereo. Cheap, and historically the most dangerous phase on this build.</li>
+<li><b>Save</b> — the CPU muxes frames and audio into an <code>.mp4</code>. Seconds.</li>
+</ol>
+<p>One sentence to carry: <b>the model lives in RAM and only visits the cards.</b> Everything expensive follows from how often it has to visit.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">phase A / phase B</span><span class="badge">embedding cache</span><span class="badge">block streaming</span><span class="badge">activation</span><span class="badge">step</span><span class="badge">PCIe traffic</span><span class="badge">peer-to-peer bandwidth</span><span class="badge">group offloading</span><span class="badge">pinned memory</span><span class="badge">VAE tiling</span><span class="badge">latent dump</span><span class="badge">utilisation</span><span class="badge">power limit</span><span class="badge">compute-bound</span><span class="badge">transfer-bound</span><span class="badge">seconds per step</span></p>
+<p>If those feel solid, the next question is what the chip is actually computing in those bursts.</p></div>
+
+Next: the arithmetic itself — one multiply-add worked by hand, and why the format those numbers are stored in changed the render time by a factor of two.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

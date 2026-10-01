@@ -1,0 +1,21 @@
+[Unit]
+Description=selfhostimageai — Qwen-Image web app (FastAPI over stable-diffusion.cpp)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Desktop/selfhostimageai
+Environment=IMAGEAI_ROOT=/root/Desktop/selfhostimageai
+Environment=SD_BIN=/root/Desktop/selfhostimageai/stable-diffusion.cpp/build/bin/sd-cli
+Environment=IMAGEAI_OUT=/root/Desktop/selfhostimageai/outputs
+# OWNER_PASSWORD lives here (mode 600, git-ignored); gates generation, not viewing.
+EnvironmentFile=/root/.env.imageai
+# GPU pinning is per-job: the worker runs sd.cpp with CUDA_VISIBLE_DEVICES=<catalog device>
+# (device 1). GPU 0 is the audio service and is never selected. The app process itself
+# touches no GPU — it only spawns sd.cpp — so we leave its own CUDA env unset.
+ExecStart=/root/Desktop/selfhostimageai/app/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8097 --app-dir /root/Desktop/selfhostimageai/app
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

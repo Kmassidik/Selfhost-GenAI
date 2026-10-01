@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>15 · Vectors, Matrices, or Signals?</title>
+<meta name="description" content="One item is a vector, many stacked are a matrix, a video is a five-axis tensor, and the output is a signal — the same numbers reshaped, traced stage by stage through a real render.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 15 · The Data, Up Close</span>
+
+# Vectors, Matrices, or Signals?
+
+<p class="lede">All three, one after another, and it is the same numbers the whole way. A <b>vector</b> is what one item means. A <b>matrix</b> is many of those items stacked — or a learned transformation waiting to act on them. A <b>tensor</b> is the general case with any number of axes. A <b>signal</b> is what those numbers become at the very end, when one axis is finally interpreted as time. Nothing converts between these worlds; the data is simply reshaped, and the shape at each moment is what tells you the role the numbers are playing.</p>
+
+Here is a real shape from this build. Encoding an 832×480 clip of 124 frames produces a visual latent of
+
+$$\mathbf{z} \;\in\; \mathbb{R}^{1 \times 24 \times 37 \times 30 \times 52}$$
+
+Five numbers, and every one of them is a different kind of thing: a batch, a channel count, a count of compressed frames, a height, a width. Learning to read that line — to know instantly which axis is time and which is meaning — is most of what this chapter is for. The rest of it is watching that same block of numbers change costume six times between a sentence and an `.mp4`.
+
+<svg viewBox="0 0 760 236" width="100%" style="max-width:920px" role="img" aria-label="Six stages of one render: text becomes token integers, each token becomes a vector, the tokens stack into a matrix, attention forms a square score matrix, the video lives as a five-axis latent tensor, and the decoders turn it into signals over time.">
+  <defs>
+    <marker id="m1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE STREAM OF NUMBERS · SIX SHAPES · NOTHING IS CONVERTED, ONLY RESHAPED</text>
+  <rect x="2" y="30" width="110" height="146" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="57" y="50" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">token ids</text>
+  <rect x="12" y="92" width="26" height="20" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <text x="25" y="106" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="SF Mono,monospace">914</text>
+  <rect x="44" y="92" width="26" height="20" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <text x="57" y="106" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="SF Mono,monospace">28</text>
+  <rect x="76" y="92" width="26" height="20" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <text x="89" y="106" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="SF Mono,monospace">4471</text>
+  <text x="57" y="160" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">1 axis</text>
+  <text x="57" y="172" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">integers, no meaning yet</text>
+  <line x1="114" y1="100" x2="126" y2="100" stroke="#5ee0c0" marker-end="url(#m1)"/>
+  <rect x="130" y="30" width="110" height="146" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="185" y="50" text-anchor="middle" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">vector</text>
+  <rect x="170" y="66" width="30" height="14" rx="2" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="170" y="82" width="30" height="14" rx="2" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="170" y="98" width="30" height="14" rx="2" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="170" y="114" width="30" height="14" rx="2" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="170" y="130" width="30" height="14" rx="2" fill="#0d1017" stroke="#3a4a63"/>
+  <text x="185" y="160" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">1 axis</text>
+  <text x="185" y="172" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">one item's meaning</text>
+  <line x1="242" y1="100" x2="254" y2="100" stroke="#5ee0c0" marker-end="url(#m1)"/>
+  <rect x="258" y="30" width="110" height="146" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="313" y="50" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">matrix</text>
+  <rect x="270" y="66" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="292" y="66" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="314" y="66" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="336" y="66" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="270" y="82" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="292" y="82" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="314" y="82" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="336" y="82" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="270" y="98" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="292" y="98" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="314" y="98" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="336" y="98" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="270" y="114" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="292" y="114" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="314" y="114" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="336" y="114" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="270" y="130" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="292" y="130" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="314" y="130" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="336" y="130" width="20" height="14" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="313" y="160" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">2 axes</text>
+  <text x="313" y="172" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">every item at once</text>
+  <line x1="370" y1="100" x2="382" y2="100" stroke="#5ee0c0" marker-end="url(#m1)"/>
+  <rect x="386" y="30" width="110" height="146" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="441" y="50" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">score matrix</text>
+  <rect x="406" y="68" width="70" height="70" fill="#0d1017" stroke="#3a4a63"/>
+  <line x1="420" y1="68" x2="420" y2="138" stroke="#232c3b"/>
+  <line x1="434" y1="68" x2="434" y2="138" stroke="#232c3b"/>
+  <line x1="448" y1="68" x2="448" y2="138" stroke="#232c3b"/>
+  <line x1="462" y1="68" x2="462" y2="138" stroke="#232c3b"/>
+  <line x1="406" y1="82" x2="476" y2="82" stroke="#232c3b"/>
+  <line x1="406" y1="96" x2="476" y2="96" stroke="#232c3b"/>
+  <line x1="406" y1="110" x2="476" y2="110" stroke="#232c3b"/>
+  <line x1="406" y1="124" x2="476" y2="124" stroke="#232c3b"/>
+  <line x1="406" y1="68" x2="476" y2="138" stroke="#ffb454"/>
+  <text x="441" y="160" text-anchor="middle" fill="#aab4c5" font-size="10" font-family="Inter,sans-serif">2 axes, both tokens</text>
+  <text x="441" y="172" text-anchor="middle" fill="#c9a06a" font-size="10" font-family="Inter,sans-serif">square — hence quadratic</text>
+  <line x1="498" y1="100" x2="510" y2="100" stroke="#5ee0c0" marker-end="url(#m1)"/>
+  <rect x="514" y="30" width="110" height="146" rx="8" fill="#241a1a" stroke="#ffb454"/>
+  <text x="569" y="50" text-anchor="middle" fill="#ffd9a0" font-size="11.5" font-family="Inter,sans-serif">latent tensor</text>
+  <rect x="530" y="64" width="60" height="56" fill="#0d1017" stroke="#7a5a30"/>
+  <rect x="538" y="72" width="60" height="56" fill="#0d1017" stroke="#a07640"/>
+  <rect x="546" y="80" width="60" height="56" fill="#12161f" stroke="#ffb454"/>
+  <text x="569" y="160" text-anchor="middle" fill="#c9a06a" font-size="10" font-family="Inter,sans-serif">5 axes</text>
+  <text x="569" y="172" text-anchor="middle" fill="#c9a06a" font-size="10" font-family="SF Mono,monospace">(1,24,37,30,52)</text>
+  <line x1="626" y1="100" x2="638" y2="100" stroke="#5ee0c0" marker-end="url(#m1)"/>
+  <rect x="642" y="30" width="110" height="146" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="697" y="50" text-anchor="middle" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">signals</text>
+  <rect x="656" y="64" width="24" height="18" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="684" y="64" width="24" height="18" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="712" y="64" width="24" height="18" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <path d="M656,116 C666,96 676,136 686,116 C696,96 706,136 716,116 C726,100 732,124 738,116" fill="none" stroke="#5ee0c0"/>
+  <line x1="656" y1="132" x2="738" y2="132" stroke="#2f6b5c"/>
+  <text x="697" y="160" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">one axis is a clock</text>
+  <text x="697" y="172" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">24 fps · 32 kHz</text>
+  <text x="2" y="204" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">The question is never "is this a vector or a matrix?" but <tspan fill="#5ee0c0">"what is each axis of this tensor counting?"</tspan></text>
+  <text x="2" y="222" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Token? Feature? Frame? Height? Width? Sample? The answer names the stage.</text>
+</svg>
+
+## The single unifying object: the tensor
+
+Everything below is one data type. PyTorch has exactly one container for numbers — `torch.Tensor` — and the words *vector*, *matrix* and *signal* are human labels for tensors of particular ranks used in particular ways.
+
+<div class="callout spec"><span class="t">Rank is just "how many axes"</span>
+<table>
+<tr><th>Rank</th><th>Common name</th><th>Written</th><th>Example in this pipeline</th></tr>
+<tr><td>0</td><td>scalar</td><td><code>()</code></td><td>the guidance value, the current timestep</td></tr>
+<tr><td>1</td><td><b>vector</b></td><td><code>(d,)</code></td><td>one token's embedding; the shared timestep embedding, 2688 wide</td></tr>
+<tr><td>2</td><td><b>matrix</b></td><td><code>(rows, cols)</code></td><td>the hidden state (one row per token); every weight matrix</td></tr>
+<tr><td>3</td><td>batched matrix</td><td><code>(B, rows, cols)</code></td><td>attention scores, per head</td></tr>
+<tr><td>5</td><td>tensor</td><td><code>(B, C, F, H, W)</code></td><td>the video latent — <code>(1, 24, 37, 30, 52)</code></td></tr>
+</table>
+<p>A vector is not a different kind of thing from a matrix. It is a matrix with one axis missing — and half the bugs in this field come from a missing or extra axis of size 1.</p></div>
+
+The useful mental move is to stop asking what type something is and start asking **what each axis counts**. An axis of length 52 that counts latent columns and an axis of length 52 that counts audio samples are the same integer and completely different facts.
+
+## ① One item becomes a vector
+
+The tokenizer turns text into integers. Integers are only names — id `4471` is no closer to id `4472` than to id `9`. Meaning appears at the next step, when an **embedding table** $E$ replaces each id with a learned row of numbers:
+
+$$\mathbf{x}^{(0)} \;=\; E[\mathbf{t}] \;\in\; \mathbb{R}^{d}$$
+
+That row is a **vector**: a fixed-length list where each slot is a learned feature and the *direction* of the whole thing is the meaning. Two words with similar roles end up pointing in similar directions; the distance between them is a real, computable number.
+
+**The structural analogy that holds:** a vector is a bank of faders on a mixing desk. There is no single fader labelled "cat" — the meaning is the whole pattern of positions across every fader at once. Move a few and you get something adjacent; move many and you get something unrelated. This is why the same object can encode a word, a patch of video, or a moment in time: the axes are not named in advance, they are whatever the training made useful.
+
+<div class="callout spec"><span class="t">The widths in this model, from <code>transformer/config.json</code></span>
+<table>
+<tr><th>Vector</th><th>Width</th><th>What one of them describes</th></tr>
+<tr><td>text feature, from the encoder</td><td><code>text_dim</code> 5120</td><td>one text token, as Qwen3-VL-32B left it at layer 50</td></tr>
+<tr><td>the residual stream inside a block</td><td><code>hidden_size</code> 5376</td><td>one token of the packed sequence</td></tr>
+<tr><td>one attention head's view</td><td><code>attention_head_dim</code> 128</td><td>one narrow slice of that token</td></tr>
+<tr><td>the timestep embedding</td><td><code>time_embed_dim</code> 2688</td><td><b>the whole render's current noise level</b> — one vector, shared by every token</td></tr>
+</table>
+<p>That last row is worth pausing on. Almost everything in a transformer is <em>per token</em>. The timestep embedding is not: it is a single 2688-wide vector broadcast to all rows at once, which is exactly why it is cheap to send and why sharding a sequence across cards does not have to shard it (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>).</p></div>
+
+## ② Stack the items and you have a matrix
+
+The model never looks at one token alone. Every row of the sequence is processed together, so the natural container is a **matrix**: one row per item, one column per feature.
+
+$$\mathbf{X} \;=\; \begin{bmatrix} \text{---}\ \mathbf{x}_1\ \text{---} \\ \text{---}\ \mathbf{x}_2\ \text{---} \\ \vdots \\ \text{---}\ \mathbf{x}_L\ \text{---} \end{bmatrix} \;\in\; \mathbb{R}^{L \times 5376}$$
+
+Rows are *things*, columns are *features of things*. That convention is not a law of mathematics, it is a house style — but it is the house style of essentially every deep-learning library, and reading a shape from left to right as "how many, of what width" gets you a long way.
+
+### The second, sneakier use of matrices
+
+A matrix is also a **transformation**. The model's knowledge is not stored as a list of facts; it is stored as matrices that turn one vector into another. $W_Q, W_K, W_V$, the two feed-forward matrices, the modulation projections — these are all learned linear maps.
+
+<div class="callout truth"><span class="t">Why "matrix multiply" is the only operation that matters</span>
+<p>A single output number is a <b>dot product</b>: multiply a row by a column, element by element, and add up. That is it. Every attention projection, every feed-forward layer, every convolution in the decoder ultimately reduces to millions of these running in parallel — which is precisely the shape of work a GPU exists to do (<a href="31-what-the-gpu-does.html">ch.31</a>). The spec sheet number "448 GB/s" and the phrase "thousands of cores" both mean <em>this operation, at once, at scale</em>.</p></div>
+
+<svg viewBox="0 0 760 292" width="100%" style="max-width:920px" role="img" aria-label="A matrix multiply: one highlighted row of the hidden state meets one highlighted column of a learned weight matrix, and their dot product produces exactly one number in the output matrix.">
+  <defs>
+    <marker id="m2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE OUTPUT NUMBER = ONE ROW · ONE COLUMN · ONE DOT PRODUCT</text>
+  <rect x="20" y="52" width="150" height="140" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="20" y="104" width="150" height="16" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="95" y="116" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="SF Mono,monospace">token i — 5376 numbers</text>
+  <text x="95" y="42" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">X — the hidden state</text>
+  <text x="95" y="210" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="SF Mono,monospace">L × 5376</text>
+  <text x="95" y="226" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">rows = tokens</text>
+  <text x="192" y="128" text-anchor="middle" fill="#aab4c5" font-size="16" font-family="Inter,sans-serif">×</text>
+  <rect x="214" y="52" width="140" height="140" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="264" y="52" width="16" height="140" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="284" y="42" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">W — learned weights</text>
+  <text x="284" y="210" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="SF Mono,monospace">5376 × 7168</text>
+  <text x="284" y="226" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">columns = output features</text>
+  <text x="376" y="128" text-anchor="middle" fill="#aab4c5" font-size="16" font-family="Inter,sans-serif">=</text>
+  <rect x="398" y="52" width="150" height="140" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="448" y="104" width="16" height="16" fill="#5ee0c0" stroke="#5ee0c0"/>
+  <text x="473" y="42" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q — the result</text>
+  <text x="473" y="210" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="SF Mono,monospace">L × 7168</text>
+  <text x="473" y="226" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">same rows, new features</text>
+  <path d="M170,112 L398,112" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3" opacity="0.5"/>
+  <path d="M272,192 L272,244 L456,244 L456,124" fill="none" stroke="#7aa2ff" stroke-dasharray="3 3" opacity="0.6" marker-end="url(#m2)"/>
+  <rect x="568" y="52" width="190" height="140" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="584" y="76" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">the green cell is</text>
+  <text x="584" y="100" fill="#8fd8c4" font-size="11" font-family="SF Mono,monospace">x[i,0]·w[0,j]</text>
+  <text x="584" y="118" fill="#8fd8c4" font-size="11" font-family="SF Mono,monospace">+ x[i,1]·w[1,j]</text>
+  <text x="584" y="136" fill="#8fd8c4" font-size="11" font-family="SF Mono,monospace">+ … 5376 terms</text>
+  <text x="584" y="164" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">and every other cell is</text>
+  <text x="584" y="180" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the same sum, in parallel</text>
+  <text x="2" y="268" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">The inner dimensions must agree — 5376 columns meeting 5376 rows. When they do not, nothing runs.</text>
+  <text x="2" y="284" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">A shape error is the compiler noticing that two axes are counting different things.</text>
+</svg>
+
+The config gives the exact widths this build uses. Inside a block, the 5376-wide stream is projected out to **56 heads × 128 dimensions = 7168** numbers for the attention step, then projected back down to 5376. The feed-forward network widens it a different way — `ffn_dim` **14336**, then back. All of that lives in about **395 million parameters per block**, and there are **50 blocks**, which is where the roughly 20 billion numbers in the model file come from.
+
+## ③ Attention: a matrix whose two axes are both tokens
+
+The famous step is three matrix multiplies followed by a fourth that is different in kind:
+
+$$\mathbf{Q} = \mathbf{X}W_Q, \qquad \mathbf{K} = \mathbf{X}W_K, \qquad \mathbf{V} = \mathbf{X}W_V$$
+
+$$\mathbf{S} \;=\; \frac{\mathbf{Q}\mathbf{K}^{\top}}{\sqrt{d_k}} \;\in\; \mathbb{R}^{N \times N}, \qquad \mathrm{Attn}(\mathbf{X}) \;=\; \mathrm{softmax}(\mathbf{S})\,\mathbf{V}$$
+
+Look at the shape of $\mathbf{S}$ and the whole cost model of video generation falls out. Its rows are tokens and **so are its columns**. It is the only object in the pipeline whose two axes count the same thing, and its size is therefore $N^2$ — every token paired with every other token.
+
+Everything else in a transformer block is *per token*: the norms, the modulation, the residual adds, the feed-forward. Attention is the sole line that mixes rows. That single fact is what makes long clips expensive, what makes FlashAttention worth having ([ch.34](34-open-use-close-flashattention.html)), and what makes splitting a sequence across three cards a tractable idea ([ch.45](45-three-gpu-sequence-parallelism.html)) — everything but attention can just be done locally on each card's slice.
+
+## ④ The video is a five-axis tensor, then a matrix again
+
+At this point the data stops being a sentence. A clip has independent axes that a matrix cannot express, so it lives as a rank-5 tensor:
+
+$$\mathbf{z} \;\in\; \mathbb{R}^{B \times C \times F' \times H' \times W'} \;=\; \mathbb{R}^{1 \times 24 \times 37 \times 30 \times 52}$$
+
+- $B = 1$ — one clip at a time.
+- $C = 24$ — the VAE's `latent_channels`. Not red/green/blue; 24 learned channels whose meaning is whatever compresses best. The audio VAE uses 32.
+- $F' = 37$ — compressed frames, standing in for 124 real ones.
+- $H' = 30,\ W' = 52$ — compressed space. The VAE's spatial compression is **÷16**, and $832/16 = 52$, $480/16 = 30$ exactly.
+
+**The analogy that carries real structure:** a matrix is a spreadsheet. A video latent is a filing cabinet of spreadsheets — one drawer per channel, one sheet per compressed frame, rows and columns inside each sheet. The tensor notation is just the address format for that cabinet.
+
+But attention cannot read a filing cabinet. It needs rows. So the block **patchifies**: `patch_size` is `[1, 2, 2]`, meaning one frame deep, two latent cells tall, two wide, and each such patch becomes a single row of the hidden state.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="Patchifying: a five-axis latent of 37 compressed frames at 30 by 52 is cut into two-by-two patches, giving a 15 by 26 grid per frame, and every patch is unrolled into one row of a matrix with 5376 columns.">
+  <defs>
+    <marker id="m3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">A BLOCK OF VIDEO BECOMES A LIST OF ROWS · THIS IS THE ONLY WAY ATTENTION CAN SEE IT</text>
+  <text x="20" y="42" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">the latent, 37 frames deep</text>
+  <rect x="20" y="56" width="130" height="80" fill="#0d1017" stroke="#7a5a30"/>
+  <rect x="30" y="66" width="130" height="80" fill="#0d1017" stroke="#a07640"/>
+  <rect x="40" y="76" width="130" height="80" fill="#12161f" stroke="#ffb454"/>
+  <line x1="66" y1="76" x2="66" y2="156" stroke="#3a2c1c"/>
+  <line x1="92" y1="76" x2="92" y2="156" stroke="#3a2c1c"/>
+  <line x1="118" y1="76" x2="118" y2="156" stroke="#3a2c1c"/>
+  <line x1="144" y1="76" x2="144" y2="156" stroke="#3a2c1c"/>
+  <line x1="40" y1="96" x2="170" y2="96" stroke="#3a2c1c"/>
+  <line x1="40" y1="116" x2="170" y2="116" stroke="#3a2c1c"/>
+  <line x1="40" y1="136" x2="170" y2="136" stroke="#3a2c1c"/>
+  <rect x="40" y="76" width="26" height="20" fill="#241a1a" stroke="#ffb454"/>
+  <text x="95" y="176" text-anchor="middle" fill="#c9a06a" font-size="11" font-family="SF Mono,monospace">30 × 52 per frame</text>
+  <text x="95" y="192" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">24 channels deep at every cell</text>
+  <line x1="182" y1="116" x2="214" y2="116" stroke="#5ee0c0" marker-end="url(#m3)"/>
+  <text x="198" y="106" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">cut</text>
+  <text x="240" y="42" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">patch 1 × 2 × 2</text>
+  <rect x="240" y="56" width="150" height="100" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="256" y="72" width="24" height="20" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="284" y="72" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="312" y="72" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="340" y="72" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="256" y="96" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="284" y="96" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="312" y="96" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="340" y="96" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="256" y="120" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="284" y="120" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="312" y="120" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="340" y="120" width="24" height="20" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="315" y="176" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="SF Mono,monospace">15 × 26 patches per frame</text>
+  <text x="315" y="192" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">each square above is now one row</text>
+  <line x1="402" y1="116" x2="434" y2="116" stroke="#5ee0c0" marker-end="url(#m3)"/>
+  <text x="418" y="106" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">unroll</text>
+  <text x="460" y="42" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">the hidden state — a matrix again</text>
+  <rect x="460" y="56" width="280" height="100" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="460" y="60" width="280" height="12" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="600" y="70" text-anchor="middle" fill="#5ee0c0" font-size="9.5" font-family="SF Mono,monospace">frame 0, patch (0,0) — 5376 numbers</text>
+  <rect x="460" y="76" width="280" height="12" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="600" y="86" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">frame 0, patch (0,1)</text>
+  <rect x="460" y="92" width="280" height="12" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="600" y="102" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">frame 0, patch (0,2)</text>
+  <rect x="460" y="108" width="280" height="12" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="600" y="118" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">…</text>
+  <rect x="460" y="124" width="280" height="12" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="600" y="134" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">frame 36, patch (14,25)</text>
+  <text x="600" y="176" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="SF Mono,monospace">37 × 15 × 26 = 14,430 rows</text>
+  <text x="600" y="192" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">plus audio and conditioning rows on top</text>
+  <rect x="20" y="216" width="720" height="66" rx="8" fill="#241a1a" stroke="#ffb454"/>
+  <text x="40" y="240" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">Why the width must divide by 16 and then by 2</text>
+  <text x="40" y="260" fill="#c9a06a" font-size="11" font-family="Inter,sans-serif">832 → ÷16 → 52 → ÷2 → 26 ✓ · but 848 → ÷16 → 53, which is odd, and the 2 × 2 patch has nothing to pair with.</text>
+  <text x="40" y="276" fill="#c9a06a" font-size="11" font-family="Inter,sans-serif">The render dies on a shape error that never mentions the word "resolution".</text>
+</svg>
+
+<div class="callout warn"><span class="t">The 848-pixel trap — a shape bug in the wild</span>
+<p>Asking for a width of <b>848</b> on this build fails. Not slowly, not with a memory error — with a shape mismatch that names two integers and no cause. The arithmetic: 848 ÷ 16 = <b>53</b> latent columns, 53 is odd, and a 2 × 2 patch cannot tile an odd number of columns. Use a width whose sixteenth is even: <b>832</b> gives 52, and 52 ÷ 2 = 26.</p>
+<p>This is the practical payoff of the whole chapter. A shape error is never mystical. It is two axes that were supposed to count the same thing and did not, and the fix is always found by writing the division out.</p></div>
+
+### Where positions come from
+
+One more thing hides in the shapes. Flattening 37 × 15 × 26 into 14,430 rows throws away *where* each patch was — the matrix has no idea that row 27 sat next to row 28 in space and row 417 sat behind it in time. Position is put back with **rotary embeddings**: each pair of numbers in a token's vector is rotated by an angle that depends on its position, using a frequency ladder set by `rope_theta` = 10000.
+
+A rotation is a matrix acting on a vector. So even "where am I in the video" is expressed in the same currency as everything else.
+
+## ⑤ The output is a signal
+
+The last stage decodes the latent back into things that mean something physical, and here a new idea appears that was not present anywhere upstream: **one axis becomes a clock**.
+
+A **signal** is a tensor where an axis is time and the values are a measurable quantity — air pressure, brightness. Nothing about the storage changes. What changes is that the spacing between adjacent entries is now a duration, and that duration has a name: the **sample rate**.
+
+<svg viewBox="0 0 760 262" width="100%" style="max-width:920px" role="img" aria-label="Two decoders take the same latent to two kinds of signal: the visual VAE expands it sixteen times in each spatial direction into frames spaced one twenty-fourth of a second apart, and the audio VAE produces a waveform sampled thirty-two thousand times a second.">
+  <defs>
+    <marker id="m4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="m5" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME NUMBERS · TWO DECODERS · TWO DIFFERENT CLOCKS</text>
+  <rect x="2" y="90" width="150" height="80" rx="8" fill="#241a1a" stroke="#ffb454"/>
+  <text x="77" y="118" text-anchor="middle" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">the finished latent</text>
+  <text x="77" y="138" text-anchor="middle" fill="#c9a06a" font-size="11" font-family="SF Mono,monospace">(1,24,37,30,52)</text>
+  <text x="77" y="156" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">no clock yet</text>
+  <path d="M156,110 L216,70 L246,70" fill="none" stroke="#5ee0c0" marker-end="url(#m4)"/>
+  <path d="M156,150 L216,190 L246,190" fill="none" stroke="#7aa2ff" marker-end="url(#m5)"/>
+  <rect x="250" y="34" width="150" height="72" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="325" y="58" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">visual VAE</text>
+  <text x="325" y="78" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">×16 in height and width</text>
+  <text x="325" y="96" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">tiled 256 × 256, 64 px overlap</text>
+  <rect x="250" y="156" width="150" height="72" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="325" y="180" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">audio VAE</text>
+  <text x="325" y="200" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">32 latent channels</text>
+  <text x="325" y="218" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">out to stereo</text>
+  <line x1="404" y1="70" x2="436" y2="70" stroke="#5ee0c0" marker-end="url(#m4)"/>
+  <line x1="404" y1="190" x2="436" y2="190" stroke="#7aa2ff" marker-end="url(#m5)"/>
+  <rect x="440" y="30" width="318" height="80" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <rect x="458" y="48" width="54" height="36" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="520" y="48" width="54" height="36" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="582" y="48" width="54" height="36" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <rect x="644" y="48" width="54" height="36" rx="2" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="716" y="70" fill="#6f7b8f" font-size="12" font-family="SF Mono,monospace">…</text>
+  <line x1="458" y1="94" x2="740" y2="94" stroke="#2f6b5c"/>
+  <text x="458" y="106" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">one frame every 1/24 s · 832 × 480 pixels each</text>
+  <rect x="440" y="150" width="318" height="84" rx="8" fill="#0f141d" stroke="#7aa2ff"/>
+  <path d="M458,192 C472,164 486,220 500,192 C514,166 528,218 542,192 C556,170 570,214 584,192 C598,174 612,210 626,192 C640,178 654,206 668,192 C682,182 696,202 710,192 C722,186 732,196 740,192" fill="none" stroke="#7aa2ff"/>
+  <line x1="458" y1="216" x2="740" y2="216" stroke="#2b3f5e"/>
+  <line x1="470" y1="212" x2="470" y2="220" stroke="#6f7b8f"/>
+  <line x1="482" y1="212" x2="482" y2="220" stroke="#6f7b8f"/>
+  <line x1="494" y1="212" x2="494" y2="220" stroke="#6f7b8f"/>
+  <line x1="506" y1="212" x2="506" y2="220" stroke="#6f7b8f"/>
+  <text x="458" y="232" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">one number every 1/32000 s, per channel · stereo</text>
+  <text x="2" y="256" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Both are still tensors. The only new fact is that the gap between neighbouring entries is now a duration.</text>
+</svg>
+
+**Audio.** A 1-D array per channel, at **32 kHz stereo**. The axis is literally time:
+
+$$\mathbf{A}[k] \;=\; \text{amplitude at sample } k, \qquad \Delta t \;=\; \tfrac{1}{32{,}000}\ \text{s}$$
+
+One second of one channel is 32,000 numbers. A full-length 15-second clip is 32,000 × 15 = 480,000 numbers per channel — and that entire waveform is smaller than a single frame of 832×480 colour video. Sound is cheap; pictures are not.
+
+**Video.** A stack of images at **24 fps**, so the shape is height × width × colour × frame, and the frame axis is the clock. The 124-frame clips in this project are 124 ÷ 24 ≈ 5.2 seconds; the 345-frame ones are the model's full 15-second range.
+
+<div class="callout truth"><span class="t">Why "signal" is a genuinely different word</span>
+<p>Upstream, an axis of length 37 counts <em>compressed frames</em> — an internal bookkeeping unit with no duration attached. Downstream, an axis of length 345 counts <em>frames on a clock</em>, and the number 24 turns it into seconds. Same container, same dtype, same GPU. What changed is that the index now maps to the physical world, which is exactly what makes it playable, seekable, and comparable to a microphone recording.</p></div>
+
+## The whole journey in shapes
+
+<table>
+<tr><th>Stage</th><th>Name</th><th>Shape</th><th>What each axis counts</th></tr>
+<tr><td>Text → tokens</td><td>integers</td><td><code>(L,)</code></td><td>position in the sentence</td></tr>
+<tr><td>Embedding</td><td><b>vector</b> per token</td><td><code>(5120,)</code> from the encoder</td><td>learned features</td></tr>
+<tr><td>Packed sequence</td><td><b>matrix</b></td><td><code>(rows, 5376)</code></td><td>tokens × features</td></tr>
+<tr><td>Attention scores</td><td><b>matrix</b>, square</td><td><code>(N, N)</code></td><td>tokens × <b>tokens</b></td></tr>
+<tr><td>Inside a head</td><td>batched matrix</td><td><code>(56, N, 128)</code></td><td>heads × tokens × narrow features</td></tr>
+<tr><td>Video latent</td><td><b>tensor</b>, rank 5</td><td><code>(1, 24, 37, 30, 52)</code></td><td>clip × channel × frame' × row' × column'</td></tr>
+<tr><td>Decoded video</td><td><b>signal</b></td><td>frames × 480 × 832 × colour</td><td>the frame axis is a clock at 24 fps</td></tr>
+<tr><td>Decoded audio</td><td><b>signal</b></td><td><code>(2, samples)</code></td><td>channel × time at 32 kHz</td></tr>
+</table>
+
+## The honest punchline
+
+The model never decides between a vector and a matrix and a signal. It computes one long stream of tensors, and the shape at each moment is simply the most convenient arrangement for the operation about to happen:
+
+- **rank 1** when reasoning about one thing, or broadcasting one fact to everything,
+- **rank 2** when reasoning about many things at once, or applying a learned transformation,
+- **rank 4 or 5** when the data has genuinely independent spatial and temporal extent,
+- **rank 1 over time** when it finally has to leave the machine and be heard.
+
+When a shape stops making sense, there is exactly one question worth asking: **what is each axis counting?** Token, feature, head, frame, row, column, sample. Every shape error in this project — the 848-pixel trap included — was answered by writing that list out and finding the axis that had quietly started counting something else.
+
+## Where to go deeper
+
+- **3Blue1Brown, *Essence of Linear Algebra*** — the series that makes a matrix feel like a transformation rather than a grid of numbers. The single best preparation for §②.
+- **Karpathy's *micrograd*** — a few hundred lines in which vectors flow through matrices as concrete Python floats and a gradient appears at the end.
+- **PyTorch `Tensor.shape`, `view`, `permute` and `einsum`** — reshape one array between rank 1, 2 and 5 and watch the meaning change while the bytes do not.
+- **Any *Signals and Systems* introduction** — for why a 1-D array with a sample rate is a different object from a 1-D array without one. Chapter 14 §10 has the fuller reading list.
+
+<div class="callout spec"><span class="t">Test yourself</span>
+<p>Three quick ones, all answerable from this chapter. Which object in attention has both axes counting the same thing? Why does a requested width of 848 fail while 832 works? And in <code>(1, 24, 37, 30, 52)</code>, which single number is the one that grows when a clip gets longer?</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">tensor</span><span class="badge">rank</span><span class="badge">axis</span><span class="badge">shape</span><span class="badge">vector</span><span class="badge">matrix</span><span class="badge">dot product</span><span class="badge">embedding</span><span class="badge">hidden state</span><span class="badge">residual stream</span><span class="badge">attention head</span><span class="badge">score matrix</span><span class="badge">latent channel</span><span class="badge">patchify</span><span class="badge">rotary embedding</span><span class="badge">broadcast</span><span class="badge">signal</span><span class="badge">sample rate</span><span class="badge">shape error</span></p>
+<p>If those feel solid, a stack trace full of five-number tuples becomes readable rather than frightening.</p></div>
+
+Next: what happens when those tensors outgrow a single card — three GPUs, no NVLink, and the wire between them that decides everything.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

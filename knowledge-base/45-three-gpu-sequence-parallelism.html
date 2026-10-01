@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>45 · Three GPUs, One Sequence</title>
+<meta name="description" content="Sequence parallelism on three 8 GB cards: every operation in a transformer block is per-token except attention, so shard the sequence, ring the attention, and run a forward no single card can hold.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 45 · The summit — splitting the whole block across three cards</span>
+
+# Three GPUs, One Sequence
+
+<p class="lede">Single-card tiling ([ch.44](44-building-dalang.html)) fit a 15-second clip at 480p and a 5-second clip at 720p on <em>one</em> 8&nbsp;GB card. But a full <b>15 seconds at native 720p</b> is a different animal — too big for any single card. This is the log of the hardest thing we've built: <b>sequence parallelism</b>, where all three GPUs hold one slice of the same sequence and compute a single forward together. Correctness first, as always — every stage measured against a golden reference before we scale.</p>
+
+## Why one card can't do it
+
+The engine holds activations that scale with the <b>total number of tokens</b>, and tokens $\propto H \times W \times \text{frames}$. Our single-card ceiling was about <b>41,000 tokens</b> (a 480p × 345-frame clip, [ch.44](44-building-dalang.html)). Native 720p at 15 seconds is:
+
+$$1280 \times 704 \times 345\text{f} \;\approx\; 93{,}000 \text{ tokens} \;\approx\; 2.3\times \text{ the ceiling.}$$
+
+No amount of chunking fits $2.3\times$ onto one card. But three cards, each holding a third of the sequence, hold about **31,000 tokens each** — and we already *know* 31k fits, because a 720p × 124-frame clip (33k tokens) rendered at peak 6.81&nbsp;GB. So the plan writes itself: **split the sequence across the three cards.**
+
+<svg viewBox="0 0 760 248" width="100%" style="max-width:920px" role="img" aria-label="Three bars of token counts. The proven single-card ceiling is about 41000 tokens, native 720p at 15 seconds needs about 93000 and overshoots it by 2.3 times, and a third of that sequence is about 31000 tokens, just under a 33000-token clip already rendered at peak 6.81 gigabytes.">
+  <text x="2" y="14" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE WHOLE ARGUMENT, IN TOKENS</text>
+  <line x1="394" y1="32" x2="394" y2="196" stroke="#5ee0c0" stroke-dasharray="4 4"/>
+  <text x="400" y="44" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">one card's proven ceiling</text>
+  <text x="2" y="70" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">480p × 345f</text>
+  <text x="2" y="86" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">rendered, ch.44</text>
+  <rect x="180" y="56" width="214" height="36" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="286" y="79" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">≈41,000 tokens</text>
+  <text x="2" y="132" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">1280×704 × 345f</text>
+  <text x="2" y="148" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the target</text>
+  <rect x="180" y="118" width="484" height="36" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="286" y="141" text-anchor="middle" fill="#ffdada" font-size="12" font-family="Inter,sans-serif">≈93,000 tokens</text>
+  <text x="530" y="141" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">2.3× the ceiling — no card holds this</text>
+  <text x="2" y="194" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">…split ÷3</text>
+  <text x="2" y="210" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">per card</text>
+  <rect x="180" y="180" width="162" height="36" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="261" y="203" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">≈31,000 tokens</text>
+  <line x1="352" y1="176" x2="352" y2="220" stroke="#aab4c5" stroke-dasharray="3 3"/>
+  <text x="358" y="198" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">33,000 already rendered at peak 6.81 GB (720p × 124f)</text>
+  <text x="2" y="240" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">The job is 2.3× too big for one card and comfortably inside three. Nothing else about the plan needs arguing.</text>
+</svg>
+
+<div class="callout truth"><span class="t">This is capability, not speed</span>
+<p>We do <b>not</b> chase throughput — that's a standing rule. Sequence parallelism here is not about going faster; three cards streaming one model is, if anything, <em>slower</em> than one. It's about fitting a job <b>no single card can hold</b>. The win is that the clip exists at all.</p></div>
+
+## The one insight that makes it clean
+
+Read one transformer block — `MiniMaxH3TransformerBlock` — line by line, and something jumps out. <b>Every operation is per-token except one.</b>
+
+```
+norm1              → per-token   (each row, independent)
+adaLN modulation   → per-token
+attn = self.attn(…) → CROSS-TOKEN  ← the only line that mixes rows
+residual + gate     → per-token
+norm2              → per-token
+ff = self.ff(…)    → per-token
+residual + gate     → per-token
+```
+
+The RMSNorms, the adaptive-layernorm scale/shift/gate, the residual adds, and the big feed-forward network — none of them look across tokens. Only <b>attention</b> needs every row to see every other row. So sequence parallelism is a textbook fit:
+
+<div class="callout spec"><span class="t">The rule</span>
+<p><b>Shard the sequence across the cards. Run all the per-token math locally on each card's slice. For the one cross-token line — attention — gather across cards using the ring we already built.</b> Each card owns rows $[\,i\tfrac{S}{N}, (i{+}1)\tfrac{S}{N}\,)$ of the sequence, and holds only <em>its</em> slice of every activation. The ring ([ch.36](36-splitting-the-video-cp.html)) does the attention gather with online softmax and no full score matrix ([ch.34](34-open-use-close-flashattention.html)).</p></div>
+
+Concretely: the packed hidden state, the adaLN row indices, and the rotary $(\cos,\sin)$ tables all get sliced by sequence. Only the shared timestep embedding `temb` is broadcast whole — it's tiny.
+
+<svg viewBox="0 0 760 342" width="100%" style="max-width:920px" role="img" aria-label="One transformer block split across three cards. Each card owns a third of the sequence rows and runs the norms, the adaptive layer-norm modulation, the rotary tables, the feed-forward network and the residual adds entirely on its own slice; only the attention line spans all three cards and is served by the ring.">
+  <text x="2" y="14" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE BLOCK, THREE CARDS — EVERY LINE IS LOCAL EXCEPT ONE</text>
+  <text x="124" y="36" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">cuda:0 — rows [0, S/3)</text>
+  <text x="380" y="36" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">cuda:1 — rows [S/3, 2S/3)</text>
+  <text x="636" y="36" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">cuda:2 — rows [2S/3, S)</text>
+  <rect x="2" y="44" width="244" height="86" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="124" y="66" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">norm1 · adaLN modulation</text>
+  <text x="124" y="86" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">its own slice of (cos, sin)</text>
+  <text x="124" y="106" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">to_q / to_k / to_v</text>
+  <text x="124" y="124" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">no card talks to any other</text>
+  <rect x="258" y="44" width="244" height="86" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="66" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">norm1 · adaLN modulation</text>
+  <text x="380" y="86" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">its own slice of (cos, sin)</text>
+  <text x="380" y="106" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">to_q / to_k / to_v</text>
+  <text x="380" y="124" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">no card talks to any other</text>
+  <rect x="514" y="44" width="244" height="86" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="636" y="66" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">norm1 · adaLN modulation</text>
+  <text x="636" y="86" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">its own slice of (cos, sin)</text>
+  <text x="636" y="106" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">to_q / to_k / to_v</text>
+  <text x="636" y="124" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">no card talks to any other</text>
+  <rect x="2" y="142" width="756" height="76" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="380" y="166" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.3">ATTENTION — THE ONE CROSS-TOKEN LINE</text>
+  <text x="380" y="188" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">every row must see every other row, so this line spans all three cards</text>
+  <text x="380" y="208" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">served by the ring: K/V shards rotate, online softmax normalises across all of them</text>
+  <rect x="2" y="230" width="244" height="72" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="124" y="252" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">to_out · residual + gate</text>
+  <text x="124" y="272" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">norm2 · FFN · residual + gate</text>
+  <text x="124" y="292" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">local again, on its third</text>
+  <rect x="258" y="230" width="244" height="72" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="252" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">to_out · residual + gate</text>
+  <text x="380" y="272" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">norm2 · FFN · residual + gate</text>
+  <text x="380" y="292" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">local again, on its third</text>
+  <rect x="514" y="230" width="244" height="72" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="636" y="252" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">to_out · residual + gate</text>
+  <text x="636" y="272" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">norm2 · FFN · residual + gate</text>
+  <text x="636" y="292" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">local again, on its third</text>
+  <line x1="2" y1="314" x2="758" y2="314" stroke="#232c3b"/>
+  <text x="2" y="334" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Only the shared timestep embedding temb crosses whole — it is tiny. Everything else a card touches is one third the size it used to be.</text>
+</svg>
+
+## The build — one measured brick at a time
+
+Same method as [ch.44](44-building-dalang.html): prove the hard part in isolation against a captured reference, and only then scale. We captured a real block's exact inputs and output as the anchor — hidden `(1, 15030, 5376)`, a shared `temb`, per-token `adaln_indices`, rotary `(cos, sin)` of `(15030, 96)`, 56 attention heads — so every sharded result has a ground truth to match.
+
+**G1 · One block, two cards.** Split the sequence in half, run the per-token math on each card's slice, gather attention through the ring, reassemble, compare to the single-card block.
+
+<div class="callout truth"><span class="t">G1 — proven</span>
+<p>Baseline (the real single-card block) matched the captured output <b>exactly</b> (0.000). The sequence-parallel version: mean absolute error <b>4.0 × 10⁻³</b>, per-token <b>relative</b> error mean <b>0.51%</b>, p99 <b>2.86%</b>, max 5.63%. And the worst absolute error sat on a <b>conditioning token of magnitude ~35,000</b> — a 0.74% relative slip. Zero NaN. This is pure bf16 rounding compounding through the block, the same class as the ring's render-validated result ([ch.36](36-splitting-the-video-cp.html)). The mechanism is correct.</p></div>
+
+**G2 · One block, three cards.** Extend the split to thirds, each card gathering all three shards for attention. The result was <b>identical to G1</b> — mean 4.0 × 10⁻³, relative mean 0.51%.
+
+<div class="callout spec"><span class="t">Why identical is the proof</span>
+<p>The online-softmax ring is <b>associative</b>: it accumulates a running max and denominator, so folding the sequence in two pieces or three pieces — in any grouping — reaches the same answer. The split count doesn't change the math. That's exactly what "identical to G1" demonstrates, and it's why we can trust <em>any</em> $N$.</p></div>
+
+**G3 · The full 50-block forward, three cards.** The real test. Build the packed sequence on the first card, shard it into thirds, then run <b>all 50 blocks</b> sequence-parallel — keeping the hidden state sharded across the whole stack — gather at the end, project out, and compare to the golden reference `ref_out.pt` from [ch.44](44-building-dalang.html).
+
+<div class="callout truth"><span class="t">G3 — the engine works end-to-end</span>
+<p>Versus the golden reference: mean absolute error <b>1.78 × 10⁻²</b>, relative mean <b>0.95%</b>, p99 <b>1.9%</b>. That <b>1.78 × 10⁻²</b> is <em>the same number</em> as the ring's end-to-end error (0.017) — the bf16 level we already render-validated at <b>PSNR 37.6&nbsp;dB, perceptually identical</b> ([ch.36](36-splitting-the-video-cp.html)). And memory held <b>flat across all 50 blocks</b> — roughly 2.3 / 0.07 / 0.95&nbsp;GB on the three cards at 15k tokens, no growth, no leak. The full three-GPU sequence-parallel forward is <b>correct</b>.</p></div>
+
+### The architecture, in one picture
+
+The 33-billion-parameter model can't sit on the cards — three copies of all 50 blocks would be ~99&nbsp;GB of VRAM. So it lives once in RAM ([ch.42](42-why-two-models.html)), and each block is <b>streamed</b> to all three cards just for its turn:
+
+<svg viewBox="0 0 760 384" width="100%" style="max-width:920px" role="img" aria-label="The packed sequence is built on the first card and sharded into thirds across three cards. For each of the 50 blocks, that block's weights are streamed from RAM to all three cards, the per-token maths runs locally, the attention gathers through the ring, and the block is freed again. Finally the three slices are gathered back and projected out to video and audio.">
+  <defs>
+    <marker id="e1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="e2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <rect x="180" y="10" width="400" height="34" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="380" y="32" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">build the packed sequence on cuda:0 — ~93,000 tokens</text>
+  <line x1="380" y1="44" x2="380" y2="60" stroke="#6f7b8f" marker-end="url(#e1)"/>
+  <text x="392" y="58" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">shard S ÷ 3, then free the full-S copy at once</text>
+  <rect x="180" y="64" width="120" height="30" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="240" y="84" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">cuda:0 · ⅓</text>
+  <rect x="320" y="64" width="120" height="30" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="84" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">cuda:1 · ⅓</text>
+  <rect x="460" y="64" width="120" height="30" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="520" y="84" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">cuda:2 · ⅓</text>
+  <rect x="140" y="110" width="480" height="164" rx="8" fill="#0d1017" stroke="#5ee0c0"/>
+  <text x="160" y="132" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.3">FOR EACH OF THE 50 BLOCKS</text>
+  <rect x="160" y="142" width="440" height="26" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="176" y="160" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">stream this block's weights → all three cards</text>
+  <rect x="160" y="174" width="440" height="26" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="176" y="192" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">per-token maths, local on each card's slice</text>
+  <rect x="160" y="206" width="440" height="26" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="176" y="224" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">attention — ring-gather the three shards</text>
+  <text x="590" y="224" text-anchor="end" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">the one cross-token step</text>
+  <rect x="160" y="238" width="440" height="26" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="176" y="256" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">free the block off all three cards</text>
+  <rect x="10" y="152" width="112" height="78" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="66" y="176" text-anchor="middle" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">system RAM</text>
+  <text x="66" y="196" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">all 50 blocks,</text>
+  <text x="66" y="212" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">one copy</text>
+  <line x1="122" y1="190" x2="156" y2="190" stroke="#7aa2ff" marker-end="url(#e2)"/>
+  <text x="640" y="182" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">33 B params</text>
+  <text x="640" y="200" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">never resident</text>
+  <text x="640" y="218" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">on any card</text>
+  <line x1="380" y1="274" x2="380" y2="292" stroke="#6f7b8f" marker-end="url(#e1)"/>
+  <rect x="180" y="296" width="400" height="30" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="316" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">gather the three slices back onto cuda:0</text>
+  <line x1="380" y1="326" x2="380" y2="342" stroke="#6f7b8f" marker-end="url(#e1)"/>
+  <rect x="180" y="346" width="400" height="30" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="380" y="366" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">norm_out → project out → video + audio</text>
+</svg>
+
+## Two bugs, and what they taught
+
+The math was proven in isolation, so — exactly as the method promises — the failures in G3 were all in the <b>wiring</b>, not the math.
+
+<div class="callout warn"><span class="t">Bug 1 — deepcopy of a CPU int8 block → illegal memory access</span>
+<p>Streaming a block meant copying it to each card. Deep-copying the quantized (int8, torchao) block <em>while it sat on the CPU</em> and then moving the copy to a GPU produced a CUDA "illegal memory access." <b>Fix:</b> move the original block to the first GPU, then deep-copy <em>that</em> — a GPU-resident block — for the other cards. It's the exact pattern G1 and G2 had used without trouble; G3 had quietly done it the other way.</p></div>
+
+<div class="callout warn"><span class="t">Bug 2 — multi-GPU async ordering → OOM / illegal access</span>
+<p>GPU kernels run <em>asynchronously</em>. The ring's cross-device tensor moves were racing with the code that freed memory, and the int8 replicas were releasing unevenly (one card held 0.95&nbsp;GB while another dropped to 0.07). <b>Fix:</b> <code>torch.cuda.synchronize(device)</code> barriers — after the cross-device moves, and before freeing — so every kernel finishes before a tensor is moved or released, plus explicitly moving each replica off its card each block. Memory went flat immediately.</p></div>
+
+<p>Both are the ordinary tax of real multi-GPU engineering: not the elegant part, but the part that decides whether the elegant part ever runs.</p>
+
+## G4 — wiring the render, where the two halves meet
+
+Proving the forward (G3) is one thing; making it *render* is another. G4 monkeypatches the transformer's forward with the sharded version, neuters the transformer's own block-offload (the sharded forward streams blocks to the three cards itself), keeps the deferred-VAE decode from [ch.44](44-building-dalang.html), and runs the real denoise on a 1280×704 × 345-frame scene — the full <b>~93,000 tokens</b>. The attention uses a <b>rotating ring</b>: each card folds its own K/V, then pulls in one remote shard at a time, folds it, and frees it — never holding all three at once.
+
+<svg viewBox="0 0 760 220" width="100%" style="max-width:920px" role="img" aria-label="One card's view of the rotating ring across five stages: it folds its own key-value shard, pulls a remote shard, folds and frees it, pulls the last shard, folds and frees it. At no point does it hold more than two shards, and a running maximum and denominator carry across all three folds.">
+  <defs>
+    <marker id="e3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE ROTATING RING, FROM CUDA:1's POINT OF VIEW</text>
+  <rect x="4" y="26" width="144" height="52" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="76" y="48" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">fold its own</text>
+  <text x="76" y="66" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">Q₁ × K/V₁</text>
+  <rect x="156" y="26" width="144" height="52" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="228" y="48" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">pull K/V₀</text>
+  <text x="228" y="66" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">over PCIe, 4.9 GB/s</text>
+  <rect x="308" y="26" width="144" height="52" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="380" y="48" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">fold it, free it</text>
+  <text x="380" y="66" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">Q₁ × K/V₀</text>
+  <rect x="460" y="26" width="144" height="52" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="532" y="48" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">pull K/V₂</text>
+  <text x="532" y="66" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">the last one</text>
+  <rect x="612" y="26" width="144" height="52" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="684" y="48" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">fold it, free it</text>
+  <text x="684" y="66" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">done — output for Q₁</text>
+  <line x1="148" y1="52" x2="154" y2="52" stroke="#6f7b8f" marker-end="url(#e3)"/>
+  <line x1="300" y1="52" x2="306" y2="52" stroke="#6f7b8f" marker-end="url(#e3)"/>
+  <line x1="452" y1="52" x2="458" y2="52" stroke="#6f7b8f" marker-end="url(#e3)"/>
+  <line x1="604" y1="52" x2="610" y2="52" stroke="#6f7b8f" marker-end="url(#e3)"/>
+  <text x="2" y="104" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">K/V held on the card</text>
+  <rect x="48" y="112" width="56" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="76" y="124" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">K/V₁</text>
+  <rect x="200" y="112" width="56" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="228" y="124" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">K/V₁</text>
+  <rect x="200" y="132" width="56" height="16" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="228" y="144" text-anchor="middle" fill="#7aa2ff" font-size="10" font-family="Inter,sans-serif">K/V₀</text>
+  <rect x="352" y="112" width="56" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="380" y="124" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">K/V₁</text>
+  <rect x="504" y="112" width="56" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="532" y="124" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">K/V₁</text>
+  <rect x="504" y="132" width="56" height="16" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="532" y="144" text-anchor="middle" fill="#7aa2ff" font-size="10" font-family="Inter,sans-serif">K/V₂</text>
+  <rect x="656" y="112" width="56" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="684" y="124" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">K/V₁</text>
+  <line x1="2" y1="164" x2="758" y2="164" stroke="#232c3b"/>
+  <text x="2" y="186" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">Peak is two shards, never three — that is the whole memory argument for a ring rather than a gather.</text>
+  <text x="2" y="208" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">A running maximum and a running denominator carry across all three folds, which is why the order the shards arrive in cannot change the answer.</text>
+</svg>
+
+<div class="callout truth"><span class="t">The lesson: the two halves are one engine</span>
+<p>Sequence parallelism and single-card tiling are not alternatives — the full engine needs <b>both, composed</b>. Splitting the sequence across three cards leaves each holding $S/3 \approx 31\text{k}$ tokens — and 31k tokens is <em>still</em> too much for the naive block ops. So each card's slice must <em>also</em> be tiled: chunk the FFN and the attention-linears <em>within</em> the card. Splitting <b>across</b> cards (this chapter) and chunking <b>within</b> each card (<a href="44-building-dalang.html">ch.44</a>), together. Neither alone fits 93k tokens on 8&nbsp;GB cards; combined, they do. G4 is where the two halves of the Dalang engine finally click together.</p></div>
+
+Getting there was the same wall-by-wall as the single-card climb — three memory levers, each understood, at the real 93k-token scale:
+
+<div class="callout spec"><span class="t">The three integration fixes</span>
+<ol>
+<li><b>Free the full-sequence intermediates.</b> The first card does double duty — it holds the projection modules <em>and</em> builds the full packed sequence. That full-$S$ hidden state (~1&nbsp;GB at 93k tokens) was never freed after sharding, so it squatted on the card through the whole block loop. Fix: <code>del</code> the full-$S$ tensors the instant they're sliced into per-card shards.</li>
+<li><b>Shrink the attention score tiles.</b> $2048 \times 2048 \times 56\text{ heads} \times \text{fp32} \approx 940\text{ MB}$ per tile — fine at the 15k-token correctness test, fatal at 93k. Fix: 512-wide tiles ($\approx 59$&nbsp;MB).</li>
+<li><b>Actually apply the per-card tiling.</b> Each card's 31k-token FFN still ran full width → a ~1.6&nbsp;GB intermediate. The tiling was <em>supposed</em> to be on — but silently wasn't (see below).</li>
+</ol></div>
+
+<div class="callout warn"><span class="t">Bug 3 — the tiling that matched nothing</span>
+<p>The chunking patch was written for the <em>whole model</em>, where a block's feed-forward is named <code>transformer_blocks.7.ff</code> — so it looked for names ending in <code>.ff</code> and containing <code>.attn</code>. But G4 applies the patch to a <em>single block</em>, whose feed-forward is just <code>ff</code> and whose attention linears are <code>attn.to_q</code> and friends. Neither test matched, so the tiling wrapped <em>zero</em> modules and quietly did nothing — the FFN kept blowing up. <b>Fix:</b> match block-relative names (<code>name == "ff"</code>, <code>name.startswith("attn.")</code>). A one-character-class of a bug that cost an OOM to find.</p></div>
+
+<p>With those three in place, <b>block 0 of 50 cleared with all three cards working — g0 ≈ 7.1, g1 ≈ 5.0, g2 ≈ 6.3&nbsp;GB, no OOM</b> — rendering 93k tokens that no single 8&nbsp;GB card can hold. It is <em>slow</em> (three cards streaming one model, every block chunked, deliberately un-optimized for speed — capability over throughput). At the moment this section was written the render was still grinding through 50 blocks × steps → VAE → the file, and it ended on the only honest sentence available: <em>"the finished clip does not exist yet."</em></p>
+
+## It exists now
+
+That sentence held for two more nights, and both of them were instructive. The render is finished, and the full account — the crash that destroyed six hours, the rule that saved the next six, and the diagnosis of what the clip actually looks like — is [ch.46](46-the-first-15-seconds.html). In brief:
+
+<div class="callout truth"><span class="t">Two crashes, one file</span>
+<ol>
+<li><b>Run g4j died on the first line of decode</b>, after <b>6 h 10 m</b> of correct denoise. `_execution_device` resolved to `cuda:0` while the sharded forward of this chapter returns its output to the device the latents arrived on — the CPU. The same bug sat in <em>both</em> decode steps (`decoders.py:185` and `:245`). Six hours of arithmetic thrown away over two tensors on different devices.</li>
+<li><b>Run g4k survived the same class of failure</b>, because the fix carried a rule with it: write the latents to disk the instant denoise hands them over. Denoise completed, a 69&nbsp;MB dump landed, and decode then died anyway — out of memory at `[vae] clip 14`. This time the loss was decode time, not the render.</li>
+<li><b>The decode wall was not a capacity limit.</b> The VAE already tiles spatially at 256&nbsp;px, so per-tile memory is fixed. The real cause was `_decode` appending every finished pixel chunk — about <b>216&nbsp;MB each at 1280×704</b> — to a list that stayed on the GPU. Moving finished chunks to CPU on append took decode residency from <b>7729 → 5639&nbsp;MiB</b>, with identical arithmetic.</li>
+<li><b>The file exists.</b> <code>g4k.mp4</code> — <b>1280×704 native, 345 frames at 24 fps, 14.375&nbsp;s</b>, full decode pass, zero errors, audio recovered from the same dump. Native 720p at roughly fifteen seconds, rendered on three 8&nbsp;GB cards.</li>
+</ol></div>
+
+<div class="callout warn"><span class="t">And the clip is under-sampled</span>
+<p>It exists, and it looks like mud — because it was given <b>3 steps</b> and that scene needs about <b>49</b>. The evidence that the fault is sampling and not this chapter's engine was already on the box: <code>cmp-ring</code> (three GPUs) and <code>cmp-normal</code> (reference) are the same picture, <code>cp15sd</code> is the same 345-frame scene at 49 steps and it is beautiful, and <code>an1</code> is the same 1280×704 resolution at 23 steps and it is crisp. Ring, length, resolution and decode are each independently cleared. <b>Step count is a property of the scene, not of the model</b> — and at ~110 minutes per step on the sharded path, a properly sampled native render is a ~46-hour job. The constraint this chapter beat was memory. The one that replaced it is time. [Ch.46](46-the-first-15-seconds.html) has the full diagnosis.</p></div>
+
+## Where this stands
+
+<div class="callout truth"><span class="t">The ledger</span>
+<ol>
+<li><b>The block is per-token except attention</b> — so sequence parallelism is a clean fit. ✅</li>
+<li><b>One block, two cards</b> (G1) — sequence-parallel matches the single-card block, bf16-class (relative mean 0.51%). ✅</li>
+<li><b>One block, three cards</b> (G2) — identical to two cards, proving the ring is associative. ✅</li>
+<li><b>The full 50-block forward, three cards</b> (G3) — matches the golden reference at mean 1.78 × 10⁻² (the render-validated bf16 level), memory flat across all 50 blocks. <b>The engine is proven.</b> ✅</li>
+<li><b>The render, three cards</b> (G4) — sharded forward wired into the denoise pipeline; sequence-parallel <em>and</em> per-card tiling composed. Block 0/50 cleared with all three cards working, no OOM — 93k tokens rendering on hardware no single card could hold. Slow by choice. ✅</li>
+<li><b>The clip exists</b> — <code>g4k.mp4</code>, <b>1280×704 native, 345 frames, 14.375&nbsp;s</b>, full decode pass, zero errors, plus audio. It took two runs: the first lost <b>6 h 10 m</b> to a device mismatch on the first line of decode, the second was rescued by a 69&nbsp;MB latent dump written the instant denoise handed over. ✅</li>
+<li><b>The decode wall was an accumulation bug, not a capacity limit</b> — finished pixel chunks (~216&nbsp;MB each at 1280×704) loitering on the GPU; moving them to CPU on append took decode residency 7729 → 5639&nbsp;MiB with identical arithmetic. ✅</li>
+<li><b>The new constraint is time, not memory</b> — ~110 min/step at 93k tokens, so a properly sampled native render is ~46 h. The clip that exists ran only 3 steps where the scene needs ~49, which is why it looks like mud. <b>Open.</b> ⏳</li>
+</ol>
+<p>The hard climb is done, and the file at the end of it exists. The three-GPU sequence-parallel forward reproduces the reference within the same rounding we have watched render as an identical picture, and it carried that all the way to an <code>.mp4</code> at a resolution and length no single card in this box can hold. What it did <em>not</em> buy is a good-looking fifteen seconds — that costs steps, and steps cost hours.</p></div>
+
+<div class="callout truth"><span class="t">And then it was done properly</span>
+<p>The clip this chapter's engine first produced was under-sampled — 3 steps, for a scene that needed far more. The engine was then run the way it was designed to be run: <b>23 steps, native 1280×704 × 345 frames, 41 h 51 m across three cards</b>, decoding to 14.375 s of video with matching 32 kHz stereo.</p>
+<p>The sequence-parallel forward held for <b>1,100 block executions</b> without a numerical complaint, and the per-step time varied by seconds across two days. Whatever else is true of this design, <b>it is stable</b> — see <a href="47-the-scorecard.html">ch.47</a> for the full measured cost.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">sequence parallelism</span><span class="badge">sequence shard</span><span class="badge">per-token op</span><span class="badge">cross-token op</span><span class="badge">rotating ring</span><span class="badge">online softmax</span><span class="badge">associativity</span><span class="badge">golden reference</span><span class="badge">adaLN modulation</span><span class="badge">rotary tables</span><span class="badge">block streaming</span><span class="badge">score tile</span><span class="badge">CUDA synchronise barrier</span><span class="badge">token budget</span></p>
+<p>If those feel solid, the remaining question is no longer whether the engine works — it is what the finished file looks like, and why.</p></div>
+
+Next: [ch.46](46-the-first-15-seconds.html) is what happened when this render finished — two crashes, one rescue, a native 720p clip that finally exists, and the uncomfortable reason it still looks wrong.
+
+<p class="small">The context-parallel ring this builds on is <a href="36-splitting-the-video-cp.html">ch.36</a>; the online-softmax / no-full-matrix idea underneath it is <a href="34-open-use-close-flashattention.html">ch.34</a>; the single-card tiling engine and its 720p result are <a href="44-building-dalang.html">ch.44</a>; why one process shares the model instead of replicating it is <a href="42-why-two-models.html">ch.42</a>. Build scripts: <code>source/dalang/12_capture_block.py</code> (capture), <code>13_shard_block.py</code> (G1), <code>14_shard_block_ngpu.py</code> (G2), <code>15_shard_forward.py</code> (G3), <code>16_render_3gpu.py</code> (G4). Live tracker: <code>source/dalang/TASKS.md</code>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

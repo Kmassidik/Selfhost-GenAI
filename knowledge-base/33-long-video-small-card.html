@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>33 · Long Video on a Small Card</title>
+<meta name="description" content="How video longer than one render is made: chunking and frame-chaining, what actually survives a seam, and the measured finding that scene continuity holds while identity drifts.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 33 · Making video longer than one render — and what survives the seam</span>
+
+# Long Video on a Small Card
+
+<p class="lede">Long video on a small card is made by refusing to render it long: a piece at a time, written to disk, each one conditioned on the last. The card never holds more than one piece, so length stops costing memory and starts costing wall-clock and disk — which are the two things a small machine has plenty of. The whole difficulty moves to the seam, and the measured finding is sharper than expected: <b>a chained seam holds the scene together and loses the person.</b></p>
+
+That result is worth stating twice, because it is not the failure anyone predicts. Chained clips do not fall apart into jump cuts. The street stays the same street, the rain keeps falling at the same angle, the palette holds. What drifts is the face — and only a certain kind of face.
+
+<div class="callout truth"><span class="t">The one-line truth</span>
+<p>The length wall is beaten with <b>time</b>, not VRAM: render a piece, write it out, render the next, repeat. A ten-minute video and a five-second clip have the same peak memory. What that buys is unlimited length; what it costs is a continuity problem that gets harder the more human the subject is.</p></div>
+
+## First, which ceiling is which
+
+Before any chunking, one confusion has to be cleared up, because this chapter used to contain it. There are **two** separate ceilings on clip length and they belong to different parts of the system.
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:920px" role="img" aria-label="A timeline from zero to twenty seconds showing the model's trained range of four to fifteen seconds as the real ceiling, with an older hardware ceiling near five seconds drawn struck through because tiling and sequence parallelism moved it past fifteen seconds.">
+  <defs>
+    <marker id="d1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">TWO CEILINGS — ONLY ONE OF THEM IS STILL THERE</text>
+  <line x1="40" y1="212" x2="740" y2="212" stroke="#3a4a63" stroke-width="1"/>
+  <text x="40" y="230" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">0 s</text>
+  <line x1="40" y1="206" x2="40" y2="212" stroke="#3a4a63" stroke-width="1"/>
+  <text x="215" y="230" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">5 s</text>
+  <line x1="215" y1="206" x2="215" y2="212" stroke="#3a4a63" stroke-width="1"/>
+  <text x="390" y="230" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">10 s</text>
+  <line x1="390" y1="206" x2="390" y2="212" stroke="#3a4a63" stroke-width="1"/>
+  <text x="565" y="230" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">15 s</text>
+  <line x1="565" y1="206" x2="565" y2="212" stroke="#3a4a63" stroke-width="1"/>
+  <text x="740" y="230" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">20 s</text>
+  <line x1="740" y1="206" x2="740" y2="212" stroke="#3a4a63" stroke-width="1"/>
+  <text x="40" y="46" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">THE MODEL — what it was trained to produce</text>
+  <rect x="180" y="56" width="385" height="38" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="372" y="80" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">4 s to 15 s, 24 fps, audio at 32 kHz</text>
+  <line x1="565" y1="94" x2="565" y2="204" stroke="#5ee0c0" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="578" y="112" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">a real ceiling — past this the model</text>
+  <text x="578" y="128" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">is extrapolating outside its training</text>
+  <text x="40" y="152" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">THE HARDWARE — what one 8 GB card could hold</text>
+  <rect x="40" y="162" width="180" height="32" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="130" y="183" text-anchor="middle" fill="#ffd6d6" font-size="11" font-family="Inter,sans-serif">once about 5 s</text>
+  <line x1="48" y1="178" x2="212" y2="178" stroke="#ff6b6b" stroke-width="1"/>
+  <line x1="224" y1="178" x2="252" y2="178" stroke="#6f7b8f" stroke-width="1" marker-end="url(#d1)"/>
+  <rect x="256" y="162" width="484" height="32" rx="6" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="498" y="183" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">tiling and sequence parallelism moved it past 15 s — it is no longer the binding limit</text>
+</svg>
+
+The hardware ceiling was real and it moved. A single 8 GB card once OOM'd at 345 frames; tiling every per-token operation put a full 15 seconds at 480p onto one card, and splitting the sequence across three cards put 15 seconds of native 1280×704 within reach ([ch.44](44-building-dalang.html), [ch.45](45-three-gpu-sequence-parallelism.html), [ch.46](46-the-first-15-seconds.html)).
+
+The model ceiling did not move, and it cannot be moved by any amount of hardware. **H3 generates 4 to 15 seconds at 24 fps** because that is the range it was trained on. A longer single take is not a memory request; it is a request for behaviour the weights were never shown.
+
+<div class="callout danger"><span class="t">Correcting this chapter's own earlier claim</span>
+<p>An earlier version of this page listed the single-shot maximum as "capped, about 14 s, and by the 8 GB wall" — bundling the two ceilings into one. That was wrong in a way that mattered, because it implied a bigger card would buy a longer take.</p>
+<p>It would not. <b>The 15-second limit is the model's trained range, not a hardware limit.</b> Anything longer than that is an editing problem regardless of how much VRAM is available — which is exactly why chunking is not a poverty workaround. Every H3 user needs it, on any hardware, to exceed fifteen seconds.</p></div>
+
+## The idea: chunk, condition, repeat
+
+Render five seconds. Write it to disk. Render the next five, starting from where the last one ended. Continue to any length. Because the GPU only ever holds **one chunk's activations**, it never OOMs regardless of the final runtime.
+
+The flatness is measurable rather than theoretical. A 124-frame chunk at 832×480 is **15,129 tokens and about 5.72 GB of peak VRAM** on a card with 7.66 GB usable. Twelve of those chunks make a minute of video, and the twelfth costs exactly what the first did — 5.72 GB — while a single 60-second render would need roughly twelve times the activation and fit nowhere at all.
+
+<div class="callout spec"><span class="t">What a chunk costs, worked through</span>
+<p>At 832×480 × 124 frames a <b>tight close-up converges in 4 steps and denoises in about 2 minutes.</b> Twelve such chunks is a little over a minute of finished video for roughly half an hour of denoise.</p>
+<p>Hold the caveat firmly, though: 4 steps is the close-up number. The same chunk length holding a wide vista with a small distant subject needs <b>49</b> steps, and the cost rises with it. Step count is a property of the scene, not of the chunking (<a href="47-the-scorecard.html">ch.47</a>). Chunking makes long video <em>possible</em>; it does not make it cheap.</p></div>
+
+## Two ways to chunk, and only one of them works
+
+| | How | Result |
+|---|---|---|
+| ❌ Independent chunks | render separate clips and glue them together | nothing tells chunk 2 what chunk 1 looked like — different framing, different motion, a hard jump cut at every seam |
+| ✅ Conditioned chunks | each chunk *continues from* the previous | scene, framing and motion carry across, and the seam can be hidden |
+
+The independent version is the obvious first attempt and it fails instantly. Conditioning is the whole game — and the form the conditioning takes decides what survives.
+
+## Why last-frame-only conditioning breaks
+
+The cheap fix is to hand the **final frame** of chunk 1 to chunk 2 as its starting image. H3's FL2VA variant accepts exactly that: text, plus an optional first and last frame. It half-works, and it fails in two specific ways.
+
+<div class="callout warn"><span class="t">A single frame carries no motion, and no sound at all</span>
+<ul>
+<li><b>A still frame has no velocity.</b> Video is frames plus how they move, and motion lives in the <em>difference</em> between consecutive frames. One frozen frame is a pose with zero velocity, so the next chunk has to guess which way everything was travelling. The result is a hitch at every seam — a head that was bobbing restarts from standstill every few seconds.</li>
+<li><b>Audio has no last frame.</b> A waveform cannot anchor to a still image; there is no single-picture handle for sound to continue from. So the audio has nothing to continue and produces a click, a dropped beat, or a restarted voice at the join. This is worse for H3 specifically, because it generates picture and 32 kHz stereo sound <b>jointly</b> — the seam that breaks the audio is the same seam in the video.</li>
+</ul></div>
+
+The structural picture is a **relay handover**. A baton passed at a standing start loses everything the first runner had built up; the receiving runner has to accelerate from zero while the clock keeps running. Real relays solve this with an *exchange zone* — a stretch of track where both runners are moving together at speed before the baton changes hands. The fix for chunked video is the same fix.
+
+## The real fix: an overlap window in latent space
+
+Condition on an **overlap window** — the last second or so of the previous chunk, which is many frames rather than one — and carry it as **latents** rather than decoded pixels.
+
+<svg viewBox="0 0 760 276" width="100%" style="max-width:920px" role="img" aria-label="Three chunks laid on a timeline so that each one begins inside the tail of the previous chunk, with the shared overlap region marked as an exchange zone carried in latent space and crossfaded, contrasted with a butt join that has no overlap.">
+  <defs>
+    <marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE EXCHANGE ZONE — BOTH CHUNKS MOVING BEFORE THE HAND-OFF</text>
+  <text x="2" y="40" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">BUTT JOIN — one frame handed over at a standing start</text>
+  <rect x="2" y="50" width="300" height="30" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="152" y="70" text-anchor="middle" fill="#ffd6d6" font-size="11" font-family="Inter,sans-serif">chunk 1</text>
+  <rect x="306" y="50" width="300" height="30" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="456" y="70" text-anchor="middle" fill="#ffd6d6" font-size="11" font-family="Inter,sans-serif">chunk 2</text>
+  <line x1="304" y1="44" x2="304" y2="86" stroke="#ff6b6b" stroke-width="2"/>
+  <text x="618" y="70" fill="#c98b8b" font-size="10.5" font-family="Inter,sans-serif">velocity resets · audio clicks</text>
+  <text x="2" y="118" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">OVERLAP WINDOW — about 1 s of shared frames, carried as latents</text>
+  <rect x="2" y="130" width="330" height="30" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="150" y="150" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">chunk 1</text>
+  <rect x="266" y="168" width="330" height="30" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="416" y="188" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">chunk 2</text>
+  <rect x="530" y="206" width="228" height="30" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="644" y="226" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">chunk 3</text>
+  <rect x="266" y="130" width="66" height="106" rx="4" fill="#1a2440" stroke="#7aa2ff" fill-opacity="0.45"/>
+  <rect x="530" y="168" width="66" height="68" rx="4" fill="#1a2440" stroke="#7aa2ff" fill-opacity="0.45"/>
+  <line x1="299" y1="244" x2="299" y2="256" stroke="#5ee0c0" stroke-width="1" marker-end="url(#d2)"/>
+  <text x="2" y="262" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif">the exchange zone: many frames, so the difference between them carries velocity; crossfaded to hide the join</text>
+</svg>
+
+- **Many frames carry motion.** Across a window, the frame-to-frame change *is* the velocity. The new chunk knows not only where things are but which way they are going, and the stutter disappears.
+- **Latents carry richer temporal state than decoded pixels.** The latent for an 832×480 × 124-frame clip has the observed shape `(1, 24, 37, 30, 52)` — 24 channels, 37 temporal slots, and a 30 × 52 spatial grid, which is exactly 480 ÷ 16 by 832 ÷ 16. Handing over a slice of that gives the next chunk the model's own working representation, including the recent state of the audio stream, rather than a flattened picture of it.
+- **Crossfade the overlap** so the shared second dissolves from one chunk into the next.
+
+This is what rolling or sliding-window diffusion and history-conditioning do, and it is where the general technique is headed.
+
+## What actually survives the seam — the measured finding
+
+Here is where the theory meets the render logs, and where the surprise is. Chained FL2VA clips were built into a **60-second film** on this box, using the Q4 engine as the default because it renders about twice as fast as the patched int8 path — a choice that matters much more when a minute of video means a dozen separate renders.
+
+The continuity held far better than the pessimistic account above predicts, in every respect except one.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="A seam between two chunks with properties sorted into those that cross it intact - layout, palette, lighting, motion direction and stylised character design - and those that do not - photoreal facial micro-geometry, skin texture and fine hair.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT CROSSES A CHAINED SEAM, AND WHAT DOES NOT</text>
+  <rect x="2" y="26" width="220" height="230" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="18" y="48" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">chunk 1 ends</text>
+  <rect x="238" y="26" width="46" height="230" rx="6" fill="#12161f" stroke="#5ee0c0" stroke-dasharray="4 4"/>
+  <text x="261" y="146" text-anchor="middle" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif" transform="rotate(-90 261 146)">the seam</text>
+  <rect x="300" y="26" width="458" height="230" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="316" y="48" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">chunk 2 begins</text>
+  <rect x="316" y="60" width="426" height="26" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="330" y="78" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">scene layout, framing, camera position — HOLDS</text>
+  <rect x="316" y="92" width="426" height="26" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="330" y="110" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">palette, lighting, weather, atmosphere — HOLDS</text>
+  <rect x="316" y="124" width="426" height="26" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="330" y="142" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">stylised character design — HOLDS WELL</text>
+  <rect x="316" y="156" width="426" height="26" rx="4" fill="#151b26" stroke="#ffb454"/>
+  <text x="330" y="174" fill="#ffd9a8" font-size="11" font-family="Inter,sans-serif">motion direction, with an overlap window — MOSTLY HOLDS</text>
+  <rect x="316" y="188" width="426" height="26" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="330" y="206" fill="#ffd6d6" font-size="11" font-family="Inter,sans-serif">photoreal facial identity — DRIFTS</text>
+  <rect x="316" y="220" width="426" height="26" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="330" y="238" fill="#ffd6d6" font-size="11" font-family="Inter,sans-serif">audio phrase, beat, voice timbre — BREAKS AT THE JOIN</text>
+  <text x="18" y="242" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the last frame plus the prompt</text>
+</svg>
+
+<div class="callout truth"><span class="t">The finding: the scene survives, the person does not</span>
+<p>Chaining FL2VA clips <b>holds a scene together well</b>. Layout, palette, lighting and framing carry across the seam convincingly enough that a viewer reads the result as one place.</p>
+<p>What it does not hold is <b>identity</b>. A photoreal human face visibly drifts between clips — the same description, the same seed policy, a subtly different person. <b>Stylised characters hold far better</b>, because there is less for the eye to check. Nothing in FL2VA's inputs anchors who the subject is, so nothing is holding the face steady except the words in the prompt.</p></div>
+
+## Why identity is the thing that drifts
+
+The mechanism is worth working through, because it explains both halves of the finding at once — why photoreal faces fail and why stylised ones do not.
+
+**A last frame is a pixel constraint at one instant, not an identity constraint.** It tells the model what the image looked like; it does not tell the model *who that is*. From that starting image plus the text, the next chunk re-derives the person from scratch. The derivation is statistical, so it lands near the same face — near, not on.
+
+**Identity lives in the frequencies that survive least.** The training notes for a face-focused LoRA put the physics plainly: *"skin texture, pores, fine hair live in high spatial frequencies, and at a lower resolution the latents barely carry them."* That is the whole explanation. A recognisable human face is carried by micro-geometry — the exact spacing between eye and brow, the particular asymmetry of a mouth — and those are high-frequency details. The VAE compresses space by a factor of 16 in each direction, so a 480-pixel-tall frame becomes a 30-slot latent grid. High-frequency identity information is precisely what a ÷16 compression discards first.
+
+**A stylised character is defined by low frequencies.** A silhouette, a hair colour, a coat shape, a mask, a palette — large, coarse features that survive compression intact and that a prompt can name exactly. Those are the features chaining preserves. So the same mechanism that loses a real face keeps a cartoon one, and the difference is not about how "hard" the subject is but about which frequency band its identity lives in.
+
+**Errors accumulate.** Each chunk copies the previous chunk's small deviations and adds its own. The picture is a photocopy of a photocopy: the layout of the page survives twenty generations, the fine print does not. An overlap window slows that accumulation; it does not stop it. This is the price of any autoregressive scheme.
+
+## Ref2VA — the anchor that FL2VA does not have
+
+The fix for identity is not a better seam. It is a different set of inputs.
+
+<svg viewBox="0 0 760 234" width="100%" style="max-width:920px" role="img" aria-label="A comparison of the two H3 transformer variants: FL2VA takes text plus a first and last frame and therefore anchors the scene, while Ref2VA takes text plus reference images of the subject and therefore anchors identity across every clip.">
+  <defs>
+    <marker id="d3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6f7b8f"/></marker>
+    <marker id="d4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">TWO TRANSFORMERS, TWO KINDS OF ANCHOR — NOT A SETTING</text>
+  <rect x="2" y="26" width="368" height="196" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="18" y="48" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">FL2VA — what this build runs</text>
+  <rect x="18" y="62" width="150" height="26" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="93" y="80" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">prompt text</text>
+  <rect x="18" y="94" width="150" height="26" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="93" y="112" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">first / last frame</text>
+  <line x1="172" y1="92" x2="200" y2="92" stroke="#6f7b8f" stroke-width="1" marker-end="url(#d3)"/>
+  <rect x="204" y="66" width="150" height="52" rx="5" fill="#151b26" stroke="#3a4a63"/>
+  <text x="279" y="88" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">anchors WHERE</text>
+  <text x="279" y="106" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">scene, framing, motion</text>
+  <text x="18" y="150" fill="#ffd9a8" font-size="11" font-family="Inter,sans-serif">chains clips end to end · 20 GB transformer</text>
+  <text x="18" y="176" fill="#c98b8b" font-size="11" font-family="Inter,sans-serif">nothing here says WHO — so a photoreal</text>
+  <text x="18" y="192" fill="#c98b8b" font-size="11" font-family="Inter,sans-serif">face is re-derived, and drifts, every chunk</text>
+  <rect x="390" y="26" width="368" height="196" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="406" y="48" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">Ref2VA — the identity variant</text>
+  <rect x="406" y="62" width="150" height="26" rx="4" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="481" y="80" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">prompt text</text>
+  <rect x="406" y="94" width="150" height="26" rx="4" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="481" y="112" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">reference images</text>
+  <line x1="560" y1="92" x2="588" y2="92" stroke="#5ee0c0" stroke-width="1" marker-end="url(#d4)"/>
+  <rect x="592" y="66" width="150" height="52" rx="5" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="667" y="88" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="Inter,sans-serif">anchors WHO</text>
+  <text x="667" y="106" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">the same subject, every clip</text>
+  <text x="406" y="150" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">shares the encoder and both VAEs</text>
+  <text x="406" y="176" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">the marginal cost is one more file — but no</text>
+  <text x="406" y="192" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">parameter converts FL2VA into it</text>
+</svg>
+
+<div class="callout spec"><span class="t">The anchor is a different model, not a different setting</span>
+<p>FL2VA and Ref2VA are <b>two separate transformer files</b>, each around 20 GB. They share the Qwen3-VL encoder and both VAEs, so having both costs one additional download rather than a second full model — but no combination of parameters turns one into the other (<a href="03-how-h3-works.html">ch.03</a>, <a href="28-anatomy-of-h3.html">ch.28</a>).</p>
+<p>This reframes the whole chapter's problem. Identity drift across chained clips is not a bug in the chaining and not something a longer overlap window fixes. It is a <b>missing input</b>, and the input exists in a file this build has not loaded.</p></div>
+
+## What production actually does instead
+
+While the identity anchor is not in place, there is a cheaper answer that works today, and it is worth knowing because it costs nothing at all: **stop asking one continuous take to be long, and cut instead.**
+
+A long film has never been one continuous shot. It is many short shots on a timeline, and the model's 4-to-15-second range is a perfectly reasonable shot length. Cutting between shots does three useful things at once:
+
+1. **It hides the seam by making it a cut.** A dissolve or a hard cut is a *legitimate* discontinuity. A viewer forgives at an edit point what they would notice inside a take.
+2. **It lets identity be re-specified rather than carried.** The same character description, word for word, in every shot's prompt produces the same statistical face — not identical, but consistent enough to read as one person across cuts, because the audience is not comparing adjacent frames.
+3. **It makes the shot list parallel.** Independent shots run on independent cards. Three cards render three shots at once with no interconnect traffic at all — throughput, which is the one thing multiple 8 GB cards are unambiguously good at ([ch.37](37-the-production-line.html), [ch.38](38-making-the-movie.html)).
+
+<div class="callout warn"><span class="t">The plumbing detail that will cost an afternoon</span>
+<p>Chained conditioning requires the resolution to land on the patch grid. A width of <b>848</b> divides by 16 to give 53 — odd — so the 2×2 patching fails with a shape error that never mentions resolution at all. Use widths where the division by 16 lands even: <b>832 gives 52</b>. This was found the hard way while getting first-frame chaining to line up.</p></div>
+
+## What stays genuinely hard
+
+- **Drift accumulates.** The twentieth chunk is measurably worse than the first — colours shift, the face wanders. An overlap window slows this; nothing removes it.
+- **The audio seam is the open problem.** For a model that generates picture and sound jointly, this is the honest limit of chunked long video today. A waveform can be overlap-added or crossfaded across the shared window, but coherence — a beat that stays on tempo, a voice that keeps its timbre — is not guaranteed by any of it.
+- **Identity needs the other model.** Everything else in this chapter is technique. That one is a download.
+
+## The trade, stated plainly
+
+| | Single shot | Chunk and chain |
+|---|---|---|
+| VRAM | grows with frame count | flat — about 5.72 GB per 124-frame chunk at 832×480, at any final length |
+| Maximum length | 15 s, set by the model's trained range | effectively unlimited |
+| Motion and audio continuity | seamless, made in one pass | seams and drift; audio is the hard part |
+| Scene continuity across joins | not applicable | **holds well** |
+| Identity across joins | not applicable | **drifts for photoreal faces; holds for stylised ones** |
+| Cost | one render | one render per chunk, and step count is set by the scene |
+
+Single-shot wins on coherence and hits a hard fifteen-second ceiling. Chunking wins on length and never OOMs, at the cost of seams, slow drift, and a face that will not stay the same face. Past fifteen seconds there is no third option — on any card.
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">chunking</span><span class="badge">frame-chaining</span><span class="badge">conditioned versus independent chunks</span><span class="badge">FL2VA</span><span class="badge">Ref2VA</span><span class="badge">overlap window</span><span class="badge">latent-space conditioning</span><span class="badge">rolling / sliding-window diffusion</span><span class="badge">history conditioning</span><span class="badge">crossfade and overlap-add</span><span class="badge">drift accumulation</span><span class="badge">trained range versus hardware ceiling</span><span class="badge">identity anchor</span><span class="badge">high spatial frequencies</span><span class="badge">patch-grid alignment</span></p>
+<p>If those feel solid, the right question about any long-video claim becomes answerable: is it holding the scene, or is it holding the person? Those are different problems with different fixes.</p></div>
+
+<p class="small">Who does what during one render is <a href="30-the-render-live.html">ch.30</a>; H3's full anatomy is <a href="28-anatomy-of-h3.html">ch.28</a>; how it makes joint picture and sound is <a href="03-how-h3-works.html">ch.03</a>; the circuit lens on the hardware wall behind all of this is <a href="32-thinking-like-a-circuit.html">ch.32</a>.</p>
+
+Next: the uncomfortable question underneath all of this — with a model we did not train and weights we did not write, in what sense is any of it ours?
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>49 · The Image Engine — Qwen-Image 2.1 on 8 GB</title>
+<meta name="description" content="A second engine on the same box: the official Qwen-Image 2.1 (7B) rendering reference-quality stills on one 8 GB card. The 2.0→2.1 class trap, int8≈bf16 proven again on a new model, a diffusion model that actually has a KV cache, and the VAE-decode OOM that one env var fixed.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 49 · A second engine, same rule</span>
+
+# The Image Engine — Qwen-Image 2.1 on 8 GB
+
+<p class="lede">The box already streams a 33B video model through an 8 GB card. This chapter adds a <b>second</b> engine beside it — the official <b>Qwen-Image 2.1</b>, a 7B image model — and renders reference-quality stills on a single 8 GB GPU in about six minutes each, without ComfyUI, without touching the audio card or the video engine's Python. The interesting part is not that it works. It is the three things we <em>measured</em> getting there: a class mismatch that looked like a broken download, int8 matching bf16 on a brand-new model, and a diffusion model that — unusually — ships a real KV cache.</p>
+
+<div class="callout truth"><span class="t">The one-line answer</span>
+<p>Quality came from the <b>same playbook as the video engine</b>: official weights + the reference pipeline + int8 + CPU offload. The 7B transformer never fully lands on the card — it is streamed layer-by-layer from 125 GB of system RAM. Result on one 8 GB 3060 Ti: <b>1024&nbsp;×&nbsp;1024, 30 steps, ~365&nbsp;s/image</b>, visually identical to bf16.</p></div>
+
+## Why a second engine at all
+
+The video engine (chapters 43–48) proved a principle: on this hardware, picture quality does not come from a clever quantization or a community re-pack. It comes from running **the model the authors actually shipped**, through **the pipeline the authors actually wrote**, and solving the 8 GB problem with *memory placement* — offload — rather than with *precision loss*. Chapter 17 measured it; chapter 13 measured int8 against Q4 and found a tie on quality.
+
+So when the ask was "a page I can use to make images," the tempting path was a pre-quantized community GGUF through a C++ runtime — small, fast to set up. The first version did exactly that, and it produced foggy, green-speckled output. The fix was not a better quant. It was to throw the whole thing away and apply the video playbook to stills.
+
+<div class="callout warn"><span class="t">The trap that cost an afternoon</span>
+<p>A model folder named <code>qwen-image-2.1-official</code> downloaded cleanly — 31 GB, every shard present — and then refused to load with a shape error: <code>norm_out.linear.weight expected [8192, 4096], got [4096, 4096]</code>, plus a batch of config keys "passed but not expected" (<code>causal_condition</code>, <code>context_in_dim</code>). It looked like a corrupt download. It was not.</p></div>
+
+## The 2.0 → 2.1 class trap
+
+The error was an **architecture mismatch**, and the fix is worth internalising because it will happen again on any fast-moving model.
+
+The resident `diffusers` (the one the video engine uses) was a few weeks old. It knew the `QwenImagePipeline` / `QwenImageTransformer2DModel` classes — the **2.0** family. But the downloaded weights were **2.1**, whose `model_index.json` names different classes entirely:
+
+| component | 2.0 class (what was installed) | 2.1 class (what the weights need) |
+|---|---|---|
+| pipeline | `QwenImagePipeline` | `QwenImage21Pipeline` |
+| transformer | `QwenImageTransformer2DModel` | `QwenImage21Transformer2DModel` |
+| VAE | `AutoencoderKLQwenImage` | `AutoencoderKLQwenImage21` |
+| text encoder | Qwen2.5-VL | `Qwen3VLForConditionalGeneration` |
+
+Loading 2.1 weights with the 2.0 class is like pouring a V8 engine's parts into a four-cylinder block — the bolt holes (`norm_out`'s shape) simply do not line up. The config keys it "ignored" were the 2.1-only features (`causal_condition`) the old class had never heard of.
+
+<div class="callout spec"><span class="t">The fix — and the discipline behind it</span>
+<p>Install <code>diffusers</code> from git-main (which has the <code>…21</code> classes) into a <b>dedicated venv</b>, and load with the matching class. The dedicated venv matters: the video engine shares a Python environment, and upgrading it to bleeding-edge <code>diffusers</code> could silently break a working 40-hour render pipeline. New engine, new venv — the two never touch.</p></div>
+
+The lesson is the one this whole project keeps relearning: **don't recite what a library has, check it.** One line — `hasattr(diffusers, "QwenImage21Pipeline")` — turned a mystery into a one-word answer (`False`), and the config file named every class it actually needed.
+
+## int8 ≈ bf16 — proven again, on a new model
+
+Chapter 13 found int8 and Q4 tied on the video model. The obvious question for a *different* model was whether that still holds. So: same prompt, same seed (`509632276`), same 30 steps, one variable — the number format of the transformer's weights.
+
+| run | config | render time | peak GPU mem | quality |
+|---|---|---|---|---|
+| 1 | bf16 | 470 s | ~7 GB (OOM'd once) | reference |
+| 2 | **int8** | 385 s | 1.4 GB | identical to bf16 |
+| 3 | **int8 + KV cache** | **365 s** | **0.8 GB** | identical to int8 |
+
+The two images were pixel-indistinguishable. int8 was **18 % faster** — not because the maths is faster (it is weight-only int8; compute is still bf16) but because **half as many bytes cross the PCIe bus** each step when the model is being streamed from RAM. On an offloaded model, the bus is the bottleneck, so halving the weight size directly buys wall-clock time.
+
+<div class="callout truth"><span class="t">The rule, restated</span>
+<p>For <em>quality</em>, int8 and bf16 are equal here — twice now, on two different models. For <em>speed on an 8 GB card</em>, int8 wins, because offload makes the render bus-bound and int8 halves the traffic. Precision is not the quality lever. It never was.</p></div>
+
+## A diffusion model with a KV cache
+
+This is the genuinely unusual finding. Large language models get their speed from a **KV cache**: generation is autoregressive, each new token attends to past tokens whose keys and values never change, so you store them and compute only the new one.
+
+Diffusion normally **cannot** do this. It does not build the image token-by-token — at every one of the 30 denoising steps it recomputes the *entire* latent at once, and the latent changes each step. Queries, keys, and values all change every step. Nothing to reuse.
+
+Qwen-Image 2.1 is the exception. Its config carries `causal_condition: true`, and the pipeline's call signature exposes a `use_kv_cache` flag. 2.1 processes its **conditioning** stream causally — and *those* keys and values are stable across the denoising steps and across the classifier-free-guidance positive/negative passes. So they can be cached. It is a real KV cache, just over the conditioning path rather than the image patches.
+
+<div class="callout spec"><span class="t">Measured, not assumed</span>
+<p>Turning <code>use_kv_cache=True</code> on, same seed: render dropped <b>385&nbsp;s → 365&nbsp;s</b> (~5 %) and peak GPU memory dropped <b>1.4&nbsp;GB → 0.8&nbsp;GB</b>, with zero change to the output. The memory halving is the quietly valuable part — it is the headroom that makes 1536px and small batches fit on 8 GB without an out-of-memory crash.</p></div>
+
+The *bigger* cache lever for any diffusion model is **step/feature caching** (TeaCache, FBCache, DeepCache): consecutive steps produce near-identical block outputs, so you skip recomputing some blocks and reuse the previous step's — typically 1.5–2× faster, at a small quality cost. It is left off here on purpose: the brief was quality first. It is the obvious switch for a future "fast draft" mode.
+
+## The OOM that one env var fixed
+
+The very first bf16 render ran for seven minutes, denoising happily at 1.4 GB, then crashed at the **last** step. The error pointed straight at the cause:
+
+```
+CUDA out of memory. 5.19 GiB allocated by PyTorch, 1.90 GiB reserved but
+unallocated. Try PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+The spike is the **VAE decode** — turning the finished 1024px latent back into pixels is the single most memory-hungry moment in the whole render, far more than any denoising step. And the 1.9 GB "reserved but unallocated" is **fragmentation**: CUDA had the memory, just not in one contiguous block.
+
+<div class="callout spec"><span class="t">Three small changes, no quality cost</span>
+<p><b>1.</b> <code>PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True</code> — lets the allocator grow a segment instead of demanding one contiguous block. This alone cleared the OOM. <b>2.</b> <code>torch.cuda.empty_cache()</code> after every job (success or failure) — a crashed render had left 7.4 GB stranded on the card, which would starve the next job in a resident worker. <b>3.</b> VAE tiling as a fallback for larger canvases. None of these touch a single output pixel; they are all about <em>where</em> memory sits and <em>when</em> it is freed.</p></div>
+
+## Three cards, three jobs, no collisions
+
+The box has three 8 GB cards and now three tenants: audio (chapter's sibling project), the H3 video engine, and this. The rule is strict and enforced by configuration, not by hope:
+
+- The worker unit sets `CUDA_VISIBLE_DEVICES=1`. The image engine can physically only see GPU 1. GPU 0 — the audio service — is invisible to it and sat untouched at 653 MiB through every render.
+- Its Python is `.venv-qwen21`, its own virtual environment. The video engine's venv is never modified.
+- The 7B transformer and the Qwen3-VL text encoder live in **system RAM** (the box has 125 GB) and stream to GPU 1 per layer. Even bf16, the model never needs to fit in 8 GB of VRAM — only the *active layer* does.
+
+## The serving stack, without ComfyUI
+
+Same shape as the sibling projects: a small, legible stack we own end to end.
+
+- A **resident worker** loads the model once (3 s for bf16 via mmap, 36 s for int8 because it quantizes on the way in) and then renders in-process — no per-image reload.
+- A **SQLite queue** claims one job at a time; the web server never touches the GPU.
+- A **FastAPI** server serves the page and the gallery; generation is **password-gated** (the owner can create, anyone can view), while the render runs behind a Cloudflare tunnel on its own subdomain alongside the audio and LLM apps.
+
+<div class="callout truth"><span class="t">What it is, honestly</span>
+<p>Reference-quality text-to-image on a second-hand 8 GB card, ~6 minutes an image, on infrastructure small enough to read in an afternoon. Slow, and that is the real cost of 8 GB — but the picture that comes out is the one the model's authors intended, not a lossy echo of it. The fast path exists (step caching) and is one switch away when a draft matters more than a masterpiece.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">weight-only int8</span><span class="badge">sequential CPU offload</span><span class="badge">PCIe-bound</span><span class="badge">causal conditioning</span><span class="badge">KV cache</span><span class="badge">step / feature caching</span><span class="badge">VAE decode</span><span class="badge">memory fragmentation</span><span class="badge">expandable segments</span><span class="badge">true_cfg_scale</span><span class="badge">resident worker</span><span class="badge">class mismatch</span><span class="badge">model_index.json</span><span class="badge">CUDA_VISIBLE_DEVICES</span></p>
+<p>If int8-vs-bf16 reads as obvious now, chapter 18 has the bit-level story of what those formats actually store.</p></div>
+
+Method note: every time in this chapter — 470 s, 385 s, 365 s — is a single-variable, same-seed render measured on the box. The KV-cache and int8 claims were verified by rendering the same prompt and comparing the images, not by trusting the flag's name.
+
+Next: the number formats under int8 and bf16, bit by bit ([ch.18](18-number-formats-precision.html)) — or back to the video engine this one learned from ([ch.43](43-the-dalang-engine.html)).
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

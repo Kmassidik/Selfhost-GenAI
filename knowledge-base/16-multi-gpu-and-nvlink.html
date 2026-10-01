@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>16 · Multi-GPU &amp; NVLink</title>
+<meta name="description" content="Three RTX 3060 Ti on PCIe with no NVLink: what the measured 4.9 GB/s between cards allows, what it costs, and why 2.26x the tokens came out 34x slower.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 16 · Three cards, honestly</span>
+
+# Multi-GPU &amp; NVLink
+
+<p class="lede">Three consumer graphics cards with no NVLink can render a job that no single one of them could hold — and they cannot make any job faster. Which of those two things is on offer is decided entirely by the wire between the cards, and on this machine that wire was measured at <b>4.9 GB/s</b> while the memory <em>inside</em> each card runs at about <b>448 GB/s</b>. Roughly ninety times slower, and that ratio is the whole chapter.</p>
+
+This chapter was originally written with two cards in the box and a flat conclusion at the top. It is worth reading that conclusion again before anything else, because half of it was wrong and the other half explains everything that happened next.
+
+> *"Two consumer GPUs can run two renders in parallel (2× throughput) — but they cannot combine into one bigger/faster render, because our cards have no NVLink and talk over slow PCIe. It's a hardware-class limit, not a setting we missed."*
+
+<div class="callout truth"><span class="t">What actually happened</span>
+<table>
+<tr><th></th><th>Predicted here</th><th>Measured later</th></tr>
+<tr><td>One render across several cards</td><td>"cannot combine"</td><td><b>Done.</b> Native 1280×704 at 15 s, all three cards holding one sequence (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>, <a href="46-the-first-15-seconds.html">ch.46</a>)</td></tr>
+<tr><td>Cost of doing it</td><td>—</td><td>2.26× the tokens cost <b>34× the time</b></td></tr>
+<tr><td>Would it be <em>faster</em>?</td><td>no</td><td><b>Correct.</b> It is slower than one card, per unit of work</td></tr>
+<tr><td>Reason given</td><td>the interconnect</td><td><b>Correct</b>, and the size of the penalty is exactly the size of the interconnect gap</td></tr>
+</table>
+<p>The prediction confused <em>impossible</em> with <em>expensive</em>. The wire does not forbid splitting a render; it prices it. What it genuinely forbids is <b>speed</b>. Everything below is the mechanism behind that distinction.</p></div>
+
+## What NVLink is, and why the cards here do not have it
+
+**NVLink is a physical high-speed bridge that wires GPUs directly to each other.** It is hardware: dedicated lanes on the silicon plus, on the consumer cards that ever shipped with it, a plastic-and-copper **bridge connector** clipped across the tops of two boards. Drivers and NCCL *use* it. No software creates it.
+
+<div class="callout spec"><span class="t">The roads analogy, and where it stops being a metaphor</span>
+<p><b>PCIe</b> is the public road every device uses to reach the rest of the computer — through the motherboard slot, shared with everything else. <b>NVLink</b> is a private bridge built directly between two GPUs, bypassing the public road entirely.</p>
+<p>The analogy stops being decorative at one specific point: on a public road, two cars going between neighbouring houses still have to drive out to the main junction and back. That is not a figure of speech here. Traffic from GPU 0 to GPU 1 on this box literally goes <b>GPU 0 → host RAM → GPU 1</b>, two hops through the CPU, because direct peer-to-peer access is off.</p></div>
+
+<div class="callout warn"><span class="t">These cards physically cannot have it</span>
+<p>The RTX 3060 Ti has <b>no NVLink connector at all</b>. NVIDIA shipped NVLink on a handful of high-end consumer cards — the <b>3090</b> was the last — and then removed it entirely; the 4090 has none. So the three cards in this machine can only talk over PCIe. Even if every layer of software above them supported splitting a render perfectly, the fast link that makes splitting cheap does not exist on this silicon.</p></div>
+
+## The topology, measured
+
+A forty-line PyTorch script, run on this hardware, no framework in the way:
+
+<div class="callout truth"><span class="t">What the wire actually does here</span>
+<table>
+<tr><td><b>GPU ↔ GPU bandwidth</b></td><td><b>4.9 GB/s</b>, both directions</td></tr>
+<tr><td>Direct peer-to-peer access</td><td><b>No</b> — traffic routes GPU → host RAM → GPU, two hops</td></tr>
+<tr><td>Topology class</td><td><code>PHB</code> — the cards meet <em>at the CPU host bridge</em>, not on a shared PCIe switch</td></tr>
+<tr><td>IOMMU</td><td>enabled (<code>DMAR</code>) — actively blocks direct GPU-to-GPU DMA</td></tr>
+<tr><td>Link</td><td>PCIe 3.0 ×16 (reported at a lower generation when idle; it ramps under load)</td></tr>
+<tr><td>For comparison</td><td>NVLink moves 300–900 GB/s — <b>60 to 180× more</b></td></tr>
+<tr><td>And for scale</td><td>VRAM <em>inside</em> one card: <b>448 GB/s</b></td></tr>
+</table>
+<p>Peer-to-peer is off for two independent reasons, either of which is sufficient: the <code>PHB</code> topology and the enabled IOMMU. Turning the IOMMU off is testable, but the topology would likely still forbid P2P — and even a best-case direct PCIe 3.0 path is an order of magnitude under NVLink. This is not a configuration anyone overlooked. It is the wiring.</p></div>
+
+<svg viewBox="0 0 760 302" width="100%" style="max-width:920px" role="img" aria-label="Topology of this box: three graphics cards each connected only to the CPU host bridge over PCIe, with no direct card-to-card path, so every exchange between two cards makes two hops through system RAM. Beside it, the NVLink arrangement the cards do not have.">
+  <defs>
+    <marker id="n1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="n2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THIS BOX — EVERY CARD-TO-CARD BYTE GOES OUT TO THE CPU AND BACK</text>
+  <rect x="20" y="34" width="110" height="52" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="75" y="56" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">GPU 0</text>
+  <text x="75" y="74" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">8 GB · 448 GB/s</text>
+  <rect x="160" y="34" width="110" height="52" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="215" y="56" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">GPU 1</text>
+  <text x="215" y="74" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">8 GB · 448 GB/s</text>
+  <rect x="300" y="34" width="110" height="52" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="355" y="56" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">GPU 2</text>
+  <text x="355" y="74" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">8 GB · 448 GB/s</text>
+  <path d="M130,60 C160,60 160,60 160,60" fill="none" stroke="#ff6b6b" stroke-dasharray="4 3"/>
+  <path d="M270,60 C300,60 300,60 300,60" fill="none" stroke="#ff6b6b" stroke-dasharray="4 3"/>
+  <text x="145" y="52" text-anchor="middle" fill="#ff6b6b" font-size="13" font-family="Inter,sans-serif">✕</text>
+  <text x="285" y="52" text-anchor="middle" fill="#ff6b6b" font-size="13" font-family="Inter,sans-serif">✕</text>
+  <line x1="75" y1="88" x2="75" y2="140" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <line x1="215" y1="88" x2="215" y2="140" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <line x1="355" y1="88" x2="355" y2="140" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <text x="96" y="112" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">PCIe 3.0 ×16</text>
+  <rect x="20" y="144" width="390" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="215" y="164" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">CPU host bridge — the PHB topology</text>
+  <text x="215" y="182" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">2 × Xeon E5-2665 · IOMMU on, blocking direct GPU-to-GPU DMA</text>
+  <line x1="215" y1="192" x2="215" y2="212" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <rect x="110" y="216" width="210" height="42" rx="8" fill="#12161f" stroke="#3a4a63"/>
+  <text x="215" y="242" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">125 GB system RAM</text>
+  <path d="M60,96 L60,204 L102,232" fill="none" stroke="#ff6b6b" stroke-dasharray="3 3" opacity="0.8"/>
+  <path d="M328,232 L230,204 L230,96" fill="none" stroke="#ff6b6b" stroke-dasharray="3 3" opacity="0.8" marker-end="url(#n2)"/>
+  <text x="20" y="282" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">GPU 0 → host RAM → GPU 1 · measured 4.9 GB/s</text>
+  <text x="20" y="296" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">about 1/91 of the speed the same card reaches into its own memory</text>
+  <rect x="440" y="26" width="318" height="232" rx="10" fill="#12161f" stroke="#3a4a63"/>
+  <text x="456" y="50" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT A BRIDGE WOULD LOOK LIKE</text>
+  <rect x="460" y="70" width="120" height="52" rx="8" fill="#0f141d" stroke="#3a4a63"/>
+  <text x="520" y="100" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">GPU A</text>
+  <rect x="618" y="70" width="120" height="52" rx="8" fill="#0f141d" stroke="#3a4a63"/>
+  <text x="678" y="100" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">GPU B</text>
+  <rect x="580" y="88" width="38" height="16" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="599" y="76" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">bridge</text>
+  <text x="599" y="142" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">NVLink — 300 to 900 GB/s</text>
+  <text x="599" y="160" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">no host hop, no IOMMU in the path</text>
+  <line x1="460" y1="176" x2="738" y2="176" stroke="#232c3b"/>
+  <text x="460" y="198" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">Shipped on a few high-end consumer cards;</text>
+  <text x="460" y="214" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the 3090 was the last. The 3060 Ti has</text>
+  <text x="460" y="230" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif">no connector for it at all.</text>
+  <text x="460" y="248" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">Not a setting. A missing physical port.</text>
+</svg>
+
+## Two completely different things called "multi-GPU"
+
+The word covers two arrangements with almost nothing in common. Confusing them is why "just add a second card" advice so often disappoints.
+
+<svg viewBox="0 0 760 320" width="100%" style="max-width:920px" role="img" aria-label="Two multi-GPU arrangements: throughput parallelism runs three independent renders with no traffic between cards, while capability parallelism splits one sequence across all three and must gather across the wire once per attention layer, fifty times per step.">
+  <defs>
+    <marker id="n3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="n4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE WIRE IS IRRELEVANT ON THE LEFT AND DECISIVE ON THE RIGHT</text>
+  <rect x="2" y="26" width="366" height="284" rx="10" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="185" y="50" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">throughput parallelism</text>
+  <text x="185" y="68" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">three jobs, three cards, no conversation</text>
+  <rect x="24" y="86" width="100" height="70" rx="8" fill="#0f141d" stroke="#2f6b5c"/>
+  <text x="74" y="110" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">GPU 0</text>
+  <text x="74" y="130" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">scene A</text>
+  <text x="74" y="146" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">whole model</text>
+  <rect x="136" y="86" width="100" height="70" rx="8" fill="#0f141d" stroke="#2f6b5c"/>
+  <text x="186" y="110" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">GPU 1</text>
+  <text x="186" y="130" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">scene B</text>
+  <text x="186" y="146" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">whole model</text>
+  <rect x="248" y="86" width="100" height="70" rx="8" fill="#0f141d" stroke="#2f6b5c"/>
+  <text x="298" y="110" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">GPU 2</text>
+  <text x="298" y="130" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">scene C</text>
+  <text x="298" y="146" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">whole model</text>
+  <text x="185" y="186" text-anchor="middle" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">bytes crossing between cards per step: none</text>
+  <rect x="24" y="204" width="324" height="42" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="185" y="222" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">3× the finished clips per day</text>
+  <text x="185" y="238" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">each clip takes exactly as long as it always did</text>
+  <text x="24" y="270" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">Limit: every card must fit the job on its own —</text>
+  <text x="24" y="286" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">and each needs its own streamed copy of the</text>
+  <text x="24" y="302" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">weights, so system RAM becomes the ceiling.</text>
+  <rect x="384" y="26" width="374" height="284" rx="10" fill="#12161f" stroke="#ffb454"/>
+  <text x="571" y="50" text-anchor="middle" fill="#ffd9a0" font-size="13" font-family="Inter,sans-serif">capability parallelism</text>
+  <text x="571" y="68" text-anchor="middle" fill="#c9a06a" font-size="11" font-family="Inter,sans-serif">one job, one sequence, split three ways</text>
+  <rect x="406" y="86" width="100" height="70" rx="8" fill="#0f141d" stroke="#7a5a30"/>
+  <text x="456" y="110" text-anchor="middle" fill="#ffd9a0" font-size="11.5" font-family="Inter,sans-serif">GPU 0</text>
+  <text x="456" y="130" text-anchor="middle" fill="#c9a06a" font-size="10.5" font-family="Inter,sans-serif">rows 1 of 3</text>
+  <rect x="520" y="86" width="100" height="70" rx="8" fill="#0f141d" stroke="#7a5a30"/>
+  <text x="570" y="110" text-anchor="middle" fill="#ffd9a0" font-size="11.5" font-family="Inter,sans-serif">GPU 1</text>
+  <text x="570" y="130" text-anchor="middle" fill="#c9a06a" font-size="10.5" font-family="Inter,sans-serif">rows 2 of 3</text>
+  <rect x="634" y="86" width="100" height="70" rx="8" fill="#0f141d" stroke="#7a5a30"/>
+  <text x="684" y="110" text-anchor="middle" fill="#ffd9a0" font-size="11.5" font-family="Inter,sans-serif">GPU 2</text>
+  <text x="684" y="130" text-anchor="middle" fill="#c9a06a" font-size="10.5" font-family="Inter,sans-serif">rows 3 of 3</text>
+  <path d="M506,146 C520,170 606,170 620,146" fill="none" stroke="#ffb454" marker-end="url(#n4)"/>
+  <path d="M620,150 C634,174 720,174 734,150" fill="none" stroke="#ffb454" marker-end="url(#n4)"/>
+  <path d="M406,150 C440,190 700,190 734,152" fill="none" stroke="#ffb454" stroke-dasharray="4 3" marker-end="url(#n4)"/>
+  <text x="571" y="204" text-anchor="middle" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">every card needs every other card's rows —</text>
+  <text x="571" y="220" text-anchor="middle" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">once per attention layer, 50 layers per step</text>
+  <rect x="406" y="234" width="328" height="42" rx="8" fill="#241a1a" stroke="#ffb454"/>
+  <text x="570" y="252" text-anchor="middle" fill="#ffd9a0" font-size="11.5" font-family="Inter,sans-serif">a clip no single card could hold</text>
+  <text x="570" y="268" text-anchor="middle" fill="#c9a06a" font-size="10.5" font-family="Inter,sans-serif">at a heavy, measurable price in wall-clock</text>
+  <text x="406" y="298" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">Limit: the wire. This is the arrangement NVLink exists for.</text>
+</svg>
+
+### Why one of them is free and the other is not
+
+In the left-hand arrangement the cards never speak. Each holds a whole model and a whole job; the interconnect carries only the weight stream from RAM that a single card would need anyway. Nothing about NVLink, PHB or IOMMU applies. This is why "two cards, two renders" worked from the first day and still works.
+
+The right-hand arrangement is different in kind. Inside a transformer block, **every operation is per-token except one**: the norms, the modulation, the residual adds and the whole feed-forward network act on each row independently, so each card can do its own third locally. Attention is the one line where every row must see every other row. So once per attention layer, each card has to obtain what the other two are holding — and there are **50 layers**, repeated for every step of the schedule.
+
+That is the traffic the wire has to carry, and the wire is the slowest component in the machine by two orders of magnitude.
+
+## The price, measured
+
+Two renders on the sharded path, both at 3 steps, differing only in resolution:
+
+<table>
+<tr><th>Render</th><th>Resolution × frames</th><th>Steps</th><th>s/step</th><th>Total</th></tr>
+<tr><td><code>e1h-15s</code></td><td>832×480 × 345 (15 s)</td><td>3</td><td>193 s</td><td>578 s</td></tr>
+<tr><td><code>g4k</code></td><td>1280×704 × 345 (14.4 s)</td><td>3</td><td>6600 s</td><td>~5.5 h</td></tr>
+</table>
+
+The second has **2.26× the tokens** of the first — that is just $\tfrac{1280 \times 704}{832 \times 480}$, with the frame count held constant. Attention is quadratic in token count, so the arithmetic predicts roughly $2.26^2 \approx 5\times$. The measurement is **34×**.
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:920px" role="img" aria-label="Bar chart: going from 832 by 480 to 1280 by 704 at the same frame count is 2.26 times the tokens, which quadratic attention predicts should cost about 5 times the time, but the measured cost on the three-card sharded path was 34 times, leaving roughly a sevenfold overhead beyond the mathematics.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">832×480×345  →  1280×704×345 · SAME FRAMES, SAME 3 STEPS, THREE CARDS</text>
+  <text x="12" y="54" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">tokens</text>
+  <rect x="140" y="42" width="18" height="18" rx="2" fill="#151b26" stroke="#232c3b"/>
+  <rect x="140" y="42" width="40" height="18" rx="2" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="192" y="56" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">2.26× — pure pixel arithmetic</text>
+  <text x="12" y="98" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">predicted</text>
+  <rect x="140" y="86" width="88" height="18" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="240" y="100" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">≈5× — what quadratic attention alone would cost</text>
+  <text x="12" y="142" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">measured</text>
+  <rect x="140" y="130" width="600" height="18" rx="2" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="140" y="130" width="88" height="18" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="240" y="144" fill="#ffb1b1" font-size="11.5" font-family="Inter,sans-serif">34× — 578 s per render became about 5.5 hours</text>
+  <line x1="228" y1="152" x2="228" y2="172" stroke="#ff6b6b" stroke-dasharray="3 3"/>
+  <line x1="740" y1="152" x2="740" y2="172" stroke="#ff6b6b" stroke-dasharray="3 3"/>
+  <line x1="228" y1="166" x2="740" y2="166" stroke="#ff6b6b"/>
+  <text x="484" y="188" text-anchor="middle" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">≈7× beyond the mathematics</text>
+  <text x="484" y="204" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">gathering across a 4.9 GB/s wire, 50 layers per step, three processes each streaming weights</text>
+  <line x1="2" y1="220" x2="758" y2="220" stroke="#232c3b"/>
+  <text x="2" y="240" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">The maths says the job got five times harder. The machine says it got thirty-four times harder. The difference is the interconnect.</text>
+</svg>
+
+<div class="callout danger"><span class="t">The number to remember</span>
+<p><b>2.26× the tokens cost 34× the time.</b> Quadratic attention accounts for about 5× of that. The remaining <b>~7×</b> is the cost of doing the work on three cards that can only reach each other at 4.9 GB/s — the gather traffic per attention layer, and three separate processes each streaming their own copy of the weights from system RAM.</p></div>
+
+### Where the extra 7× comes from
+
+Three contributions, all of them structural rather than accidental:
+
+1. **Gather traffic.** Each attention layer requires each card to see the other cards' slices. On a 448 GB/s bridge this would be nearly free. At 4.9 GB/s it is not, and it happens 50 times a step, every step.
+2. **Weight streaming, times three.** The model does not fit on any card, so weights are streamed from RAM as usual — about **0.4 GB per block**, roughly **460 GB of PCIe traffic for a 23-step render** on a single card. Three processes each do their own streaming, on the same bus that is also carrying the gather traffic. They contend.
+3. **Synchronisation.** Every gather is a barrier. The slowest card sets the pace for all three, at every one of the 50 layers, at every step. Idle time is invisible in a utilisation graph and very visible on a clock.
+
+<div class="callout warn"><span class="t">The failure that proves point 2 — ring-3 context parallelism</span>
+<p>An earlier attempt to run three-way context parallelism <b>ran out of memory</b>, and not on the GPU side of the problem: <b>offloading re-copied the weights per process</b>. Three processes, three full staging copies, and system RAM ran out before the cards did. The fix is architectural — share the staged weights, or accept fewer processes — and the lesson generalises: on a streaming design, adding a card multiplies the <em>host</em> cost too, not only the GPU cost.</p></div>
+
+## The bugs that only exist above one card
+
+Splitting a render introduces a class of failure that simply cannot occur on a single GPU: **every tensor now has a residence**, and most library code was written assuming there is only one place to be.
+
+<div class="callout danger"><span class="t"><code>g4j</code> — six hours of denoise, killed on the first line of decode</span>
+<p>The render finished <b>6 h 10 m</b> of denoising correctly, then died immediately when decoding began. The cause: <code>_execution_device</code> resolved to <code>cuda:0</code>, while the sharded forward pass had returned its latents on the <b>CPU</b>. The decoder tried to use one and was handed the other. The same bug sat in <b>both</b> decode paths — <code>decoders.py:185</code> and <code>decoders.py:245</code>.</p>
+<p>Nothing about this is a hardware limit, and nothing about it would have happened on one card. It is the price of a code path where "the device" stopped being a single answer.</p></div>
+
+The practical rule that came out of it: on a multi-card path, **assume nothing about where a tensor is**. Check, move, and check again — particularly at the seams between components written by different people.
+
+## Is single-render multi-GPU a real technique elsewhere?
+
+Yes, and it is well documented. [xDiT](https://arxiv.org/pdf/2411.01738) parallelises diffusion across GPUs and reports 3.9× on CogVideoX and 8.4× on eight A100s. Those are published figures from data-centre hardware with fast interconnects — exactly the conditions this box lacks. When the original version of this chapter checked, xDiT did not support MiniMax-H3 either, which is part of why the path here was built from scratch ([ch.36](36-splitting-the-video-cp.html), [ch.45](45-three-gpu-sequence-parallelism.html)) rather than adopted.
+
+The contrast is the useful part: **on a fast link, splitting a render buys speed. On this link, splitting a render buys capacity and charges speed for it.**
+
+## What three cards are actually for, here
+
+<table>
+<tr><th>Goal</th><th>Arrangement</th><th>Verdict on this box</th></tr>
+<tr><td>More finished clips per day</td><td>three independent renders, one per card</td><td><b>Works.</b> No card-to-card traffic at all; the only shared resource is system RAM and the PCIe bus</td></tr>
+<tr><td>A clip too large for one card</td><td>sequence parallelism across all three</td><td><b>Works, and is expensive.</b> Native 720p × 15 s exists because of it</td></tr>
+<tr><td>The same clip, faster</td><td>any arrangement</td><td><b>No.</b> Three cards on one job are slower per unit of work than one card on one job</td></tr>
+<tr><td>A sharper image</td><td>—</td><td>Not a hardware question at all. Step count and prompt do more (<a href="17-what-actually-improves-quality.html">ch.17</a>)</td></tr>
+</table>
+
+## And the honest economics
+
+Capability is not the same as workflow. Native 720p at 15 seconds **works** and costs roughly **44 hours** at 23 steps — about 90 at 49. The same 15 seconds rendered at 832×480 with 49 steps is **2.6 hours of denoise**, then a 1.54× upscale to 720p: roughly **35× cheaper** for a difference most viewers cannot see.
+
+<div class="callout truth"><span class="t">The three-card verdict</span>
+<p>Three cards without NVLink give <b>throughput for free</b> and <b>capability at a price</b>. They never give speed. The 15-second native-720p render is a <b>proven capability, not a production workflow</b> — the thing that makes it worth having is knowing the ceiling exists, not living at it.</p>
+<p>And the reasoning generalises past this hardware. Before adding a card to any machine, ask which of the two arrangements the goal needs. If the answer is throughput, the wire does not matter and almost any card helps. If the answer is one bigger job, the wire is the entire question — and the specification to check is not the GPU's, it is the link's.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">NVLink</span><span class="badge">PCIe lane / generation</span><span class="badge">interconnect bandwidth</span><span class="badge">peer-to-peer (P2P)</span><span class="badge">PHB topology</span><span class="badge">IOMMU / DMAR</span><span class="badge">host hop</span><span class="badge">throughput parallelism</span><span class="badge">capability parallelism</span><span class="badge">sequence parallelism</span><span class="badge">all-gather</span><span class="badge">synchronisation barrier</span><span class="badge">device residence</span><span class="badge">NCCL</span></p>
+<p>If those feel solid, any "should I add a second GPU?" question becomes answerable in one step: which of the two arrangements does the goal need?</p></div>
+
+Next: what actually moves image quality on this hardware — which turns out to have almost nothing to do with the number of cards.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

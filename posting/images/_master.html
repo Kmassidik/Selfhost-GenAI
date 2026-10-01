@@ -1,0 +1,64 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;padding:0;background:#fff}
+svg{display:block}
+</style></head><body>
+<svg width="1200" height="716" viewBox="0 0 1200 716" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <marker id="m1" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#0f7b6c"/></marker>
+  <marker id="m2" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9a9a9a"/></marker>
+  <marker id="m3" markerWidth="9" markerHeight="9" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2b5fa8"/></marker>
+</defs>
+<rect width="1200" height="716" fill="#fff"/>
+<text x="60" y="60" fill="#0f7b6c" font-size="15" font-family="-apple-system,Helvetica,sans-serif" font-weight="600" letter-spacing="2.6">TEXT TO VIDEO — WHAT ACTUALLY HAPPENS</text>
+<text x="60" y="104" fill="#242424" font-size="34" font-family="-apple-system,Helvetica,sans-serif" font-weight="700" letter-spacing="-.8">There is no image step</text>
+<line x1="60" y1="130" x2="1140" y2="130" stroke="#e8e8ea"/>
+<text x="60" y="168" fill="#9a9a9a" font-size="13" font-family="-apple-system,Helvetica,sans-serif" font-weight="600" letter-spacing="1.8">1 · READ</text>
+<rect x="60" y="182" width="190" height="72" rx="7" fill="#f7f7f8" stroke="#d9d9de"/>
+<text x="155" y="212" text-anchor="middle" fill="#242424" font-size="17" font-family="-apple-system,Helvetica,sans-serif">the prompt</text>
+<text x="155" y="234" text-anchor="middle" fill="#9a9a9a" font-size="14" font-family="-apple-system,Helvetica,sans-serif">a sentence</text>
+<line x1="256" y1="218" x2="292" y2="218" stroke="#9a9a9a" marker-end="url(#m2)"/>
+<rect x="298" y="182" width="330" height="72" rx="7" fill="#ecf1fa" stroke="#2b5fa8"/>
+<text x="463" y="210" text-anchor="middle" fill="#1c3f73" font-size="17" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">encoder — 26 GB</text>
+<text x="463" y="234" text-anchor="middle" fill="#3f5c8c" font-size="14" font-family="-apple-system,Helvetica,sans-serif">tapped at layer 50, not the output</text>
+<line x1="634" y1="218" x2="670" y2="218" stroke="#2b5fa8" marker-end="url(#m3)"/>
+<rect x="676" y="182" width="230" height="72" rx="7" fill="#fff" stroke="#2b5fa8" stroke-dasharray="4 3"/>
+<text x="791" y="212" text-anchor="middle" fill="#1c3f73" font-size="16" font-family="-apple-system,Helvetica,sans-serif">meaning vectors</text>
+<text x="791" y="234" text-anchor="middle" fill="#3f5c8c" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">steer every step below</text>
+<text x="60" y="308" fill="#9a9a9a" font-size="13" font-family="-apple-system,Helvetica,sans-serif" font-weight="600" letter-spacing="1.8">2 · GENERATE — ENTIRELY IN LATENT SPACE, NEVER PIXELS</text>
+<rect x="60" y="322" width="190" height="96" rx="7" fill="#fdecec" stroke="#c53030"/>
+<text x="155" y="352" text-anchor="middle" fill="#8f2020" font-size="17" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">random noise</text>
+<text x="155" y="376" text-anchor="middle" fill="#a15252" font-size="13.5" font-family="SF Mono,Menlo,monospace">(1, 24, 37, 30, 52)</text>
+<text x="155" y="398" text-anchor="middle" fill="#a15252" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">24 channels, not RGB</text>
+<line x1="256" y1="370" x2="292" y2="370" stroke="#0f7b6c" marker-end="url(#m1)"/>
+<rect x="298" y="322" width="330" height="96" rx="7" fill="#e8f4f1" stroke="#0f7b6c"/>
+<text x="463" y="352" text-anchor="middle" fill="#0b5a4f" font-size="17" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">50 transformer blocks</text>
+<text x="463" y="376" text-anchor="middle" fill="#3b7d72" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">predicts which numbers are noise</text>
+<text x="463" y="398" text-anchor="middle" fill="#3b7d72" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">then removes a fraction of them</text>
+<path d="M463,424 L463,452 L180,452 L180,424" fill="none" stroke="#0f7b6c" stroke-dasharray="5 4" marker-end="url(#m1)"/>
+<rect x="272" y="438" width="130" height="28" rx="14" fill="#0f7b6c"/>
+<text x="337" y="457" text-anchor="middle" fill="#fff" font-size="14" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">× 23 steps</text>
+<rect x="676" y="438" width="230" height="28" rx="6" fill="#ecf1fa" stroke="#2b5fa8"/>
+<text x="791" y="457" text-anchor="middle" fill="#1c3f73" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">+ 32 audio channels, same blocks</text>
+<text x="60" y="492" fill="#5c5c5c" font-size="14.5" font-family="-apple-system,Helvetica,sans-serif">Sound is denoised alongside the picture in every step — born aligned, not aligned afterwards in post.</text>
+<line x1="634" y1="370" x2="670" y2="370" stroke="#0f7b6c" marker-end="url(#m1)"/>
+<rect x="676" y="322" width="230" height="96" rx="7" fill="#f7f7f8" stroke="#0f7b6c"/>
+<text x="791" y="352" text-anchor="middle" fill="#242424" font-size="17" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">clean latent</text>
+<text x="791" y="376" text-anchor="middle" fill="#3b7d72" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">same shape as it started</text>
+<text x="791" y="398" text-anchor="middle" fill="#9a9a9a" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">still not a picture</text>
+<text x="60" y="536" fill="#9a9a9a" font-size="13" font-family="-apple-system,Helvetica,sans-serif" font-weight="600" letter-spacing="1.8">3 · DECODE — THE ONLY STAGE THAT MAKES PIXELS</text>
+<line x1="791" y1="472" x2="791" y2="548" stroke="#0f7b6c" marker-end="url(#m1)"/>
+<rect x="640" y="554" width="230" height="76" rx="7" fill="#fff" stroke="#0f7b6c"/>
+<text x="755" y="583" text-anchor="middle" fill="#242424" font-size="16" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">decoder — 4.9 GB</text>
+<text x="755" y="606" text-anchor="middle" fill="#3b7d72" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">256 × 256 tiles · once</text>
+<line x1="876" y1="592" x2="906" y2="592" stroke="#0f7b6c" marker-end="url(#m1)"/>
+<rect x="912" y="554" width="228" height="76" rx="7" fill="#e8f4f1" stroke="#0f7b6c"/>
+<text x="1026" y="581" text-anchor="middle" fill="#0b5a4f" font-size="15.5" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">1280 × 704 · 345 frames</text>
+<text x="1026" y="604" text-anchor="middle" fill="#3b7d72" font-size="13.5" font-family="-apple-system,Helvetica,sans-serif">14.375 s, with 32 kHz stereo</text>
+<text x="60" y="592" fill="#242424" font-size="16.5" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">Of the 43.3 hours, this stage takes 85 minutes.</text>
+<text x="60" y="618" fill="#5c5c5c" font-size="15" font-family="-apple-system,Helvetica,sans-serif">Everything before it is arithmetic on a grid 100× smaller</text>
+<text x="60" y="640" fill="#5c5c5c" font-size="15" font-family="-apple-system,Helvetica,sans-serif">than the finished picture. Pixels exist only at the end.</text>
+<line x1="60" y1="672" x2="1140" y2="632" stroke="#e8e8ea"/>
+<text x="60" y="694" fill="#9a9a9a" font-size="14" font-family="-apple-system,Helvetica,sans-serif">MiniMax-H3 (33B) on 3 × RTX 3060 Ti, 8 GB each · 43.3 hours · every number measured</text>
+<text x="1140" y="694" text-anchor="end" fill="#0f7b6c" font-size="14" font-family="-apple-system,Helvetica,sans-serif" font-weight="600">github.com/Kmassidik/Selfhost-GenAI</text>
+</svg>
+</body></html>

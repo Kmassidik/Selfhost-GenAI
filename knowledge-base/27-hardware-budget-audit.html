@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>27 · H3 Hardware &amp; Budget Audit</title>
+<meta name="description" content="What running MiniMax-H3 actually costs — the decision table by goal, grounded in this box's measured render times, and the second currency nobody budgets for: hours.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 27 · The audit — what it really takes, in money and in hours</span>
+
+# H3 Hardware &amp; Budget Audit
+
+<p class="lede">The minimum to run the full MiniMax-H3 is <b>one 24 GB card and about 64 GB of system RAM</b> — a used RTX 3090 at roughly $900 — and the minimum to run a pruned variant is a card someone probably already owns. That is the money answer, and it is the easy half. The hard half is that hardware is only the first currency: the second is wall-clock, and this chapter prices every row in both.</p>
+
+The reason the second currency matters is visible in one comparison from this box's own logs. Fifteen seconds of native 720p video is not impossible on three 8 GB cards — it renders, it exists, it is beautiful. It costs about **44 hours**. The same fifteen seconds by the practical route costs **2.6 hours**. No amount of money spent on the first route buys back the difference; only a different route does.
+
+<div class="callout truth"><span class="t">The headline, quotable to anyone</span>
+<p><b>The cheapest way to run the FULL 33 B model is one 24 GB card plus about 64 GB of RAM</b> — an int8 <em>streaming</em> recipe, where encode and denoise run as separate passes so the two enormous halves never coexist in memory. Roughly 16 minutes per 5-second 480p clip with synchronised stereo audio. A used RTX 3090 at about $900 clears it.</p>
+<p>Everything cheaper is a pruned model or a slower slog. Everything faster is more VRAM, or rented time. And everything on this page assumes used-market and rental prices as of September 2026 — re-verify before buying.</p></div>
+
+## The two knots that decide the floor
+
+Every budget below 24 GB fights the same two facts, and they are worth stating precisely because most confusion about H3 hardware comes from conflating them.
+
+**First: the model is two enormous halves, and together they exceed most consumer RAM.** A 32-billion-parameter text and vision encoder produces the conditioning; a separate transformer does the denoising. At native precision the pair is around 124 GB. They therefore must run in separate passes — encode, write to disk, denoise — never resident together.
+
+**Second: neither half fits a consumer GPU whole.** So each half is either quantized down, streamed block by block through the card, or both.
+
+<svg viewBox="0 0 760 296" width="100%" style="max-width:920px" role="img" aria-label="A two-phase pipeline in which phase A loads only the 26 gigabyte encoder and writes an embedding file to disk, then exits, and phase B starts a fresh process holding only the 20 gigabyte transformer and the VAEs, so the two halves never occupy memory at the same time.">
+  <defs>
+    <marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE HALVES NEVER MEET — WHICH IS WHY 64 GB OF RAM IS ENOUGH</text>
+  <rect x="2" y="26" width="300" height="118" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="18" y="50" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">PHASE A — encode</text>
+  <text x="18" y="72" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">loads: Qwen3-VL-32B encoder, 26 GB</text>
+  <text x="18" y="90" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">tapped at layer 50</text>
+  <text x="18" y="114" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">does NOT load: the DiT, the VAEs</text>
+  <text x="18" y="132" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">then the process exits</text>
+  <line x1="306" y1="84" x2="336" y2="84" stroke="#5ee0c0" stroke-width="1" marker-end="url(#c1)"/>
+  <rect x="342" y="52" width="104" height="64" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="394" y="78" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">scene.pt</text>
+  <text x="394" y="96" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">on disk</text>
+  <line x1="452" y1="84" x2="482" y2="84" stroke="#5ee0c0" stroke-width="1" marker-end="url(#c1)"/>
+  <rect x="488" y="26" width="270" height="118" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="504" y="50" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">PHASE B — denoise + decode</text>
+  <text x="504" y="72" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">loads: DiT int8, 20 GB</text>
+  <text x="504" y="90" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">plus video VAE 4.9 GB, audio VAE 0.6</text>
+  <text x="504" y="114" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">does NOT load: the 26 GB encoder</text>
+  <text x="504" y="132" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">a fresh process, fresh memory</text>
+  <text x="2" y="172" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.2">WHAT SYSTEM RAM HOLDS AT EACH MOMENT</text>
+  <rect x="2" y="182" width="756" height="34" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="2" y="182" width="252" height="34" rx="6" fill="#151b26" stroke="#3a4a63"/>
+  <text x="18" y="204" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">during phase A: ~26 GB of encoder</text>
+  <text x="740" y="204" text-anchor="end" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">125 GB installed on this box — head-room, not a requirement</text>
+  <rect x="2" y="222" width="756" height="34" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="2" y="222" width="200" height="34" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="18" y="244" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">during phase B: ~20 GB of DiT</text>
+  <text x="740" y="244" text-anchor="end" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">streamed to the card one block at a time</text>
+  <rect x="2" y="262" width="756" height="32" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="18" y="283" fill="#ffd6d6" font-size="11.5" font-family="Inter,sans-serif">the naive way — both halves resident at once — needs about 124 GB before a single frame is rendered</text>
+</svg>
+
+<div class="callout spec"><span class="t">Why the two-phase split is a hardware saving, not a code style</span>
+<p>The phase boundary is what converts a 124 GB RAM requirement into a 26 GB one. It also produces a second saving that matters more day to day: <b>encode once, render many.</b> A scene's embeddings are fixed, while steps, resolution, engine and seed are not — so one encode pass feeds dozens of re-renders and the encoder is never paid for again (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>).</p>
+<p>This is why the audit table's RAM column reads 32 to 64 GB and not 128. The budget question "how much RAM do I need?" has no answer until the pipeline shape is known.</p></div>
+
+## The budget audit table
+
+Pick the goal on the left; read the hardware and the budget on the right. Every row is a recipe someone actually ran.
+
+| Goal | Minimum hardware | VRAM / RAM | Recipe | Speed | Cost | Proven by |
+|---|---|---|---|---|---|---|
+| **Run the full H3 at all, cheapest** | 1 × RTX 3090 or 4090 | 24 GB / 64 GB | **int8 streaming** — phase A encode, phase B denoise, block-level offload | ~16 min per 5 s clip at 480p | used 3090, **~$900** | ✅ <a href="https://github.com/sztlink/h3-consumer-bench">h3-consumer-bench</a> |
+| **Full H3, native 768p, faster** | 1 × RTX 4090 | 24 GB / 32 GB | **W4A4** — SVDQuant/Nunchaku, int4 resident | 3.65 s/step at 1344×768 | used 4090, **~$2,000** | ✅ <a href="https://huggingface.co/felipesztutman/MiniMax-H3-W4A4">felipesztutman W4A4</a> |
+| **Full H3, low budget, accept slow** | 1 × RTX 3060 12 GB or 4060 Ti 16 GB | 12–16 GB / 64 GB | W4A4 or Q4 GGUF with offload | slow — offload-bound | ~$260–400 | ✅ <a href="https://comfyui-wiki.com/en/news/2026-08-03-minimax-h3-community-quants">community quants</a> |
+| **H3 on 8 GB — the extreme floor** | 1 × RTX 3060 Ti 8 GB with large RAM | 8 GB / 125 GB | **pruned ~20 B**, W4A8 or int8, heavy offload | minutes per clip at 480p | ~$250, or already owned | ✅ <a href="https://github.com/deepbeepmeep/Wan2GP">WanGP</a> · ✅ **this box, measured — see below** |
+| **Long or high-res on 8 GB cards** | 3 × RTX 3060 Ti 8 GB | 24 GB total / 125 GB | **sequence parallelism** — split the activation, not the weights | 6600 s/step at 1280×704 × 345 | ~$750, or already owned | ✅ **this box** (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>) |
+| **Fast production at 768p** | 4 × L40S (46 GB) | 14 GB peak per card | dynamic FP8 with Ulysses 4 | ~6 s/step | rent, ~$4/hr | ✅ <a href="https://github.com/sgl-project/sglang/discussions/34079">SGLang #34079</a> |
+| **Datacentre, lowest latency** | 4–8 × H100 or B200 | 66–84 GB per card | BF16, tensor plus Ulysses parallel | ~13–19 s per clip | rent, expensive | ✅ <a href="https://docs.sglang.io/cookbook/diffusion/MiniMax/MiniMax-H3">SGLang cookbook</a> |
+| **Train a LoRA** | 1 × A100 40–80 GB | 40–80 GB | LoRA, with the dataset prepared on a cheap box | ~2.5 hr per run | rent, ~$3–5 once | ✅ <a href="https://fal.ai/learn/devs/how-to-train-a-lora-for-minimax-h3">fal trainer</a> |
+
+Two rows in that table were marked *in progress* when this chapter was first written. Both are now measured, and the numbers behind them are the substance of the rest of this page.
+
+## The second currency: hours
+
+Hardware sets what is *possible*. The step count and the resolution set what it *costs*, and the cost is paid in wall-clock. These are the measured denoise times from this box's own render logs, taken from the sampler's own progress output and therefore excluding VAE decode:
+
+| Configuration | Seconds per step | 23 steps | 49 steps |
+|---|---|---|---|
+| 512×288 × 345 frames (15 s) | **81 s** | 0.5 h | 1.1 h |
+| 1280×704 × 124 frames (5 s) | **143 s** | 0.9 h | 1.9 h |
+| 832×480 × 345 frames (15 s) | **193 s** | 1.2 h | **2.6 h** |
+| 1280×704 × 345 frames (15 s), 3-GPU sharded | **6600 s** | **~44 h** | **~90 h** |
+
+Add roughly 25 to 50 minutes of VAE decode to each. The step column is not a detail — steps are the single largest multiplier in the whole budget, and the number a scene needs is a property of **the scene**: a tight close-up converges in **4** steps, a character mid-shot in **23**, a wide vista with a small distant subject in **49**.
+
+<div class="callout warn"><span class="t">The row that breaks the pattern, and why</span>
+<p>Going from 832×480 × 345 to 1280×704 × 345 is <b>2.26× the tokens</b>. Attention is quadratic in sequence length, so pure scaling predicts about <b>5×</b> the time. Measured: <b>34×</b>.</p>
+<p>The three-GPU sequence-parallel path therefore carries roughly a <b>7× overhead beyond the mathematics</b> — hand-rolled fp32 ring attention running in Python loops, plus a deep copy of every block onto every card on every step. It buys memory and sells speed, and it is the reason the 44-hour figure exists at all. A budget built by extrapolating the quadratic would have been wrong by a factor of seven (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>).</p></div>
+
+## The same fifteen seconds, three ways
+
+<svg viewBox="0 0 760 264" width="100%" style="max-width:920px" role="img" aria-label="Three routes to the same fifteen seconds of 720p video: render at 832 by 480 for 2.6 hours then upscale, render natively at 1280 by 704 with 23 steps for 44 hours, or render natively with 49 steps for 90 hours.">
+  <defs>
+    <marker id="c3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5ee0c0"/></marker>
+    <marker id="c4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SAME OUTPUT SPEC — 15 SECONDS, 720p CLASS — THREE ROUTES</text>
+  <rect x="2" y="26" width="756" height="70" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="18" y="48" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">ROUTE A — the practical one</text>
+  <rect x="18" y="58" width="188" height="26" rx="4" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="112" y="76" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">832x480 x 345, 49 steps</text>
+  <line x1="210" y1="71" x2="230" y2="71" stroke="#5ee0c0" stroke-width="1" marker-end="url(#c3)"/>
+  <rect x="234" y="58" width="150" height="26" rx="4" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="309" y="76" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">upscale 1.54x</text>
+  <line x1="388" y1="71" x2="408" y2="71" stroke="#5ee0c0" stroke-width="1" marker-end="url(#c3)"/>
+  <rect x="412" y="58" width="140" height="26" rx="4" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="482" y="76" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">720p, well sampled</text>
+  <text x="740" y="76" text-anchor="end" fill="#eafff8" font-size="14" font-family="Inter,sans-serif">2.6 h</text>
+  <rect x="2" y="104" width="756" height="70" rx="8" fill="#151b26" stroke="#ffb454"/>
+  <text x="18" y="126" fill="#ffd9a8" font-size="12" font-family="Inter,sans-serif">ROUTE B — native, mid-sampled</text>
+  <rect x="18" y="136" width="188" height="26" rx="4" fill="#12161f" stroke="#ffb454"/>
+  <text x="112" y="154" text-anchor="middle" fill="#ffd9a8" font-size="10.5" font-family="Inter,sans-serif">1280x704 x 345, 23 steps</text>
+  <line x1="210" y1="149" x2="230" y2="149" stroke="#ffb454" stroke-width="1" marker-end="url(#c4)"/>
+  <rect x="234" y="136" width="318" height="26" rx="4" fill="#12161f" stroke="#ffb454"/>
+  <text x="393" y="154" text-anchor="middle" fill="#ffd9a8" font-size="10.5" font-family="Inter,sans-serif">3 GPUs, sequence-parallel, no upscale</text>
+  <text x="740" y="154" text-anchor="end" fill="#ffd9a8" font-size="14" font-family="Inter,sans-serif">~44 h</text>
+  <rect x="2" y="182" width="756" height="70" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="18" y="204" fill="#ffd6d6" font-size="12" font-family="Inter,sans-serif">ROUTE C — native, fully sampled</text>
+  <rect x="18" y="214" width="188" height="26" rx="4" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="112" y="232" text-anchor="middle" fill="#ffd6d6" font-size="10.5" font-family="Inter,sans-serif">1280x704 x 345, 49 steps</text>
+  <rect x="234" y="214" width="318" height="26" rx="4" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="393" y="232" text-anchor="middle" fill="#ffd6d6" font-size="10.5" font-family="Inter,sans-serif">the same picture, four days of GPU time</text>
+  <text x="740" y="232" text-anchor="end" fill="#ffd6d6" font-size="14" font-family="Inter,sans-serif">~90 h</text>
+</svg>
+
+<div class="callout truth"><span class="t">Take the upscale</span>
+<p><b>Roughly 35× cheaper for a result most viewers cannot distinguish.</b> A well-sampled 832×480 lifted 1.54× beats an under-sampled 1280×704 every time — and mild upscales preserve detail where aggressive ones go soft (<a href="17-what-actually-improves-quality.html">ch.17</a>).</p>
+<p>Native 720p at 15 seconds is therefore best understood as <b>a capability this box has proven, not a workflow it should use.</b> Keep it for the one hero shot that justifies a weekend of GPU time.</p></div>
+
+The evidence for the under-sampling half of that claim is on disk too. The same 1280×704 × 345 configuration at **3 steps** completed in about 5.5 hours and the result was **mud** — not a slightly worse version of the 23-step render, but an unusable one. Steps cannot be traded away to buy resolution; below a scene's threshold the render is simply wasted.
+
+## What an hour of GPU time actually is
+
+Converting the table into per-second-of-video figures makes the trade concrete. These are derived from the measured numbers above, not separately observed:
+
+| Route | Cards busy | Denoise per second of finished video | GPU energy for the whole 15 s |
+|---|---|---|---|
+| 832×480 × 49 steps, then upscale | 1 | ~10.4 min | ~0.5 kWh |
+| Native 1280×704 × 23 steps, sharded | 3 | ~2.9 h | ~26 kWh |
+
+The energy column is simply the busy cards held at their 200 W power limit for the duration, and it counts nothing else — not the dual-Xeon platform, not the drives, not the cooling. It is a floor, not an estimate of a bill. But the ratio is the point: the roughly **seventeen-fold difference in time becomes a fiftyfold difference in electricity**, because the slow route also occupies three cards instead of one. And while it runs, those three cards can render nothing else — the opportunity cost is the entire machine for two days.
+
+<div class="callout spec"><span class="t">Three things money buys, and they are not interchangeable</span>
+<ol>
+<li><b>Capacity (VRAM).</b> Decides what fits — and once streaming is in play, decides how much has to be re-fetched from RAM on every step rather than staying resident.</li>
+<li><b>Bandwidth (GB/s on the card).</b> Decides how long each step takes, because denoise on this class of hardware is memory-bound rather than arithmetic-bound. A newer card with the same bandwidth renders at the same speed (<a href="39-choosing-the-next-card.html">ch.39</a>).</li>
+<li><b>Count (how many cards).</b> Decides throughput — how many independent shots run at once. It does <em>not</em> decide latency: three cards on one render was measured 34× slower than one card on a smaller render, not three times faster.</li>
+</ol>
+<p>Almost every disappointed upgrade comes from buying one of these expecting another. The most common is buying count and expecting latency.</p></div>
+
+## The row this box adds to the published table
+
+The published recipes stop at the 12 GB RTX 3060. Below that, the record was empty. Here is what the rung below actually does, measured, with the full pruned 20 GB int8 transformer streamed block by block through cards with 8 GB each:
+
+| Scene | Resolution × frames | Steps | Denoise | Result |
+|---|---|---|---|---|
+| smoke test | 512×320 × 5 | — | ~57 s | works |
+| ocean demo | 768×448 × 73 (3.0 s) | 20 | 348 s | works |
+| `cmp-ring` / `cmp-normal` | 832×480 × 124 | 4 | ~2 min | sharp; the ring path matched the reference |
+| `cp15sd` | 512×288 × 345 (15 s) | 49 | 3965 s (66 min) | **beautiful** |
+| `e1h-15s` | 832×480 × 345 (15 s) | 3 | 578 s | renders, under-sampled |
+| `an1` | **1280×704** × 124 (5 s) | 23 | 3295 s (55 min) | **beautiful** |
+| `e720hq` | 1280×704 × 124 | 23 | 3486 s (58 min) | good |
+| `g4k` | 1280×704 × 345 (14.4 s) | 3 | ~5.5 h | **mud** |
+| `g4final` | 1280×704 × 345 | 23 | ~44 h | the 15-second native render |
+
+<div class="callout truth"><span class="t">What the extreme floor turned out to be</span>
+<p>The original version of this chapter described the 8 GB row as "pruned ~20 B, W4A8 plus heavy offload plus low resolution, minutes per clip, 480p" and marked the full-model attempt as <em>in progress</em>. Two thirds of that has held up and one third has not.</p>
+<p><b>Held:</b> the model is pruned, the offload is heavy, and the clips take a long time. <b>Did not hold:</b> "low resolution." Native <b>1280×704 at 345 frames</b> renders on these cards. The 8 GB floor is not a resolution ceiling — it is a <b>time</b> ceiling, and those are different budget categories entirely.</p></div>
+
+## Then and now — the same box, two engines
+
+It is worth putting the earliest measurements beside the current ones, because the hardware line moved without the hardware changing.
+
+| | Early phase — one card, ComfyUI, 60 GB RAM | Now — three cards, our own pipeline, 125 GB RAM |
+|---|---|---|
+| Longest clip | 512×288 × 15 s, ~17.5 min at ~24 steps | 1280×704 × 15 s, ~44 h at 23 steps |
+| Highest native resolution | 1024×576 for a 3-second clip, then upscaled | 1280×704 for a 15-second clip, no upscale needed |
+| The stated rule | "short and sharp, or long and soft — never both" | both, at a price measured in days |
+| The binding constraint | VRAM | wall-clock |
+
+That first row is not a like-for-like comparison and should not be read as one — different engine, different card count, different quantization path. What it does show honestly is where the *ceiling* was and where it went. The early rule of thumb, "roughly one minute of render per second of a 15-second clip," was a true and useful statement about that configuration, and it is off by a factor of a hundred for the 720p sharded path.
+
+## Reading the table as a budget calculator
+
+<div class="callout spec"><span class="t">Pick the cheapest row that clears the bar</span>
+<ul>
+<li><b>"Run the real full model, cheaply, slowness accepted"</b> → a used RTX 3090 at about $900: int8 streaming, 480p, roughly 16 minutes per clip. The honest floor for the full model with head-room.</li>
+<li><b>"Native 768p at reasonable speed"</b> → a used RTX 4090 at about $2,000, W4A4 resident.</li>
+<li><b>"Already on 8 GB, or on a laptop"</b> → a pruned model, at zero additional cost. Expect 480p as the comfortable tier and long waits above it.</li>
+<li><b>"Several 8 GB cards already in the chassis"</b> → run independent shots in parallel first. Sequence parallelism is for the shot that will not fit at all, and it costs an order of magnitude.</li>
+<li><b>"Production speed at 768p, at scale"</b> → rent 4 × L40S at about $4/hr rather than buying.</li>
+<li><b>"One-off — a 768p hero clip, or a trained LoRA"</b> → rent a 4090 or an A100 for an hour or two, at $1–5.</li>
+</ul></div>
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="A decision tree that routes from the question of whether the full model is required, through how often rendering happens and what resolution is needed, to one of four outcomes: use the pruned model on owned hardware, buy a used 3090, buy a used 4090, or rent L40S time.">
+  <defs>
+    <marker id="c5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">BUY, RENT, OR USE WHAT IS ALREADY IN THE CHASSIS</text>
+  <rect x="242" y="26" width="276" height="38" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="50" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Is the FULL 33 B model required?</text>
+  <line x1="300" y1="66" x2="180" y2="94" stroke="#6f7b8f" stroke-width="1" marker-end="url(#c5)"/>
+  <text x="206" y="82" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">no</text>
+  <line x1="460" y1="66" x2="580" y2="94" stroke="#6f7b8f" stroke-width="1" marker-end="url(#c5)"/>
+  <text x="524" y="82" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">yes</text>
+  <rect x="20" y="98" width="300" height="52" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="36" y="120" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">Pruned ~20 B on hardware already owned</text>
+  <text x="36" y="138" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">8 GB is enough · 480p comfortable · $0</text>
+  <rect x="440" y="98" width="300" height="38" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="590" y="122" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Rendering daily, or a handful of times?</text>
+  <line x1="500" y1="138" x2="420" y2="170" stroke="#6f7b8f" stroke-width="1" marker-end="url(#c5)"/>
+  <text x="430" y="156" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">daily</text>
+  <line x1="676" y1="138" x2="676" y2="238" stroke="#6f7b8f" stroke-width="1" marker-end="url(#c5)"/>
+  <text x="686" y="190" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">a handful</text>
+  <rect x="220" y="174" width="300" height="38" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="370" y="198" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Is native 768p needed?</text>
+  <line x1="290" y1="214" x2="180" y2="242" stroke="#6f7b8f" stroke-width="1" marker-end="url(#c5)"/>
+  <text x="212" y="230" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">no</text>
+  <line x1="440" y1="214" x2="470" y2="242" stroke="#6f7b8f" stroke-width="1" marker-end="url(#c5)"/>
+  <text x="452" y="230" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">yes</text>
+  <rect x="20" y="246" width="240" height="46" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="36" y="266" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">Used RTX 3090, 24 GB</text>
+  <text x="36" y="284" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">~$900 · int8 streaming · the floor</text>
+  <rect x="278" y="246" width="240" height="46" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="294" y="266" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">Used RTX 4090, 24 GB</text>
+  <text x="294" y="284" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">~$2,000 · W4A4 resident</text>
+  <rect x="536" y="246" width="222" height="46" rx="7" fill="#151b26" stroke="#ffb454"/>
+  <text x="552" y="266" fill="#ffd9a8" font-size="11.5" font-family="Inter,sans-serif">Rent 4 x L40S</text>
+  <text x="552" y="284" fill="#ffd9a8" font-size="10.5" font-family="Inter,sans-serif">~$4/hr · nothing to buy</text>
+</svg>
+
+<div class="callout warn"><span class="t">The arithmetic that decides buy versus rent</span>
+<p>A used 3090 at $900 is about <b>225 hours</b> of a $4/hr rented four-card L40S node. Anyone who will not run 225 hours of rendering should probably not buy the card — and anyone who will run several times that should not be renting.</p>
+<p>The catch, and it is a real one: rented time is <em>fast</em> time. Two hundred hours on a rack is not the same quantity of work as two hundred hours on three 3060 Ti. Compare hours only after converting them through the seconds-per-step table above, or the comparison flatters whichever side is being argued for.</p></div>
+
+## What this audit deliberately does not price
+
+Three costs sit outside the table and each has been paid here in full.
+
+**Failure.** One decode run completed 6 hours 10 minutes of denoise and then died on the first line of decode, because the device resolution picked `cuda:0` while the sharded forward returned latents on CPU. Six hours, gone, for a one-line device mismatch. The fix that came out of it — dump latents to disk before decode is allowed to fail — saved the next six hours the same night. A budget with no allowance for re-runs is a fiction.
+
+**Traps that cost days rather than dollars.** A width of 848 pixels divides by 16 to give 53, an odd number, so 2×2 patching fails with a shape error that never once mentions resolution. Use widths where the division by 16 lands even — 832 gives 52. That single fact is worth more than a hardware upgrade to anyone about to lose an afternoon to it.
+
+**The platform around the cards.** This box runs 125 GB of DDR3-1600 across four sticks, a dual Xeon E5-2665 board with PCIe 3.0 ×16 slots, and 879 GB of disk. The RAM is what makes streaming possible at all, and the disk is what makes encode-once-render-many possible. Neither shows up in a GPU price comparison, and a build that skimps on either will underperform its card.
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">two-phase pipeline</span><span class="badge">encode once, render many</span><span class="badge">block-level offload</span><span class="badge">int8 streaming recipe</span><span class="badge">W4A4 resident</span><span class="badge">seconds per step</span><span class="badge">steps as a scene property</span><span class="badge">under-sampling</span><span class="badge">native versus upscaled</span><span class="badge">capacity vs bandwidth vs count</span><span class="badge">throughput versus latency</span><span class="badge">buy-versus-rent break-even</span><span class="badge">the 848-pixel trap</span><span class="badge">latent backup</span></p>
+<p>If those feel solid, any hardware recommendation on the internet can be checked in two questions: what does it cost per step, and how many steps does the intended scene actually need?</p></div>
+
+<p class="small">Full deployment detail and reliability flags are in <a href="26-serving-h3-real-world.html">ch.26</a>; the build-versus-buy reasoning is in <a href="21-build-vs-buy.html">ch.21</a>; the card-by-card comparison is in <a href="39-choosing-the-next-card.html">ch.39</a>; the complete measured ledger is <a href="47-the-scorecard.html">ch.47</a>. Prices are used-market and rental as of September 2026 — re-verify before buying.</p>
+
+Next: the one axis money cannot buy outright — length, and what really happens when short clips are chained into long video.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>06 · Your Learning Roadmap</title>
+<meta name="description" content="Five stages from running a model to building a pipeline, each with a checkpoint you can test — plus the parts of the original roadmap that the rest of this guide proved wrong.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
@@ -12,95 +14,281 @@
 
 # Your Learning Roadmap
 
-<p class="lede">You've now run a frontier video model on a budget GPU. That's further than most people ever get. Here's a staged path to turn "I made it work" into "I understand it and can build my own."</p>
+<p class="lede">The route from "I got a model to run" to "I understand it and can build my own pipeline" has <b>five stages</b>, and each one ends with a checkpoint that can be tested rather than felt. This chapter lays them out, maps every other chapter of this guide onto them, and — because it is the oldest chapter here — shows the three places where its own original advice turned out to be wrong.</p>
 
-## The five stages
+That last part is the useful bit. This roadmap was written on day one, when the box had a single 8 GB card and the engine was ComfyUI. Both of those are gone now. Rather than quietly deleting the predictions, they are kept below with what actually happened next to them, because being wrong in a documented way is the fastest teaching material this project produced.
 
-```mermaid
-flowchart LR
-    L0["Stage 0<br/>Foundations"] --> L1["Stage 1<br/>Run models<br/>confidently"]
-    L1 --> L2["Stage 2<br/>Hardware &<br/>optimization"]
-    L2 --> L3["Stage 3<br/>Understand<br/>the models"]
-    L3 --> L4["Stage 4<br/>Serve, scale<br/>& automate"]
-    style L0 fill:#14342c,stroke:#5ee0c0,color:#eafff8
-    style L2 fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style L4 fill:#241f14,stroke:#ffb454,color:#fff0d9
-```
+## The stages
 
-You are already standing at the border of **Stage 1 → Stage 2**. Don't restart at zero — fill gaps as you go.
+<svg viewBox="0 0 760 252" width="100%" style="max-width:920px" role="img" aria-label="Five learning stages from foundations through running models, memory and fit, architecture, and finally scaling and serving, each gated by a question that must be answerable before moving on.">
+  <defs>
+    <marker id="r1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">EACH GATE IS A QUESTION — IF IT CANNOT BE ANSWERED, THE NEXT STAGE WILL NOT STICK</text>
+  <rect x="2" y="34" width="140" height="66" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="72" y="58" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">Stage 0</text>
+  <text x="72" y="78" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">Foundations</text>
+  <rect x="156" y="34" width="140" height="66" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="226" y="58" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Stage 1</text>
+  <text x="226" y="78" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">Run one, on purpose</text>
+  <rect x="310" y="34" width="140" height="66" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="380" y="58" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">Stage 2</text>
+  <text x="380" y="78" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">Memory and fit</text>
+  <rect x="464" y="34" width="140" height="66" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="534" y="58" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Stage 3</text>
+  <text x="534" y="78" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">Read the architecture</text>
+  <rect x="618" y="34" width="140" height="66" rx="8" fill="#241f14" stroke="#ffb454"/>
+  <text x="688" y="58" text-anchor="middle" fill="#fff0d9" font-size="12" font-family="Inter,sans-serif">Stage 4</text>
+  <text x="688" y="78" text-anchor="middle" fill="#d9b483" font-size="11.5" font-family="Inter,sans-serif">Scale and serve</text>
+  <line x1="144" y1="66" x2="152" y2="66" stroke="#6f7b8f" marker-end="url(#r1)"/>
+  <line x1="298" y1="66" x2="306" y2="66" stroke="#6f7b8f" marker-end="url(#r1)"/>
+  <line x1="452" y1="66" x2="460" y2="66" stroke="#6f7b8f" marker-end="url(#r1)"/>
+  <line x1="606" y1="66" x2="614" y2="66" stroke="#6f7b8f" marker-end="url(#r1)"/>
+  <line x1="72" y1="104" x2="72" y2="124" stroke="#232c3b"/>
+  <line x1="226" y1="104" x2="226" y2="124" stroke="#232c3b"/>
+  <line x1="380" y1="104" x2="380" y2="124" stroke="#232c3b"/>
+  <line x1="534" y1="104" x2="534" y2="124" stroke="#232c3b"/>
+  <line x1="688" y1="104" x2="688" y2="124" stroke="#232c3b"/>
+  <rect x="2" y="126" width="140" height="86" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="72" y="150" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Why does</text>
+  <text x="72" y="167" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">diffusion start</text>
+  <text x="72" y="184" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">from noise?</text>
+  <rect x="156" y="126" width="140" height="86" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="226" y="150" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Can I change one</text>
+  <text x="226" y="167" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">setting and predict</text>
+  <text x="226" y="184" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">what it does?</text>
+  <rect x="310" y="126" width="140" height="86" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="380" y="150" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Where does each</text>
+  <text x="380" y="167" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">byte sit, and what</text>
+  <text x="380" y="184" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">moves per step?</text>
+  <rect x="464" y="126" width="140" height="86" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="534" y="150" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Can I read a</text>
+  <text x="534" y="167" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">config and predict</text>
+  <text x="534" y="184" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">the file size?</text>
+  <rect x="618" y="126" width="140" height="86" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="688" y="150" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Can a stranger</text>
+  <text x="688" y="167" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">reproduce a render</text>
+  <text x="688" y="184" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">from my notes?</text>
+  <text x="2" y="240" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Skipping a gate is not faster. It converts every later problem into a mystery instead of a measurement.</text>
+</svg>
 
-## Stage 0 · Foundations (the "why")
+Nobody starts at Stage 0 and marches to Stage 4. What happens in practice is that a problem drags you back two stages to fill a gap, and then you climb again knowing why the gap mattered. That is the normal shape of it.
 
-Goal: be comfortable with the ideas in Chapters 1–3 without hand-waving.
+## Where the original roadmap was wrong
 
-- **3Blue1Brown — Neural Networks** (YouTube): the best visual intuition for what a network *is*.
+Three of the concrete recommendations in the first draft of this chapter have since been disproved on this hardware. All three are worth reading, because each failure is more instructive than the advice was.
+
+<div class="callout danger"><span class="t">Prediction 1 — "install SageAttention and measure the render-time drop"</span>
+<p>The original text said, word for word: <em>"Install SageAttention in your ComfyUI env and measure the render-time drop on the same ocean prompt. Real, measurable optimization."</em></p>
+<p><b>What happened:</b> SageAttention produces <b>pure noise</b> on H3. Not a slower picture, not a worse picture — no picture. There was no render-time drop to measure because there was no render. It stays off.</p>
+<p><b>The lesson:</b> an optimisation that is standard for one model family can be silently invalid for another. The only way to know is to run it and look at the output, which is exactly why the measurement habit matters more than the specific technique.</p></div>
+
+<div class="callout danger"><span class="t">Prediction 2 — "learn the ComfyUI UI, load our saved workflow"</span>
+<p>The original text pointed at a saved ComfyUI workflow file as the thing to study.</p>
+<p><b>What happened:</b> <b>ComfyUI has been removed from the box entirely.</b> The pipeline is now ours, written directly against diffusers and torch, because the framework's abstractions were hiding exactly the decisions that needed changing — where weights live, when they move, which device a tensor is on (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>).</p>
+<p><b>The lesson:</b> a framework is a fine place to start and a poor place to stay if the goal is understanding. Learn the tool, then learn what it was doing for you, then decide whether you still want it doing it.</p></div>
+
+<div class="callout danger"><span class="t">Prediction 3 — "long or 2K video: rent a cloud GPU, an 8 GB card can't hold it"</span>
+<p>The original text listed long video under <em>"Rent a bigger cloud GPU — your 8 GB card can't hold it."</em></p>
+<p><b>What happened:</b> fifteen seconds of <b>native 1280×704 video with sound</b> now renders on this box, on three 8 GB cards, by splitting one sequence across them (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>). It is slow — the measured <code>g4final</code> run is roughly <b>44 hours</b> at 23 steps — but "can't hold it" was simply false.</p>
+<p><b>The lesson:</b> most walls that look like hardware limits are engineering limits. The genuine hardware-independent ceiling in this project is the model's <b>15-second trained range</b>, and that one really does not move.</p></div>
+
+## Stage 0 · Foundations — the why
+
+**Goal:** be comfortable with the ideas in the first chapters without hand-waving over any of them.
+
+The concepts that everything else stands on are small in number: what a parameter is, what inference is as opposed to training, why diffusion starts from noise, and why attention costs what it costs.
+
+- **3Blue1Brown — Neural Networks** (video series): the best visual intuition for what a network *is*.
 - **Jay Alammar — The Illustrated Transformer** (blog): attention, explained with pictures.
-- **Computerphile — Stable Diffusion** (YouTube): diffusion in plain language.
+- **Computerphile — Stable Diffusion** (video): diffusion in plain language.
+- In this guide: [ch.01](01-what-is-genai.html) for generative vs discriminative and the diffusion loop, [ch.19](19-what-a-model-is.html) for what a model physically is, [ch.15](15-vectors-matrices-signals.html) and [ch.18](18-number-formats-precision.html) for shapes and number formats.
 
-<div class="callout spec"><span class="t">Checkpoint</span><p>You can explain to a friend: what a parameter is, what "inference" means, and why diffusion starts from noise.</p></div>
+<div class="callout spec"><span class="t">Checkpoint</span><p>Explain to someone else, without notes: what a parameter is, why inference and training need such different hardware, and why a diffusion model cannot jump to the finished picture in one step. If the last one is shaky, re-read the step mechanics in <a href="01-what-is-genai.html">ch.01</a>.</p></div>
 
-## Stage 1 · Run models confidently (you're here)
+## Stage 1 · Run one, on purpose
 
-Goal: comfortably run and tweak models locally without following a script blindly.
+**Goal:** run and modify a model without following a script blindly — which means predicting the effect of a change *before* making it.
 
-- Re-run your H3 workflow and **change one thing at a time**: seed, steps, resolution, prompt. Watch how each affects output and time.
-- Try a **smaller, faster model** to iterate quickly — e.g. an image model like **SDXL** or a light video model — so you're not waiting 6 minutes per experiment.
-- Learn the **ComfyUI UI**: load our saved workflow (`MiniMax-H3-FL2VA-8GB.json`), see the nodes you built by hand.
-- Read: **HuggingFace** model cards — learn to read a repo's files and pick the right quant.
+The single highest-value habit at this stage is finding the **cheapest render that still shows the thing being tested**. On this box the smoke test is 512×320 at 5 frames, which finishes in about **57 seconds**. A four-step 832×480 clip takes roughly **two minutes**. Those are the units of iteration. Nothing is learned faster by testing an idea on a 55-minute render.
 
-<div class="callout spec"><span class="t">Project</span><p>Generate five clips exploring one variable (e.g. steps 6 → 30) and write down what changed. This builds real intuition fast.</p></div>
+- Change **one thing at a time** — seed, steps, resolution, prompt — and write down the prediction first.
+- Read model cards properly: which files are needed, which variant, which quantization.
+- In this guide: [ch.03](03-how-h3-works.html) for the four parts, [ch.04](04-software-stack.html) for the stack under them, [ch.08](08-how-a-prompt-becomes-video.html) and [ch.22](22-pipeline-in-detail.html) for the full path from sentence to file.
 
-## Stage 2 · Hardware & optimization (your natural next step)
+<div class="callout spec"><span class="t">Project</span><p>Render the same prompt at several step counts and record wall-clock time and result for each. The measured version of this experiment is below, and it is the most useful table in the whole guide.</p></div>
 
-Goal: understand the resource game you're already playing — and win it.
+## The one skill underneath all five stages
 
-- Master the trio from Chapter 2: **GPU vs VRAM vs RAM**, and offloading.
-- Learn **quantization** hands-on: try int8 vs fp8 versions of a model, compare quality and speed.
-- Learn **attention optimizations**: SageAttention / FlashAttention (the workflow referenced SageAttention — it speeds up the attention step).
-- Understand **what limits clip length** on your card (Chapter 2's quadratic cost).
+Everything worth knowing here was learned by changing one variable and looking at what came out. That is not a motivational line; it is a procedure, and it has a shape.
 
-<div class="callout spec"><span class="t">Project</span><p>Install SageAttention in your ComfyUI env and measure the render-time drop on the same ocean prompt. Real, measurable optimization.</p></div>
+<svg viewBox="0 0 760 296" width="100%" style="max-width:920px" role="img" aria-label="The measurement loop: predict, change exactly one variable, render the cheapest version that shows the effect, record the result, then decide — illustrated with the measured step-count experiment where three steps gave mud after five and a half hours and twenty-three steps gave a good result in fifty-five minutes.">
+  <defs>
+    <marker id="r2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="r3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE LOOP</text>
+  <rect x="2" y="30" width="140" height="58" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="72" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">predict</text>
+  <text x="72" y="72" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">write it down first</text>
+  <rect x="164" y="30" width="152" height="58" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="240" y="54" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">change ONE variable</text>
+  <text x="240" y="72" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">everything else pinned</text>
+  <rect x="338" y="30" width="152" height="58" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="414" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">render it cheaply</text>
+  <text x="414" y="72" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">smallest test that shows it</text>
+  <rect x="512" y="30" width="120" height="58" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="572" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">record</text>
+  <text x="572" y="72" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">seed, time, result</text>
+  <rect x="654" y="30" width="104" height="58" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="706" y="63" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">decide</text>
+  <line x1="144" y1="58" x2="160" y2="58" stroke="#6f7b8f" marker-end="url(#r3)"/>
+  <line x1="318" y1="58" x2="334" y2="58" stroke="#5ee0c0" marker-end="url(#r2)"/>
+  <line x1="492" y1="58" x2="508" y2="58" stroke="#6f7b8f" marker-end="url(#r3)"/>
+  <line x1="634" y1="58" x2="650" y2="58" stroke="#6f7b8f" marker-end="url(#r3)"/>
+  <path d="M706,90 L706,110 L72,110 L72,92" fill="none" stroke="#6f7b8f" stroke-dasharray="3 3" marker-end="url(#r3)"/>
+  <text x="389" y="126" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the prediction that failed is the one worth keeping</text>
+  <text x="2" y="160" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME LOOP, RUN FOR REAL — ONE VARIABLE: STEPS</text>
+  <rect x="2" y="176" width="368" height="112" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="186" y="200" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">g4k — 1280×704, 345 frames, 3 steps</text>
+  <text x="186" y="224" text-anchor="middle" fill="#c98f8f" font-size="11.5" font-family="Inter,sans-serif">about 5.5 hours of denoise</text>
+  <text x="186" y="248" text-anchor="middle" fill="#ffdede" font-size="13" font-family="Inter,sans-serif">result: mud</text>
+  <text x="186" y="274" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">an unusable clip, paid for in full</text>
+  <rect x="390" y="176" width="368" height="112" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="574" y="200" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">an1 — 1280×704, 124 frames, 23 steps</text>
+  <text x="574" y="224" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">3,295 s — 55 minutes, 143 s per step</text>
+  <text x="574" y="248" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">result: beautiful</text>
+  <text x="574" y="274" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">fewer steps was not cheaper — it was wasted</text>
+</svg>
 
-## Stage 3 · Understand the models (the "how")
+<div class="callout truth"><span class="t">What that experiment actually established</span>
+<p>Step count is a property of the <b>scene</b>, not of the model. Measured on this build:</p>
+<table>
+<tr><th>Content</th><th>Steps needed</th></tr>
+<tr><td>Tight close-up</td><td><b>4</b></td></tr>
+<tr><td>Character, mid-shot</td><td><b>23</b></td></tr>
+<tr><td>Wide vista with a small distant subject</td><td><b>49</b></td></tr>
+</table>
+<p>Nothing in any documentation says this. It came out of running the same wide landscape at 3 steps, waiting five and a half hours, and getting mud — then running it properly. A roadmap can point at the variable; only the render tells you the value.</p></div>
 
-Goal: read a model's architecture and know what each part does.
+## Stage 2 · Memory and fit
 
-- Study **VAEs**, **latent diffusion**, and **flow matching** (H3 is `FLOW_AV`).
-- Read the **MiniMax-H3 model card** end to end — you now have the vocabulary for it.
-- Explore **diffusers** (HuggingFace's Python library) to run a model in ~15 lines of code, so you see the pipeline without ComfyUI's abstraction.
-- Optional but golden: **Andrej Karpathy — "Let's build GPT"** (YouTube) to demystify transformers by coding one.
+**Goal:** understand the resource game that is already being played, well enough to predict whether something will run before starting it.
 
-<div class="callout spec"><span class="t">Project</span><p>Write a short Python script using <code>diffusers</code> that generates an image from a prompt — no UI. When it runs, you understand the pipeline for real.</p></div>
+This is where most self-hosting actually happens. The questions are always the same three: how big are the weights, where do they sit, and what has to move per step.
 
-## Stage 4 · Serve, scale & automate (the "for real")
+- Master the distinction between **GPU, VRAM and system RAM**, and what offloading really costs — not conceptually, in gigabytes of traffic.
+- Learn **quantization** by comparing the same model at different precisions and looking at the output, not the benchmark.
+- Work out, on paper, how many tokens a given resolution produces — then check it against the log.
+- In this guide: [ch.02](02-your-hardware.html) for the offload trick, [ch.29](29-where-numbers-live.html) for where every byte sits, [ch.13](13-int8-vs-q4.html) for the precision comparison on this box, [ch.12](12-pushing-past-8gb.html) for how the limit was pushed.
 
-Goal: run it like a service, not a science experiment.
+<div class="callout spec"><span class="t">Checkpoint</span><p>Given a model's parameter count and a target precision, state the file size; given the number of layers, state how much crosses PCIe per sampling step. For H3 that is 20 GB over 50 blocks — about 0.4 GB per block, and roughly <b>460 GB</b> of traffic across a 23-step render.</p></div>
 
-- **Persistent service:** a `systemd` unit so ComfyUI auto-starts on boot and survives reboots.
-- **Remote access:** SSH tunnel (`ssh -L 8188:localhost:8188 dalang@<box>`) or bind to the LAN — understand the security trade-off.
-- **APIs:** drive ComfyUI via its `/prompt` HTTP API (exactly how we submitted your clips) to automate generation.
-- **Cloud GPUs:** when 8 GB isn't enough (long/2K video), learn to rent a 24–80 GB GPU by the hour (RunPod, Vast.ai, Lambda). Same skills, bigger canvas.
+## Stage 3 · Read the architecture
 
-<div class="callout spec"><span class="t">Project</span><p>Turn ComfyUI into a systemd service and generate a clip from your laptop through an SSH tunnel. Now it's infrastructure.</p></div>
+**Goal:** open a `config.json` and predict the model's behaviour and size from it.
 
-## Concrete next steps for *your* box
+This is the stage that turns a model from a black box into a parts list. The test is arithmetic: the config should let you derive the file size, and the derivation should match `ls -l`.
 
-Things we can do right now, whenever you want:
+- Study **VAEs**, **latent diffusion** and **flow matching** — H3's scheduler is `FLOW_AV`.
+- Read the model card end to end, now that the vocabulary is in place.
+- Run a model in fifteen lines of `diffusers` so the pipeline is visible without a framework's abstractions on top.
+- Optional and excellent: **Andrej Karpathy — "Let's build GPT"**, which demystifies transformers by writing one.
+- In this guide: [ch.28](28-anatomy-of-h3.html) for the full parameter count, [ch.23](23-math-from-scratch.html) for the mathematics, [ch.34](34-open-use-close-flashattention.html) for what an attention kernel does, [ch.40](40-lora-how-it-works.html) for how a model gets adapted without retraining.
+
+<div class="callout spec"><span class="t">Project</span><p>Take any diffusion transformer's config and compute its parameters per block by hand, then multiply by the layer count and compare with the size on disk. For H3: 4 × 5376 × 7168 for attention, 2 × 5376 × 14336 for the feed-forward, 2688 × 6 × 5376 for the modulation — about 395 M per block, × 50 blocks ≈ 20 B, which at one byte per parameter is the 20 GB file. When that closes, the model is no longer mysterious.</p></div>
+
+## Stage 4 · Scale and serve
+
+**Goal:** run it as infrastructure rather than as a science experiment — reproducibly, unattended, and across more than one card.
+
+- **Split work across GPUs.** Splitting one sequence across three cards is what made 15 seconds of native 720p possible here; it is also where the overhead lives, and being honest about that overhead is part of the skill.
+- **Make renders reproducible.** Seed, resolution, frame count, step count and prompt hash recorded for every output — otherwise a good result cannot be recovered.
+- **Protect expensive stages from cheap ones.** Denoise costs hours; decode costs minutes. Checkpoint the latent before decoding, always.
+- **Run jobs detached** and inspect logs afterwards, rather than watching them.
+- In this guide: [ch.45](45-three-gpu-sequence-parallelism.html) and [ch.36](36-splitting-the-video-cp.html) for the multi-GPU work, [ch.48](48-the-pipeline-without-comfyui.html) for the pipeline architecture, [ch.37](37-the-production-line.html) for running it as a production line, [ch.47](47-the-scorecard.html) for the honest final accounting.
+
+<div class="callout spec"><span class="t">Checkpoint</span><p>Hand the notes for a finished render to someone who was not there, and have them reproduce the same output. If they cannot, the missing information is the next thing to fix.</p></div>
+
+## The whole guide, mapped onto the stages
+
+<svg viewBox="0 0 760 226" width="100%" style="max-width:920px" role="img" aria-label="A map of the guide: each of the five stages lists the four chapters that cover it, from foundations through running a model, memory and fit, architecture, and scaling and serving.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHERE TO READ NEXT, BY STAGE</text>
+  <rect x="2" y="26" width="146" height="24" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="75" y="43" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">0 · Foundations</text>
+  <rect x="156" y="26" width="146" height="24" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="229" y="43" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">1 · Run one</text>
+  <rect x="310" y="26" width="146" height="24" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="383" y="43" text-anchor="middle" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">2 · Memory and fit</text>
+  <rect x="464" y="26" width="146" height="24" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="537" y="43" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">3 · Architecture</text>
+  <rect x="618" y="26" width="140" height="24" rx="6" fill="#241f14" stroke="#ffb454"/>
+  <text x="688" y="43" text-anchor="middle" fill="#fff0d9" font-size="11.5" font-family="Inter,sans-serif">4 · Scale and serve</text>
+  <text x="75" y="76" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">01 · What is GenAI</text>
+  <text x="75" y="102" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">19 · What a model is</text>
+  <text x="75" y="128" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">15 · Vectors, matrices</text>
+  <text x="75" y="154" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">18 · Number formats</text>
+  <text x="229" y="76" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">03 · How H3 works</text>
+  <text x="229" y="102" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">04 · The software stack</text>
+  <text x="229" y="128" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">08 · Prompt to video</text>
+  <text x="229" y="154" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">22 · Pipeline in detail</text>
+  <text x="383" y="76" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">02 · Hardware, offload</text>
+  <text x="383" y="102" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">29 · Where numbers live</text>
+  <text x="383" y="128" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">13 · int8 vs Q4</text>
+  <text x="383" y="154" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">12 · Pushing past 8 GB</text>
+  <text x="537" y="76" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">28 · Anatomy of H3</text>
+  <text x="537" y="102" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">23 · Math from scratch</text>
+  <text x="537" y="128" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">34 · FlashAttention</text>
+  <text x="537" y="154" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">40 · How LoRA works</text>
+  <text x="688" y="76" text-anchor="middle" fill="#d9b483" font-size="11" font-family="Inter,sans-serif">45 · Three GPUs</text>
+  <text x="688" y="102" text-anchor="middle" fill="#d9b483" font-size="11" font-family="Inter,sans-serif">36 · Splitting the video</text>
+  <text x="688" y="128" text-anchor="middle" fill="#d9b483" font-size="11" font-family="Inter,sans-serif">48 · The pipeline</text>
+  <text x="688" y="154" text-anchor="middle" fill="#d9b483" font-size="11" font-family="Inter,sans-serif">47 · The scorecard</text>
+  <line x1="2" y1="176" x2="758" y2="176" stroke="#232c3b"/>
+  <text x="2" y="200" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Read in order once. After that this is a reference — every chapter stands alone and links to what it depends on.</text>
+</svg>
+
+## The traps a roadmap cannot teach
+
+Some things are only learned by hitting them. These all cost real time on this build, and every one of them is written up where it happened.
+
+<div class="callout warn"><span class="t">Measured, all of them</span>
+<table>
+<tr><th>Trap</th><th>What actually happens</th></tr>
+<tr><td><b>SageAttention</b></td><td>Produces pure noise on H3. Keep it off.</td></tr>
+<tr><td><b>The 848-pixel width</b></td><td>848 ÷ 16 = 53, which is odd, so 2×2 patching fails with a shape error that never mentions resolution. Use widths where ÷16 is even — 832 gives 52.</td></tr>
+<tr><td><b><code>use_stream=True</code> on offloading</b></td><td>Pins tens of gigabytes until the kernel kills the process with no traceback at all. Keep it <code>False</code>.</td></tr>
+<tr><td><b><code>VAEDecodeTiled</code></b></td><td>Incompatible — H3's latent is a NestedTensor.</td></tr>
+<tr><td><b>LoRA at 480p</b></td><td>Softened the image. The base model was sharper.</td></tr>
+<tr><td><b>Ring-3 context parallelism</b></td><td>Out of memory: offload re-copied the weights per process.</td></tr>
+<tr><td><b>On-screen text</b></td><td>Not achievable with any current video diffusion model. Letters come out as plausible-looking marks.</td></tr>
+<tr><td><b>Faces across chained clips</b></td><td>Photoreal identity drifts between clips. Stylised characters hold far better.</td></tr>
+</table></div>
+
+## What to actually do next
 
 <table>
-<tr><th>Want to…</th><th>What it takes</th></tr>
-<tr><td>Make the lyric video</td><td>Download the <b>Ref2VA</b> model (~20 GB) + you provide the song and performer image(s)</td></tr>
-<tr><td>Stop re-launching ComfyUI by hand</td><td>A <b>systemd service</b> (auto-start on boot)</td></tr>
-<tr><td>Use the web UI from your laptop</td><td>SSH tunnel, or bind to the LAN (I'll explain the security side)</td></tr>
-<tr><td>Faster renders</td><td>Install <b>SageAttention</b>; keep clips short; lower steps for drafts</td></tr>
-<tr><td>Long / 2K video</td><td>Rent a bigger cloud GPU — your 8 GB card can't hold it</td></tr>
+<tr><th>To…</th><th>What it takes</th></tr>
+<tr><td>Build intuition fastest</td><td>Iterate on the ~57-second smoke render, not on hour-long clips. Change one variable per run.</td></tr>
+<tr><td>Understand where the time goes</td><td>Derive the token count for a resolution by hand, then square it and compare with the measured s/step</td></tr>
+<tr><td>Lock a character's appearance across shots</td><td>The <b>Ref2VA</b> transformer — a separate 20 GB file, not a setting. The encoder and both VAEs are shared.</td></tr>
+<tr><td>Stop losing work to crashes</td><td>Checkpoint the latent before decode. Two separate decode bugs destroyed completed denoise runs.</td></tr>
+<tr><td>Decide whether native 720p × 15 s is worth it</td><td>Read the cost comparison in <a href="47-the-scorecard.html">ch.47</a> — it works, and it is roughly 35× more expensive than upscaling for a difference most viewers cannot see.</td></tr>
 </table>
 
-<div class="callout truth"><span class="t">The mindset that matters most</span>
-<p>Everything here is learnable by <b>changing one variable and watching what happens</b>. You already debugged a RAM-disk, a wrong file format, and a throttling CDN — that's the actual skill of self-hosting. Models will change; that problem-solving won't. Keep a log, stay curious, and build small projects. You're well on your way.</p></div>
+<div class="callout truth"><span class="t">The mindset that carried this project</span>
+<p>Every finding in this guide came from changing one variable and watching what happened — including, and especially, the findings that contradicted what we expected. The models will change; this chapter's own advice already has. What does not change is the habit: predict, alter one thing, measure, write it down, and be willing to publish the prediction that failed.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">one-variable experiment</span><span class="badge">smoke test</span><span class="badge">checkpoint</span><span class="badge">step budget</span><span class="badge">reproducible seed</span><span class="badge">denoise vs decode</span><span class="badge">sequence parallelism</span><span class="badge">trained range</span><span class="badge">engineering limit vs hardware limit</span></p>
+<p>If those feel solid, the foundations are finished and the deep-dives will read as detail rather than as new material.</p></div>
+
+Next: the first technical chapter — what it actually took to get 720p out of this hardware, and which of the obvious optimisations helped.
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

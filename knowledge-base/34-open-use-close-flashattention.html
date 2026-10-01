@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>34 · Open, Use, Close: FlashAttention</title>
+<meta name="description" content="FlashAttention and the online softmax: how attention is computed one tile at a time without ever building the N×N score matrix, why it was already switched on in H3, and where the memory actually went.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 34 · A correction — we read the code and the wall moved</span>
+
+# Open, Use, Close: FlashAttention
+
+<p class="lede"><b>FlashAttention is the "open, use, close" discipline applied to attention</b>: instead of building the enormous table of every-token-against-every-token, it opens one tile of that table at a time, folds the tile into a running total, and frees it — so the memory it needs stops depending on how long the video is. This chapter is what that mechanism actually is, why it is mathematically exact rather than an approximation, and the awkward discovery that in H3 it was already switched on before we arrived.</p>
+
+We had a clean theory about why a fifteen-second render died. It was wrong, and the source code said so in one comment and one function call. What follows is the theory, the disproof, and the much less tidy truth underneath — which turned out to be more useful than the theory would have been.
+
+## 1 · The prediction, written down before we opened the source
+
+Here is the hypothesis exactly as it stood. A 124-frame clip rendered fine. A 345-frame clip — the same scene, the same resolution, fifteen seconds instead of five — ran out of VRAM. Attention compares every token with every other token, so its cost grows with the **square** of sequence length. 345 frames is about 2.8× the tokens of 124 frames, and $2.8^2 \approx 7.8$. Seven point eight times the memory on a card that was already three quarters full. Case closed: the score matrix was the wall, and FlashAttention was the fix.
+
+<div class="callout warn"><span class="t">Then we read <code>transformer_minimax_h3.py</code></span>
+<p>Inside <code>MiniMaxH3AttnProcessor.__call__</code>, attention does not build a score matrix by hand at all. It calls <code>dispatch_attention_fn(query, key, value, …)</code> — the <code>diffusers</code> attention dispatcher — which on Ampere routes straight to a memory-efficient / FlashAttention SDPA backend. And the model packs one request into a <b>single attention document with no mask</b> (the source says so in a comment), which is exactly the condition under which the flash backend stays eligible and gets chosen.</p>
+<p><b>The $N\times N$ matrix is never materialized. FlashAttention was already running.</b> It was not a lever we could pull; it was a floor we were already standing on. The hypothesis was disproved by the code itself, before a single experiment was run.</p></div>
+
+That is worth sitting with for a moment, because it is the most transferable lesson in this chapter. The quadratic story was elegant, it matched the textbook, and it was about a real property of real attention. It was also not what this program does.
+
+## 2 · What the naïve version would actually cost
+
+To see why FlashAttention matters at all — even as a floor rather than a lever — it helps to price the thing it refuses to build.
+
+Attention scores every token against every other token. For $N$ tokens that is $N^2$ numbers, and the transformer has **56 attention heads** (`num_attention_heads` in `transformer/config.json`), each keeping its own full table. The arithmetic below is arithmetic, not measurement — nothing on this box ever allocated these figures, which is the point:
+
+| Clip | Tokens $N$ | Pairs $N^2$ | Score matrix, 56 heads, bf16 |
+|---|---|---|---|
+| 480p × 124 frames (5 s) — **measured at 15,129 tokens** | 15,129 | 229 M | **~25.6 GB** |
+| 480p × 345 frames (15 s) — single-card ceiling ~41,000 tokens | ~41,000 | 1.68 B | **~188 GB** |
+| 720p × 345 frames (15 s) | ~93,000 | 8.65 B | **~969 GB** |
+
+The five-second clip that renders comfortably on one 8 GB card would need **twenty-five gigabytes** just to hold its own scores. It peaked at **5.72 GB**. The gap between those two numbers is FlashAttention, and it is why the naïve implementation is not a slow option — it is not an option.
+
+<svg viewBox="0 0 760 316" width="100%" style="max-width:920px" role="img" aria-label="Two panels: on the left, the full 15,129 by 15,129 by 56-head score matrix that naive attention would allocate at about 25.6 gigabytes, marked as never built; on the right, FlashAttention folding one key-value tile at a time into a small running max, running sum and running output accumulator, producing an exact result in memory proportional to N.">
+  <defs>
+    <marker id="f1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="f2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE OBVIOUS WAY</text>
+  <rect x="2" y="26" width="300" height="272" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <rect x="62" y="56" width="180" height="180" rx="4" fill="#241a1a" stroke="#ff6b6b" stroke-dasharray="4 3"/>
+  <line x1="62" y1="102" x2="242" y2="102" stroke="#40292b"/>
+  <line x1="62" y1="146" x2="242" y2="146" stroke="#40292b"/>
+  <line x1="62" y1="190" x2="242" y2="190" stroke="#40292b"/>
+  <line x1="108" y1="56" x2="108" y2="236" stroke="#40292b"/>
+  <line x1="152" y1="56" x2="152" y2="236" stroke="#40292b"/>
+  <line x1="196" y1="56" x2="196" y2="236" stroke="#40292b"/>
+  <text x="152" y="132" text-anchor="middle" fill="#ffdede" font-size="14" font-family="Inter,sans-serif">Q · Kᵀ</text>
+  <text x="152" y="154" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">15,129 × 15,129 × 56 heads</text>
+  <text x="152" y="180" text-anchor="middle" fill="#ff6b6b" font-size="15" font-family="Inter,sans-serif">25.6 GB</text>
+  <text x="152" y="266" text-anchor="middle" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">never allocated on this box</text>
+  <text x="322" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT FLASHATTENTION DOES INSTEAD</text>
+  <rect x="322" y="26" width="436" height="272" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <rect x="344" y="54" width="76" height="40" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="382" y="79" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">K/V tile 1</text>
+  <rect x="344" y="106" width="76" height="40" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="382" y="131" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">K/V tile 2</text>
+  <rect x="344" y="158" width="76" height="40" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="382" y="183" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">K/V tile 3</text>
+  <text x="382" y="222" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">⋮</text>
+  <line x1="422" y1="74" x2="498" y2="108" stroke="#6f7b8f" marker-end="url(#f1)"/>
+  <line x1="422" y1="126" x2="498" y2="126" stroke="#6f7b8f" marker-end="url(#f1)"/>
+  <line x1="422" y1="178" x2="498" y2="144" stroke="#6f7b8f" marker-end="url(#f1)"/>
+  <rect x="502" y="70" width="234" height="110" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="516" y="94" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">running max</text>
+  <text x="722" y="94" text-anchor="end" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">m</text>
+  <text x="516" y="118" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">running sum</text>
+  <text x="722" y="118" text-anchor="end" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">ℓ</text>
+  <text x="516" y="142" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">running output</text>
+  <text x="722" y="142" text-anchor="end" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">O</text>
+  <text x="516" y="166" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">three registers, one row wide</text>
+  <line x1="618" y1="182" x2="618" y2="212" stroke="#5ee0c0" marker-end="url(#f2)"/>
+  <rect x="502" y="216" width="234" height="46" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="618" y="236" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">bit-for-bit the same answer</text>
+  <text x="618" y="252" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">memory ∝ N, not N²</text>
+  <text x="382" y="284" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">open → fold in → free</text>
+</svg>
+
+## 3 · Open, use, close — the discipline, not the trick
+
+The pattern has a name in every other part of computing. A database client does not hold one connection per query for the life of the program; it **acquires, uses, releases**. A web server does not keep every uploaded file in memory; it streams. The shape is always the same: a **fixed-size working area** in front of an **arbitrarily large body of work**.
+
+The cleanest structural picture is an archive reading room. The archive holds fifty kilometres of shelving. The reading desk holds one box. A researcher requests a box, reads it, returns it, requests the next. The desk never grows. It does not matter whether the archive is fifty kilometres or five hundred — **the size of the reading room is a property of the desk, not of the archive.**
+
+That is the whole ambition of this chapter, stated as a target: make the peak memory of a transformer block a property of the tile size, not of the video length.
+
+FlashAttention achieves exactly that for one operation — attention. The rest of the block does not, and section 6 is about what that cost.
+
+## 4 · The online softmax — why tiling is exact, not approximate
+
+The obvious objection to processing attention in tiles is that softmax is not a local operation. Softmax over a row needs the whole row: it divides each entry by the sum over *all* entries. Cut the row into pieces and no piece knows the total.
+
+The resolution is a small identity that turns out to be the hinge of the entire field.
+
+### The identity
+
+Softmax is unchanged by subtracting any constant from its inputs:
+
+$$\text{softmax}(s_1,\dots,s_n) \;=\; \text{softmax}(s_1 - c,\dots,s_n - c) \quad \text{for any } c$$
+
+because $e^{s_i - c} / \sum_j e^{s_j - c} = (e^{-c} e^{s_i}) / (e^{-c}\sum_j e^{s_j})$ and the $e^{-c}$ cancels top and bottom. In practice $c$ is chosen to be the row maximum, so that the largest exponent is $e^0 = 1$ and nothing overflows. That is standard numerical hygiene in any softmax, tiled or not.
+
+The insight of the **online softmax** is that $c$ does not have to be known in advance. It can be revised as the row is discovered — provided everything accumulated so far is corrected by the same factor.
+
+### The recurrence
+
+Process the key/value tiles one at a time. Carry three running quantities: the largest score seen so far $m$, the running denominator $\ell$, and the running weighted sum of value vectors $O$. On seeing a new tile with scores $s$ and values $v$:
+
+$$m' = \max\!\left(m,\; \max_i s_i\right)$$
+
+$$\ell' = e^{\,m - m'}\,\ell \;+\; \sum_i e^{\,s_i - m'}$$
+
+$$O' = e^{\,m - m'}\,O \;+\; \sum_i e^{\,s_i - m'}\, v_i$$
+
+and at the very end divide once: $\text{out} = O / \ell$.
+
+The factor $e^{\,m - m'}$ is the correction. When a later tile turns out to contain a bigger score than anything seen before, the running totals were expressed in the old units; multiplying by $e^{\,m-m'}$ re-expresses them in the new ones. Nothing is discarded and nothing is approximated.
+
+<div class="callout truth"><span class="t">The structural analogy that actually fits</span>
+<p>Weighing a lorry-load of grain on a scale that holds one sack. The load cannot go on the scale, so it is weighed one sack at a time and added to a running total. The total is <b>exact</b> — addition does not care in what order it happens.</p>
+<p>The softmax adds one wrinkle: partway through, a sack turns up that forces a change of unit. Every earlier weight has to be converted into the new unit before the new sack can be added. The factor $e^{\,m-m'}$ <em>is</em> that unit conversion, and a unit conversion loses nothing. That is why FlashAttention returns the same numbers as the naïve version rather than an approximation of them — and it is why the technique was adoptable everywhere, immediately, with no quality argument attached.</p></div>
+
+<div class="callout spec"><span class="t">Tile-and-accumulate, not isolate-and-forget</span>
+<p>A recurring misreading is that tiled attention lets each chunk of video attend only within itself, and that long clips therefore lose coherence. That is a different technique. Here <b>every token still sees every other token</b> — every tile's contribution lands in the same running total. What is bounded is not the <em>reach</em> of attention but the <em>memory</em> holding its intermediate arithmetic.</p></div>
+
+<svg viewBox="0 0 760 258" width="100%" style="max-width:920px" role="img" aria-label="The online softmax recurrence shown as a machine: a tile of scores enters, the running maximum is revised, the previously accumulated sum and output are rescaled by e to the power of the old max minus the new max, the tile's contribution is added, the tile is freed, and after the last tile a single division produces the exact output.">
+  <defs>
+    <marker id="f3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+    <marker id="f4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE PASS OF THE ONLINE SOFTMAX — THE LOOP BODY</text>
+  <rect x="2" y="30" width="132" height="76" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="68" y="58" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">new tile</text>
+  <text x="68" y="76" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">scores s, values v</text>
+  <text x="68" y="94" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">opened</text>
+  <line x1="136" y1="68" x2="176" y2="68" stroke="#7aa2ff" marker-end="url(#f3)"/>
+  <rect x="180" y="30" width="150" height="76" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="255" y="58" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">revise the max</text>
+  <text x="255" y="80" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">m′ = max(m, max s)</text>
+  <line x1="332" y1="68" x2="372" y2="68" stroke="#7aa2ff" marker-end="url(#f3)"/>
+  <rect x="376" y="30" width="170" height="76" rx="8" fill="#151b26" stroke="#ffb454"/>
+  <text x="461" y="54" text-anchor="middle" fill="#ffd9a0" font-size="12.5" font-family="Inter,sans-serif">rescale what is held</text>
+  <text x="461" y="76" text-anchor="middle" fill="#ffb454" font-size="12" font-family="Inter,sans-serif">× e^(m − m′)</text>
+  <text x="461" y="94" text-anchor="middle" fill="#a6875c" font-size="10.5" font-family="Inter,sans-serif">a change of units, exact</text>
+  <line x1="548" y1="68" x2="588" y2="68" stroke="#7aa2ff" marker-end="url(#f3)"/>
+  <rect x="592" y="30" width="166" height="76" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="675" y="58" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">add the tile in</text>
+  <text x="675" y="80" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">ℓ += Σe, O += Σe·v</text>
+  <path d="M675,110 L675,140 L68,140 L68,124" fill="none" stroke="#5ee0c0" stroke-dasharray="4 3" marker-end="url(#f4)"/>
+  <text x="372" y="136" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">tile freed — next tile opened</text>
+  <rect x="2" y="164" width="756" height="80" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="20" y="190" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">AFTER THE LAST TILE</text>
+  <text x="20" y="216" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">divide once — out = O / ℓ — and the result equals the untiled softmax exactly</text>
+  <text x="20" y="234" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">held at any instant: three registers plus one tile. Independent of how many tiles there were.</text>
+</svg>
+
+## 5 · The same idea, already proven on this box, on a different buffer
+
+Before FlashAttention became a question here, open-use-close had already been applied by hand to a completely different operation — and it worked, with a receipt.
+
+Profiling the 8 GB single-card path showed that roughly **88%** of the real-tensor peak was not weights at all. It was working buffers inside the int8 matrix multiply. The single largest was `fast_int8_mm`'s output accumulator: an $[M,N]$ int32 tensor, **2.24 GB in one allocation**.
+
+The rows of that multiply are independent — each has its own scale factor — so it can be computed a block of rows at a time and never materialized whole:
+
+$$\mathbf{Y}[R_i,:] \;=\; \big(\mathbf{X}_8[R_i,:]\,W_8^\top\big)\cdot\big(s_{R_i}\, s_w\big), \qquad \bigcup_i R_i = \{1..M\}$$
+
+<div class="callout truth"><span class="t">Measured, and bit-identical</span>
+<p>Peak memory fell from <b>5.9 GB to 3.9 GB</b>, and the output was verified equal to the unblocked version — <code>torch.equal</code>, not "close enough". The two gigabytes recovered bought a resolution increase of <b>1.87×</b> in pixel count: 576×320 became 768×448.</p>
+<p>The mechanism is identical to the online softmax's: a big intermediate that never has to exist all at once, computed in pieces, accumulated exactly. Different operation, same discipline, same guarantee. The cost was real too — the per-row loop added overhead, which is part of why int8 later measured slower than Q4 on this box (<a href="13-int8-vs-q4.html">ch.13</a>).</p></div>
+
+## 6 · So where did the 8 GB actually go?
+
+If attention is already tiled and the int8 accumulator is already blocked, the 345-frame failure has to be somewhere else. Reading the attention processor top to bottom, the resident tensors line up.
+
+First `to_q`, `to_k`, `to_v` produce **three large tensors** — query, key and value, each shaped `[1, seq, heads, head_dim]` — and all three are alive at once. Then, before the SDPA call, rotary position embedding is applied to two of them:
+
+```
+if rotary_emb is not None:
+    query = _apply_rotary_emb(query, *rotary_emb)   # runs once for Q
+    key   = _apply_rotary_emb(key,   *rotary_emb)   # runs again for K
+```
+
+And `_apply_rotary_emb` is written the way ordinary readable PyTorch is written — as a chain of pure operations, each of which allocates a fresh full-size tensor:
+
+```
+x1, x2 = hidden_states_rotary.chunk(2, dim=-1)
+hidden_states_rotated = torch.cat((-x2, x1), dim=-1)            # full-size temp
+hidden_states_rotary  = hidden_states_rotary * cos
+                      + hidden_states_rotated * sin             # full-size temp
+return torch.cat((hidden_states_rotary,
+                  hidden_states_pass), dim=-1).contiguous()     # full-size temp
+```
+
+That is roughly **four full-size temporaries per call**, and the call happens **twice** — once for the query, once for the key — while Q, K and V are all still resident. After attention returns, the SwiGLU feed-forward (`FeedForward(hidden_size, inner_dim=14336, activation_fn="swiglu")`) inflates every token through a **14,336-wide intermediate**, which is another large transient on a hidden size of 5,376.
+
+<div class="callout spec"><span class="t">What is on the card, in order, inside one block</span>
+<pre>
+to_q / to_k / to_v    →  Q, K, V — three big [1, seq, heads, head_dim] tensors, all resident
+_apply_rotary_emb(Q)  →  ~4 full-size temporaries  (cat, mul+add, cat.contiguous)
+_apply_rotary_emb(K)  →  ~4 full-size temporaries  (the same work, run again)
+dispatch_attention_fn →  flash / memory-efficient SDPA — NO N×N matrix built
+FeedForward swiglu    →  a 14,336-wide intermediate per token
+</pre>
+<p>Fifty of these blocks run in sequence, one denoise step. The weights stream in and out around them (<a href="29-where-numbers-live.html">ch.29</a>); the tensors above are what the block itself creates and destroys while it computes.</p></div>
+
+### The growth law, corrected
+
+Every transient in that list — Q, K, V, the rotary temporaries, the SwiGLU intermediate — has a size proportional to the **number of tokens**. Not one of them is the score matrix. So:
+
+$$\text{peak activation} \;\propto\; N \qquad(\text{not } N^2)$$
+
+The entire earlier chapter hung on that exponent. It is one, not two. And a linear law is quite bad enough.
+
+<div class="callout danger"><span class="t">Why 345 frames tipped over anyway</span>
+<p>345 frames is about <b>2.8×</b> the sequence length of 124 frames. Linear growth means about <b>2.8×</b> the transient footprint — not 7.8×. That is still fatal on this card. The baseline was <b>15,129 tokens at 5.72 GB peak</b> on a card with <b>7.66 GB</b> usable. Multiply the activation part by 2.8 and there is no arrangement of the remainder that fits.</p>
+<p>The failure landed exactly where the code predicts: an OOM on a <b>424 MiB</b> rotary temporary, with the card already about <b>7.6 GB</b> full. One redundant full-size copy, requested when there was no room left. Nothing quadratic anywhere in it.</p></div>
+
+<svg viewBox="0 0 760 288" width="100%" style="max-width:920px" role="img" aria-label="A memory timeline through one transformer block: the card fills with query key and value tensors, then four full-size rotary temporaries for the query, then four more for the key which is where the 424 MiB allocation crossed the 7.66 gigabyte ceiling, then attention which adds almost nothing because it is tiled, then the 14,336-wide feed-forward intermediate.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE BLOCK, LEFT TO RIGHT — WHAT IS HELD AT EACH MOMENT</text>
+  <line x1="2" y1="54" x2="758" y2="54" stroke="#ff6b6b" stroke-dasharray="5 4"/>
+  <text x="758" y="46" text-anchor="end" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">7.66 GB usable on a 3060 Ti</text>
+  <rect x="2" y="150" width="126" height="94" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="65" y="182" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q, K, V</text>
+  <text x="65" y="200" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">three big tensors</text>
+  <text x="65" y="216" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">all resident</text>
+  <rect x="134" y="106" width="126" height="138" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="197" y="140" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">rotary on Q</text>
+  <text x="197" y="158" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">~4 full-size temps</text>
+  <rect x="266" y="60" width="126" height="184" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="329" y="92" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">rotary on K</text>
+  <text x="329" y="110" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">the same work again</text>
+  <text x="329" y="132" text-anchor="middle" fill="#ff6b6b" font-size="12.5" font-family="Inter,sans-serif">424 MiB → OOM</text>
+  <text x="329" y="150" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">card already ~7.6 GB</text>
+  <rect x="398" y="140" width="126" height="104" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="461" y="172" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">SDPA</text>
+  <text x="461" y="190" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">flash / mem-efficient</text>
+  <text x="461" y="206" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">adds almost nothing</text>
+  <rect x="530" y="118" width="126" height="126" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="593" y="150" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">SwiGLU FFN</text>
+  <text x="593" y="168" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">14,336 wide</text>
+  <text x="593" y="184" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">per token</text>
+  <rect x="662" y="168" width="96" height="76" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="710" y="200" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">residual</text>
+  <text x="710" y="216" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">out to block N+1</text>
+  <text x="2" y="266" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">Every box above is sized by the token count. None of them is the score matrix. That is the correction.</text>
+  <text x="2" y="282" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">The one operation that would have grown as N² is the one operation already tiled.</text>
+</svg>
+
+## 7 · Open, use, close — pointed at the right targets
+
+The instinct in the original draft was sound. It was aimed at the wrong buffer. SDPA already tiles the score matrix; the linear transients are not tiled at all. **Those** are where the discipline still has room to pay.
+
+| Fix | What it removes | Effort |
+|---|---|---|
+| **Fuse or in-place `_apply_rotary_emb`** | the ~4 redundant full-size copies per call, ×2 calls — *exactly where the OOM landed* | low effort, high leverage |
+| **Chunk attention over the sequence dimension** | apply rotary and SDPA per query-block, free each block before the next | medium |
+| **Chunk the SwiGLU feed-forward over tokens** | free the 14,336-wide intermediate per chunk instead of all at once | medium |
+| **Offload the residual stream to CPU** | frees the packed sequence buffer if the budget is still a little short | medium |
+
+<div class="callout truth"><span class="t">The end state this aims at</span>
+<p>Process the sequence in <b>fixed-size tiles</b> — rotary, attention and feed-forward done per tile, each tile freed before the next opens — so that peak memory becomes roughly <b>independent of sequence length</b>. That is the true meaning of open-use-close here: not one clever kernel, but making the whole block's footprint flat in $N$. Reach that and 345 frames costs about what 124 frames costs at peak.</p>
+<p>This is the <b>coherent</b> path to long video — one render, no seams. It is the alternative to chunk-and-chain (<a href="33-long-video-small-card.html">ch.33</a>), which splits the <em>output</em> into clips and pays in seams and re-conditioning. Chunk-and-chain is the fallback for when the kernel work is not done.</p></div>
+
+Every one of those changes has the same acceptance test the int8 blocking had: **numerically verified against the untiled output.** Same numbers, less held. A tiling change that alters the result is not an optimization, it is a bug with a speedup attached.
+
+## 8 · The thread that runs forward: ring attention is this mechanism, over a network
+
+The online softmax is not only what makes attention fit on one card. It is the reason attention can be split across **three** cards at all, and it is the load-bearing idea in [ch.36](36-splitting-the-video-cp.html) and [ch.45](45-three-gpu-sequence-parallelism.html).
+
+Look again at the recurrence in section 4. The running state — $m$, $\ell$, $O$ — does not care **where a tile came from.** It does not care in what order tiles arrive. It only requires that every tile arrives exactly once. That is an unusually forgiving contract, and it is what makes the following possible:
+
+- Give each of the three cards **one third of the token sequence**. Each card holds its own $m$, $\ell$ and $O$ for its own rows.
+- For attention, pass the key/value shards around a **ring**: card 0 hands its K/V to card 1, computes against what it received, passes again. After three hops every card has folded in every other card's tokens.
+- Because the state is a running total, no card ever holds the whole sequence's scores, and no full score matrix exists on any card.
+
+<div class="callout spec"><span class="t">Why the ring tolerates a link this slow</span>
+<p>This box has <b>no NVLink</b>: card-to-card bandwidth is about <b>4.9 GB/s</b>, and for one of the three cards the path routes through the CPU. Tensor parallelism, which must all-reduce partial sums every layer, would be crushed by that. Ring attention passes only <b>a shard of K/V per hop</b>, and the budget for its communication buffers plus working set measured about <b>1.2 GB per card</b>.</p>
+<p>There is a second, quieter dependency. Ring's flexible variant requires <code>attn_mask=None</code> — and H3 packs its request as a <b>single document with no mask</b>, the very same property that let SDPA choose the flash backend in section 1. One architectural decision inside the model buys both the single-card tiling and the three-card ring.</p></div>
+
+<div class="callout truth"><span class="t">Measured on the box</span>
+<p>With ring context parallelism at degree 3, the sequence genuinely split: <b>5,022 tokens per GPU</b>, down from <b>~15,067</b> on a single card, at about <b>5.2 GB per card</b> — comfortably inside 8 GB. At degree 2 it was <b>7,533 tokens per GPU</b> at about <b>5.9 GB</b>. The attention mathematics worked on the first attempt. What killed the three-card run was host RAM, not VRAM, and that story is <a href="42-why-two-models.html">ch.42</a>.</p></div>
+
+<svg viewBox="0 0 760 280" width="100%" style="max-width:920px" role="img" aria-label="Three GPUs each holding one third of the token sequence and its own running max, running sum and running output, passing key and value shards around a ring over a 4.9 gigabyte per second link until every card has folded in every other card's tokens.">
+  <defs>
+    <marker id="f5" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME ACCUMULATOR, SPREAD OVER THREE CARDS</text>
+  <rect x="2" y="34" width="230" height="128" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="117" y="60" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">GPU 0</text>
+  <text x="117" y="82" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">tokens 1 … 5,022</text>
+  <rect x="26" y="94" width="182" height="50" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="117" y="114" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">its own m, ℓ, O</text>
+  <text x="117" y="132" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">~5.2 GB peak</text>
+  <rect x="264" y="34" width="230" height="128" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="379" y="60" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">GPU 1</text>
+  <text x="379" y="82" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">tokens 5,023 … 10,044</text>
+  <rect x="288" y="94" width="182" height="50" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="379" y="114" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">its own m, ℓ, O</text>
+  <text x="379" y="132" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">~5.2 GB peak</text>
+  <rect x="526" y="34" width="232" height="128" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="642" y="60" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">GPU 2</text>
+  <text x="642" y="82" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">tokens 10,045 … 15,067</text>
+  <rect x="550" y="94" width="184" height="50" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="642" y="114" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">its own m, ℓ, O</text>
+  <text x="642" y="132" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">~5.2 GB peak</text>
+  <path d="M234,110 L260,110" stroke="#7aa2ff" marker-end="url(#f5)"/>
+  <path d="M496,110 L522,110" stroke="#7aa2ff" marker-end="url(#f5)"/>
+  <path d="M642,166 L642,196 L117,196 L117,166" fill="none" stroke="#7aa2ff" marker-end="url(#f5)"/>
+  <text x="380" y="212" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">K/V shards travel the ring — about 4.9 GB/s, no NVLink on this board</text>
+  <rect x="2" y="228" width="756" height="46" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="20" y="248" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">After three hops every card has folded in every other card's tokens — every token still sees every token.</text>
+  <text x="20" y="266" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">Nothing here needed a new attention algorithm. It is the section-4 recurrence with tiles arriving over a cable.</text>
+</svg>
+
+## 9 · Honest status
+
+<div class="callout truth"><span class="t">Where this stands</span>
+<p>Attention is <b>already optimal</b> on this path. SDPA picks the flash / memory-efficient backend over a single unmasked document, so there is nothing left to add there and no credit to claim for it. The remaining work is genuine kernel surgery on the parts that are <em>not</em> handled: fusing <code>_apply_rotary_emb</code> so it stops making redundant copies, chunking attention and the SwiGLU feed-forward over the sequence, and offloading the residual stream if the budget still needs it.</p>
+<p>None of that is exotic. All of it is fiddly, and all of it has to be verified numerically rather than eyeballed.</p></div>
+
+<div class="callout warn"><span class="t">The research lesson, which cost nothing and saved a week</span>
+<p>The quadratic story was clean, plausible, and matched every textbook description of attention. It was also disproved in twenty minutes by reading two lines of the model's own source. <b>Read the code before optimizing it.</b> An imagined allocation and a real one can differ by an entire exponent — and a week spent adding a feature that is already switched on is a week with nothing to show.</p></div>
+
+<div class="callout spec"><span class="t">The chapter in five lines</span>
+<ol>
+<li><b>The online softmax</b> makes attention tileable and <b>exact</b>: a running max, a running sum, a running output, and a rescale factor that is a change of units, not an approximation.</li>
+<li><b>H3 already uses it.</b> <code>dispatch_attention_fn</code> over a single unmasked document routes to flash / memory-efficient SDPA on Ampere. The $N\times N$ matrix — 25.6 GB for a five-second clip — is never built.</li>
+<li><b>The real wall is linear transients:</b> Q/K/V resident together, <code>_apply_rotary_emb</code>'s ~4 full-size copies run twice, and the 14,336-wide SwiGLU intermediate. All $\propto N$, so 2.8× the frames means about 2.8× the footprint — and the OOM landed on a 424 MiB rotary temporary at ~7.6 GB on an 8 GB card.</li>
+<li><b>The discipline works when aimed correctly</b> — proved already on the int8 accumulator: 5.9 GB → 3.9 GB, bit-identical, 1.87× more pixels.</li>
+<li><b>The same recurrence scales outward</b> — ring attention across three cards is the section-4 loop with tiles arriving over a 4.9 GB/s cable: 5,022 tokens and ~5.2 GB per card.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">attention score matrix</span><span class="badge">online softmax</span><span class="badge">running max / running sum</span><span class="badge">shift invariance</span><span class="badge">tile-and-accumulate</span><span class="badge">SDPA</span><span class="badge">attention backend / dispatcher</span><span class="badge">unmasked document</span><span class="badge">rotary embedding</span><span class="badge">transient / activation</span><span class="badge">linear vs quadratic growth</span><span class="badge">SwiGLU intermediate</span><span class="badge">ring attention</span><span class="badge">K/V shard</span></p>
+<p>If those feel solid, every later chapter about splitting a render across cards is a variation on one recurrence.</p></div>
+
+<p class="small">The fallback path — chunk-and-chain and its seams — is <a href="33-long-video-small-card.html">ch.33</a>; what attention computes, multiply-add by multiply-add, is <a href="31-what-the-gpu-does.html">ch.31</a>; the same-numbers-less-held framing as a circuit is <a href="32-thinking-like-a-circuit.html">ch.32</a>; the int8 buffer this discipline already fixed is <a href="13-int8-vs-q4.html">ch.13</a>; the ring built on this recurrence is <a href="36-splitting-the-video-cp.html">ch.36</a> and <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; the pipeline these buffers live inside is <a href="22-pipeline-in-detail.html">ch.22</a>.</p>
+
+Next: how a 126 MB file re-styles a 20 GB model — and the controlled test where adding one made the picture *worse*.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

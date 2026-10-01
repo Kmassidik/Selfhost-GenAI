@@ -1,0 +1,126 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Setup — Run MiniMax-H3 (33B video) on an 8 GB GPU</title>
+<link rel="stylesheet" href="../knowledge-base/assets/style.css">
+<link rel="stylesheet" href="../knowledge-base/assets/katex.min.css">
+</head><body>
+<script type="text/markdown" id="md">
+# Setup — Run MiniMax-H3 (33B video) on an 8 GB GPU
+
+Reproducible steps. Tested on: **RTX 3060 Ti (8 GB, Ampere sm_86), 60 GB RAM, Ubuntu 26.04**.
+Replace `<box>` with your host and set your own `HF_TOKEN`.
+
+---
+
+## 0. Prereqs
+- NVIDIA GPU ≥ 8 GB VRAM, ≥ 32 GB system RAM (60 GB recommended — weights stream through it)
+- ~60 GB free disk for weights
+
+## 1. NVIDIA driver + verify
+```bash
+sudo ubuntu-drivers install --gpgpu nvidia:595   # or the recommended version
+sudo reboot
+nvidia-smi                                        # confirm GPU + CUDA
+```
+
+## 2. Isolated Python (system Python is often too new for torch)
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.12
+```
+
+## 3. ComfyUI + CUDA PyTorch
+```bash
+git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git
+cd ComfyUI
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python torch torchvision torchaudio \
+   --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python .venv/bin/python -r requirements.txt
+# sanity: must print cuda_avail True
+.venv/bin/python -c "import torch;print('cuda_avail',torch.cuda.is_available())"
+```
+
+## 4. Custom nodes
+```bash
+cd custom_nodes
+git clone --depth 1 https://github.com/city96/ComfyUI-GGUF.git
+git clone --depth 1 https://github.com/kijai/ComfyUI-KJNodes.git
+git clone --depth 1 https://github.com/rgthree/rgthree-comfy.git
+git clone --depth 1 https://github.com/evanspearman/ComfyMath.git
+git clone --depth 1 https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git   # Turbo LoRA (~5x faster)
+git clone --depth 1 https://github.com/Saganaki22/ComfyUI-sol-attn.git          # exact FFN-chunk (optional)
+cd ..
+```
+
+## 5. Weights (use the native int8 safetensors — NOT GGUF)
+> Set `export HF_TOKEN=hf_xxx` first (avoids download throttling).
+> If Xet/HTTP2 throttles, fall back to: `curl -L --http1.1 -C - --retry 20 <resolve-url> -o <file>`
+
+```bash
+export HF_HUB_ENABLE_HF_TRANSFER=1
+hf download Comfy-Org/MiniMax-H3 diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors --local-dir models
+hf download Comfy-Org/MiniMax-H3 text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors --local-dir models
+hf download Comfy-Org/MiniMax-H3 vae/minimax_h3_video_vae_fp16.safetensors --local-dir models
+hf download Comfy-Org/MiniMax-H3 vae/minimax_h3_audio_vae_fp32.safetensors --local-dir models
+hf download larryvrh/MiniMax-H3-Turbo-Lora minimax_h3_turbo_v4_step600_ema.safetensors --local-dir models/loras
+# upscaler (generate small -> upscale)
+curl -L --http1.1 https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth -o models/upscale_models/4x-UltraSharp.pth
+```
+**Do NOT stage large downloads in `/tmp`** if it's a RAM-disk (tmpfs) — it will "Disk quota exceeded". Download straight to the models dir.
+
+## 6. The exact int8 VRAM patch (optional but big) ⭐
+Frees ~2 GB during sampling, **bit-identical output** (raises the 15 s native ceiling 576×320 → 768×448). Requires `comfy-kitchen` int8 path + the native allocator.
+```bash
+.venv/bin/python /path/to/scripts/patch_int8_chunk.py   # edit the FILE path inside first
+# run ComfyUI with the native allocator so the patch applies:
+#   main.py --disable-cuda-malloc
+```
+See `scripts/patch_int8_chunk.py` and `EXPERIMENT-LOG.md` (E-3c) for the why.
+
+## 7. Run as a service (auto-start, survives reboot)
+`/etc/systemd/system/comfyui.service` (edit `User=` and paths):
+```ini
+[Unit]
+Description=ComfyUI (MiniMax-H3)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/ComfyUI
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ExecStart=/home/YOUR_USER/ComfyUI/.venv/bin/python main.py --port 8188 --disable-smart-memory --disable-cuda-malloc
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+```
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now comfyui
+sudo journalctl -u comfyui -f     # logs
+```
+
+## 8. Access the UI
+From your laptop (do NOT expose to LAN unless you mean to):
+```bash
+ssh -L 8188:localhost:8188 YOUR_USER@<box>
+# then open http://localhost:8188
+```
+
+---
+
+## Key gotchas (learned the hard way — see EXPERIMENT-LOG.md)
+- **GGUF ≠ works.** The H3 GGUF is for stable-diffusion.cpp; ComfyUI rejects it. Use native int8 safetensors.
+- **SageAttention is BROKEN for H3** → outputs pure noise. Leave it off.
+- **`VAEDecodeTiled` incompatible** (H3 latent is a NestedTensor). Use plain `VAEDecode`.
+- **`--reserve-vram` costs you headroom** — omit it.
+- **Prompt format matters most** — use H3's structured `integrated_multimodal_description / overall_soundscape / non_diegetic_music`. See `PROJECT-SUMMARY.md`.
+- **Expect minutes per clip.** ~3 min (Turbo, short) to ~18 min (15 s, 1080p). This is an 8 GB card streaming a 46 GB model.
+
+</script>
+<script src="../knowledge-base/assets/marked.min.js"></script>
+<script src="../knowledge-base/assets/katex.min.js"></script>
+<script src="../knowledge-base/assets/mermaid.min.js"></script>
+<script src="app.js"></script>
+</body></html>

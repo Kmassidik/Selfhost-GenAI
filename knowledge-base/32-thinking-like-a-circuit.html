@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>32 · Thinking Like a Circuit</title>
+<meta name="description" content="Activations are the signal, weights are the fixed elements, activation functions are the nonlinear junctions — the electrical-engineering reading of a GPU, and the multi-GPU scheme it correctly killed.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 32 · The electrical-engineering lens on hardware limits</span>
+
+# Thinking Like a Circuit
+
+<p class="lede">A running model is a circuit: the activations are the signal, the weight matrices are the fixed elements the signal passes through, and the activation functions are the nonlinear junctions between them. Read it that way and three things that otherwise have to be memorised become derivable — which jobs a second card can help with, what "compressing a model" really is, and why compression can never be free.</p>
+
+This is not a decorative comparison. It is the same mathematics with two vocabularies on top of it, and the test of that claim is whether the circuit reading makes correct predictions about hardware. It made two on this project. One was right and saved a month of engineering. One was wrong, and the way it was wrong is the more useful half of the chapter.
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p>An electrical engineer and a machine-learning engineer are studying the <b>same object</b>: a signal flowing through a network of linear elements with nonlinear junctions in between. Once that is visible, a graphics card stops being a mystery box and becomes something to reason about — where it will bottleneck, what a second card buys, and what shrinking a model costs.</p></div>
+
+## The mapping
+
+Line the two vocabularies up and they are the same nouns twice.
+
+<table>
+<tr><th>Circuit</th><th>Model</th><th>What it is in both</th></tr>
+<tr><td>Voltage / signal</td><td>Activation — the floats flowing</td><td>The values moving through, changing moment to moment</td></tr>
+<tr><td>Resistor / impedance</td><td>Weight matrix</td><td>The fixed element the signal passes through, unchanged by the passing</td></tr>
+<tr><td>Series chain</td><td>The 50-block stack, and the step loop</td><td>One stage feeds the next, in order, and the order cannot be shuffled</td></tr>
+<tr><td>Parallel branches</td><td>Independent renders</td><td>Separate paths that never wait on each other</td></tr>
+<tr><td>Diode / transistor</td><td>Activation function — softmax, GELU</td><td>The nonlinear junction sitting between linear stages</td></tr>
+<tr><td>Thévenin equivalent</td><td>Model compression</td><td>Replacing a whole sub-network with a smaller stand-in</td></tr>
+<tr><td>Superposition (linear only)</td><td>Why linear layers collapse</td><td>Linear pieces add up cleanly — until a nonlinearity breaks it</td></tr>
+</table>
+
+Read the table downward and the claim becomes concrete rather than poetic: the weights are fixed impedances, the activations are the signal, and between every linear stage sits a nonlinear junction. That is a circuit, drawn with different symbols.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="A circuit drawn above a transformer block, element by element. A source feeds two resistors in series with a diode between them; below, an activation enters an attention weight matrix, passes through a softmax nonlinearity, then a feed-forward weight matrix, and leaves as a new activation. The elements line up one to one.">
+  <defs>
+    <marker id="c1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+    <marker id="c2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME DIAGRAM, TWICE</text>
+  <text x="2" y="42" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif" letter-spacing="1.2">CIRCUIT</text>
+  <line x1="80" y1="76" x2="140" y2="76" stroke="#7aa2ff"/>
+  <circle cx="70" cy="76" r="12" fill="#0d1017" stroke="#7aa2ff"/>
+  <text x="70" y="80" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="SF Mono,monospace">V</text>
+  <rect x="140" y="64" width="110" height="24" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="195" y="81" text-anchor="middle" fill="#eef3ff" font-size="11" font-family="Inter,sans-serif">R₁</text>
+  <line x1="250" y1="76" x2="300" y2="76" stroke="#7aa2ff"/>
+  <path d="M300,64 L326,76 L300,88 z" fill="#241a1a" stroke="#ff6b6b"/>
+  <line x1="326" y1="62" x2="326" y2="90" stroke="#ff6b6b"/>
+  <text x="313" y="108" text-anchor="middle" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif">diode</text>
+  <line x1="326" y1="76" x2="376" y2="76" stroke="#7aa2ff"/>
+  <rect x="376" y="64" width="110" height="24" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="431" y="81" text-anchor="middle" fill="#eef3ff" font-size="11" font-family="Inter,sans-serif">R₂</text>
+  <line x1="486" y1="76" x2="556" y2="76" stroke="#7aa2ff" marker-end="url(#c1)"/>
+  <text x="600" y="80" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">signal out</text>
+  <line x1="2" y1="132" x2="758" y2="132" stroke="#232c3b"/>
+  <text x="2" y="164" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif" letter-spacing="1.2">BLOCK</text>
+  <line x1="80" y1="198" x2="140" y2="198" stroke="#5ee0c0"/>
+  <circle cx="70" cy="198" r="12" fill="#0d1017" stroke="#5ee0c0"/>
+  <text x="70" y="202" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="SF Mono,monospace">x</text>
+  <rect x="140" y="186" width="110" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="195" y="203" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">attention W</text>
+  <line x1="250" y1="198" x2="300" y2="198" stroke="#5ee0c0"/>
+  <path d="M300,186 L326,198 L300,210 z" fill="#241a1a" stroke="#ff6b6b"/>
+  <line x1="326" y1="184" x2="326" y2="212" stroke="#ff6b6b"/>
+  <text x="313" y="230" text-anchor="middle" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif">softmax</text>
+  <line x1="326" y1="198" x2="376" y2="198" stroke="#5ee0c0"/>
+  <rect x="376" y="186" width="110" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="431" y="203" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">feed-forward W</text>
+  <line x1="486" y1="198" x2="556" y2="198" stroke="#5ee0c0" marker-end="url(#c2)"/>
+  <text x="600" y="202" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">next block</text>
+  <text x="2" y="254" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Fifty of the lower diagram in series is the model. The nonlinear junction between stages is the only reason it is not one big resistor.</text>
+</svg>
+
+## Series and parallel — the exact import
+
+This is the most useful thing the circuit reading gives, and it is exact rather than suggestive.
+
+- **Parallel.** Add another branch and **capacity adds up**. Three resistors in parallel carry more total current; three cards running three separate renders finish three clips in the time of one. This works on this box today, needs no engine code, and scales linearly.
+- **Series.** The **same current flows through every element**, impedances (and latencies) **add**, and the **slowest element sets the pace**. A chain of stages is series. Splitting a chain across more silicon does not make one pass through it faster — it spreads the same sequential work out and adds a hand-off at every boundary.
+
+That is Kirchhoff restated for compute: **in parallel, throughputs sum; in series, latencies sum and the bottleneck dominates.**
+
+<svg viewBox="0 0 760 280" width="100%" style="max-width:920px" role="img" aria-label="Parallel versus series drawn as timelines. Three independent renders on three cards finish in the time of one, tripling output. A pipeline chain hands one render between three cards: only one card computes at a time, the others are idle, and the total time is unchanged plus the hand-offs.">
+  <defs>
+    <marker id="c3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">PARALLEL — THREE SEPARATE RENDERS</text>
+  <text x="2" y="42" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">card 0</text>
+  <rect x="60" y="30" width="600" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="360" y="45" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">render A — start to finish</text>
+  <text x="2" y="70" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">card 1</text>
+  <rect x="60" y="58" width="600" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="360" y="73" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">render B — start to finish</text>
+  <text x="2" y="98" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">card 2</text>
+  <rect x="60" y="86" width="600" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="360" y="101" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">render C — start to finish</text>
+  <text x="668" y="73" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">3× output</text>
+  <text x="668" y="90" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">same latency</text>
+  <line x1="2" y1="124" x2="758" y2="124" stroke="#232c3b"/>
+  <text x="2" y="150" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SERIES — ONE RENDER SPLIT INTO THREE STAGES</text>
+  <text x="2" y="178" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">card 0</text>
+  <rect x="60" y="166" width="196" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="158" y="181" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">blocks 0–16</text>
+  <rect x="262" y="166" width="398" height="20" rx="3" fill="#12161f" stroke="#232c3b"/>
+  <text x="460" y="181" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">idle</text>
+  <text x="2" y="206" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">card 1</text>
+  <rect x="60" y="194" width="200" height="20" rx="3" fill="#12161f" stroke="#232c3b"/>
+  <text x="160" y="209" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">idle</text>
+  <rect x="266" y="194" width="192" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="362" y="209" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">blocks 17–33</text>
+  <rect x="464" y="194" width="196" height="20" rx="3" fill="#12161f" stroke="#232c3b"/>
+  <text x="562" y="209" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">idle</text>
+  <text x="2" y="234" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">card 2</text>
+  <rect x="60" y="222" width="404" height="20" rx="3" fill="#12161f" stroke="#232c3b"/>
+  <text x="262" y="237" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">idle</text>
+  <rect x="470" y="222" width="190" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="565" y="237" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">blocks 34–49</text>
+  <path d="M258,186 L266,194" fill="none" stroke="#ffb454" marker-end="url(#c3)"/>
+  <path d="M460,214 L470,222" fill="none" stroke="#ffb454" marker-end="url(#c3)"/>
+  <text x="668" y="209" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">1× output</text>
+  <text x="668" y="226" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">plus hand-offs</text>
+  <text x="2" y="268" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">Exactly one card computes at any instant in the lower diagram. Three cards, one render, no speed-up — and two 0.27 GB hand-offs per step on top.</text>
+</svg>
+
+### Two kinds of work, and only one divides
+
+- **Parallel work** is independent and divides perfectly. Nine painters on nine walls finish in the time of one.
+- **Sequential work** needs the previous result before it can start, so it cannot be split at all. Nine painters cannot apply the second coat before the first is dry.
+
+The denoise is sequential on **two** axes at once. Step $t+1$ needs the full output of step $t$; and inside a step, block $n+1$ needs block $n$'s activation. Neither dependency can be argued away — they are what the model *is*.
+
+And when the split is attempted *within* a step — different blocks on different cards — the cards must pass the intermediate activation across the link at every stage boundary: **0.27 GB per hand-off**, at **4.9 GB/s**, which is *slower* than fetching the same data from system RAM at ~12 GB/s. That is the **communication tax**, and on this board it frequently costs more than the compute it distributes.
+
+### The shared rail
+
+There is a third element in the circuit that is easy to forget because it has no fan on it: **system memory is a shared supply**. Every card streams its weights out of the same DDR3-1600 pool, which reads at roughly **25 GB/s** in total, while each card's PCIe link can accept about **12 GB/s**.
+
+One card streaming leaves the supply comfortable. Three cards each streaming a full copy of the model would ask for something like 36 GB/s from a 25 GB/s source — and a supply that cannot deliver the demanded current simply sags, slowing every branch at once. In circuit terms the branches are not independent after all; they share a source impedance.
+
+This is why "each process loads its own copy" is such an expensive mistake, and it is not hypothetical: the off-the-shelf three-process ring path failed here precisely because the offloading machinery re-copied the weights per process. That failure showed up first as an out-of-memory error — the capacity cost — but the bandwidth cost was queued up right behind it. **One resident copy of the model, streamed to whichever card needs it, is not merely tidier; it is the only arrangement the supply can serve.**
+
+### The third import: the largest element sets the pace
+
+In a series circuit, the biggest impedance dominates the current, and improving any other element barely moves the needle. Compute has the same law under a different name — Amdahl's — and it can be written as one fraction. With $p$ the fraction of the total that a fix applies to, and $s$ the factor by which that fraction improves:
+
+$$\text{speed-up} = \frac{1}{(1-p) + \dfrac{p}{s}}$$
+
+The consequence is unintuitive until it has happened once: **an infinite improvement to a small element yields almost nothing**, and the moment a big element is fixed, whatever was second-largest becomes the new ceiling. This project has walked into that twice, both times measured.
+
+<div class="callout warn"><span class="t">Two measured cases of the new bottleneck appearing</span>
+<p><b>The step-count fix that hit an upscale wall.</b> The Turbo variant cut sampling roughly <b>5×</b> — 20 steps down to 4–8. At 1080p output, that made the <em>upscale</em> of 362 frames the dominant cost, and the total barely improved. Rendering at 720p instead kept the tail small enough for the sampling win to survive. Killing the largest element promoted the next one.</p>
+<p><b>The memory fix that hit a decode wall.</b> Chunking the int8 matmul dropped the sampling allocated peak from <b>5925 MB to 3887 MB</b> — a real 2 GB, bit-identical. The whole-run peak moved only from <b>7840 MB to 7570 MB</b>, because the VAE decode phase now capped the total. Classic series behaviour: the wall moved, it did not disappear.</p></div>
+
+The second case has a tail worth telling, because it is a lesson about instruments rather than about circuits. When the decode phase was probed directly, its own allocated peak turned out to be only **1162 MB**. The apparent 7.6 GB decode wall was *leftover reserved pool* from the sampling phase, not decode consumption — the meter had been reporting what the allocator held rather than what the phase used, and an earlier claim in this project's notes was retracted on that basis.
+
+<div class="callout truth"><span class="t">Series reasoning is only as good as the meter</span>
+<p>Identifying "the largest element" requires a measurement that attributes cost to the right component. Reserved memory is not used memory; total step time is not kernel time. Both mistakes have been made here, and both produced a confident plan aimed at the wrong element.</p></div>
+
+## The scheme the circuit reading found — and the study that killed it
+
+Start with the wall, honestly stated. Three cards hold 8 GB each. That is **not** a 24 GB card, and the difference matters exactly the way it does in a circuit: capacities only sum when the work divides across the branches.
+
+<div class="callout danger"><span class="t">Why "24 GB total" does not mean the model fits</span>
+<p>The full int8 transformer the design study was written against is <b>33 GB</b> — larger than 24 GB, so it never fit. The pruned int8 file this box actually runs is <b>20 GB</b>, which is <em>smaller</em> than 24 GB, and it still does not fit. Split three ways that is about 6.7 GB of weights per card; add ~1.2 GB of CUDA context and there is nothing left for the activation, which needs several gigabytes more.</p>
+<p>Aggregate VRAM is a sum on paper only. Each card must independently hold its own share <em>plus</em> the working state, and it is the working state that is decisive.</p></div>
+
+So the circuit reading reached for a second move. A stage-pipeline is a **series** arrangement, so only one card computes at a time and the other two sit idle on free VRAM. The idea writes itself: fill that idle space with prefetched blocks, so that instead of streaming all 50 blocks per step from RAM, some are already resident on the cards. This project wrote it down as a **1.3–1.5× single-render win** and commissioned a design study to build it.
+
+The study disproved it.
+
+<div class="callout warn"><span class="t">The prediction, and the finding</span>
+<p>Written down beforehand: <b>1.3–1.5×</b> faster on one render. The design study's honest number: <b>~1.0×, range 0.9–1.1×, possibly slightly negative</b> once pipeline bubbles and two per-step hidden-state hops are counted.</p>
+<p>Three architectural facts defeat it, any one of which is close to fatal on its own — and none of them is a tuning problem.</p></div>
+
+**One — pipelining raises throughput, not single-render latency.** Pipeline parallelism keeps every stage busy by feeding it *different* samples. One render has one latent and one active step; at any instant exactly one card computes and two idle. This is the series diagram above, and no amount of engineering changes a series arrangement into a parallel one.
+
+**Two — the activation evicts the cache exactly when it is needed.** This is the mechanism worth drawing, because it is not obvious from the outside.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="A card's VRAM budget in two states. While idle, 1.2 GB of CUDA context leaves 6.46 GB free, enough to cache nine or ten transformer blocks. The moment the card becomes the computing stage it must host a 5.7 GB activation, leaving 0.76 GB — room for exactly one block — so the entire cache is evicted before any of it can be used.">
+  <defs>
+    <marker id="c4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L7,4 L0,8 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME CARD, BEFORE AND AFTER IT BECOMES THE ACTIVE STAGE  ·  7.66 GB USABLE</text>
+  <text x="2" y="42" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">IDLE — holding cache only</text>
+  <rect x="2" y="52" width="76" height="44" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="40" y="72" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">context</text>
+  <text x="40" y="88" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="SF Mono,monospace">1.20</text>
+  <rect x="82" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="146" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="210" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="274" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="338" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="402" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="466" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="530" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="594" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="658" y="52" width="60" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="400" y="80" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">6.46 GB free → 9–10 int8 blocks cached</text>
+  <path d="M380,110 L380,144" fill="none" stroke="#ff6b6b" stroke-width="2" marker-end="url(#c4)"/>
+  <text x="394" y="132" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">the hidden state arrives — this card is now the compute stage</text>
+  <text x="2" y="176" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">ACTIVE — computing</text>
+  <rect x="2" y="186" width="76" height="44" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="40" y="206" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">context</text>
+  <text x="40" y="222" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="SF Mono,monospace">1.20</text>
+  <rect x="82" y="186" width="590" height="44" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="377" y="213" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">activation scratch — 5.70 GB — cannot be offloaded</text>
+  <rect x="676" y="186" width="42" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="697" y="213" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="SF Mono,monospace">1</text>
+  <text x="722" y="213" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">0.76</text>
+  <text x="2" y="256" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">Nine of the ten cached blocks are thrown away to make room — before a single one of them is computed.</text>
+  <text x="2" y="276" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Net effect: about 49 of 50 blocks still stream from RAM every step, exactly as on a single card. The cache buys nothing.</text>
+  <text x="2" y="294" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Sizes from the design study, against the 33 GB int8 build: 0.65 GB per block, 5.70 GB activation at ~25k tokens.</text>
+</svg>
+
+The trap in the original arithmetic was subtle and worth naming: it assumed the cache built on an idle card would still be there when that card started computing. But **the card that cached the blocks is the same card that must evict them to compute them.** The two idle caches only ever help a future phase on their own card, and that future phase is precisely the moment of eviction.
+
+**Three — on a board without NVLink, peer-caching is slower than streaming.** The obvious fallback is to cache block *N* on a neighbour and pull it over when needed. Card-to-card runs at **4.9 GB/s**; RAM to card runs at about **12 GB/s**. Fetching from another card is strictly worse than fetching from RAM. The fallback is not merely weak; it is negative.
+
+<div class="callout truth"><span class="t">What the circuit reading got right and wrong</span>
+<p><b>Right:</b> that splitting a series chain adds a communication tax, and that on a 4.9 GB/s link the tax often exceeds the compute it distributes. That prediction has held every time it has been tested here.</p>
+<p><b>Wrong:</b> that the inverse move — <em>feeding</em> the active card from idle ones — would be a free win. It is not, because the activation owns the very VRAM the cache would occupy. The circuit picture models the flow of the <em>signal</em> beautifully and says nothing about where the signal has to be <em>stored</em>. That is the boundary of the analogy, and it is worth knowing where it lies.</p></div>
+
+### The number that was still open — and how it resolved
+
+The study reasoned that the render was **compute-bound**, since the chip's units were pegged, which would cap even a perfect streaming fix at little. A live reading from the streamed single-card path said the opposite: about **100 W of a 200 W limit** with flickering utilisation, the signature of a job starved between blocks.
+
+Both readings were real. They came from different workloads, which is the whole answer.
+
+<div class="callout spec"><span class="t">Predicted versus measured, on the record</span>
+<table>
+<tr><th>Claim</th><th>Predicted</th><th>Measured</th></tr>
+<tr><td>Idle-card block cache, single-render speed-up</td><td>1.3–1.5×</td><td><b>~1.0×</b> (0.9–1.1×), possibly negative</td></tr>
+<tr><td>Bound of the render</td><td>compute-bound (chip pegged)</td><td><b>Both, depending on the clip</b> — starved at ~100 W on a small streamed render; <b>100% utilisation</b> on the working card during <code>g4final</code></td></tr>
+<tr><td>Cost of 832×480×345 → 1280×704×345</td><td>~5× (quadratic attention on 2.26× the tokens)</td><td><b>34×</b> — about 7× overhead beyond the mathematics</td></tr>
+</table>
+<p>The third row is the communication tax made visible. The sharded path works — it produced the first native 720p fifteen seconds on this hardware — and it costs far more than the arithmetic alone predicts, which is exactly what a series arrangement with per-stage hand-offs should do.</p></div>
+
+### What did work
+
+- **Throughput, guaranteed, zero engine code.** Three independent renders, one per card — a linear **3× on total output**. This is the parallel branch of the circuit, and it needs nothing built. If the deliverable is a minute of finished video made of many shots and seeds, this is simply the right answer.
+- **Sequence parallelism, the real single-render lever.** Split the *sequence* across the cards so all three compute the same block simultaneously on their own token shards. This is the physics-correct move: it parallelises compute *and* shrinks the activation wall, which is the actual 8 GB constraint. The study predicted the activation would fall roughly threefold and free room for several resident blocks per card.
+- And it was then **built and measured** (<a href="36-splitting-the-video-cp.html">ch.36</a>, <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>) — including the failure the study did not predict: the off-the-shelf ring path with three processes **ran out of memory**, because the offloading machinery re-copied the weights in every process. Three copies of a streamed model is three times the streaming, not a third.
+
+<div class="callout truth"><span class="t">The transferable lesson</span>
+<p><b>Measure the compute-versus-transfer bound before designing a multi-GPU plan.</b> The block cache attacked a streaming cost that the activation makes uncacheable and that may not even have been the bottleneck for the render in question. The instrumentation that settles it is small — separate kernel time from host-to-device copy time on one known-good render — and it is cheaper than any of the schemes it rules in or out.</p></div>
+
+## Thévenin and compression
+
+Now the second import, which is the reason this chapter exists in a guide about model files.
+
+In circuits, **Thévenin's theorem** says that an arbitrary network of sources and resistances, viewed from two terminals, can be replaced by **one** source and **one** resistance — and the replacement is *exact*. Nothing downstream can tell the difference. The theorem holds because circuits made of linear elements are linear.
+
+Model compression is the same move: replace an expensive sub-network with a smaller stand-in that does nearly the same job.
+
+<table>
+<tr><th>Technique</th><th>What it replaces</th><th>Seen in this project</th></tr>
+<tr><td><b>Low-rank / SVD factorization</b></td><td>$W \approx U\,V$ — store an $m\times k$ and a $k\times n$ instead of a full $m\times n$</td><td>The mechanism behind SVDQuant (<a href="26-serving-h3-real-world.html">ch.26</a>)</td></tr>
+<tr><td><b>Distillation</b></td><td>A large teacher, by a small student trained to imitate it</td><td>How step-reducing Turbo variants are made</td></tr>
+<tr><td><b>Pruning</b></td><td>Weights that barely contribute, deleted outright</td><td><b>The file on this box</b> — the transformer we run is the pruned int8 build, 20 GB rather than 33</td></tr>
+<tr><td><b>Quantization</b></td><td>Nothing structural — the same shape, fewer bits per number</td><td>int8 and Q4, and the grid arithmetic in <a href="29-where-numbers-live.html">ch.29</a></td></tr>
+</table>
+
+SVDQuant is the closest thing to a literal Thévenin equivalent applied to a video model: an SVD peels a **low-rank branch** out of the weights to absorb the outliers that resist quantization, so everything remaining collapses cleanly to four bits. Replace the awkward sub-network with a small exact-ish equivalent plus a clean remainder — the theorem's shape exactly, and a direct answer to the shared-scale problem from <a href="29-where-numbers-live.html">ch.29</a>, where one large weight coarsens the grid for its whole group.
+
+## The catch — nonlinearity, and why nothing compresses for free
+
+Here is where the analogy pays its debt. A pure stack of **linear** layers collapses into a single layer, exactly:
+
+$$C\,(B\,(A x)) = (C B A)\,x = M x$$
+
+All fifty weight matrices could be multiplied together into one matrix $M$, and depth would be gone with no loss whatsoever. Which means depth *by itself* is worthless — a hundred linear layers are one linear layer. This is provable, not heuristic, and it is precisely why superposition works in a linear circuit.
+
+What saves the model is the **nonlinearity** $\sigma$ — softmax, GELU — sitting between the layers:
+
+$$C\,\sigma(B\,\sigma(A x)) \neq M x$$
+
+<svg viewBox="0 0 760 254" width="100%" style="max-width:920px" role="img" aria-label="Two stacks compared. Three linear weight matrices in a row fold into a single equivalent matrix M with no loss. The same three matrices with a nonlinearity between each pair cannot be folded — the nonlinear junctions block the collapse, and only approximate compression remains possible.">
+  <defs>
+    <marker id="c5" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="c6" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">LINEAR STACKS FOLD  ·  NONLINEAR STACKS DO NOT</text>
+  <rect x="2" y="34" width="96" height="36" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="50" y="57" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="SF Mono,monospace">A</text>
+  <line x1="100" y1="52" x2="126" y2="52" stroke="#6f7b8f" marker-end="url(#c5)"/>
+  <rect x="130" y="34" width="96" height="36" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="178" y="57" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="SF Mono,monospace">B</text>
+  <line x1="228" y1="52" x2="254" y2="52" stroke="#6f7b8f" marker-end="url(#c5)"/>
+  <rect x="258" y="34" width="96" height="36" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="306" y="57" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="SF Mono,monospace">C</text>
+  <line x1="360" y1="52" x2="420" y2="52" stroke="#5ee0c0" marker-end="url(#c5)"/>
+  <text x="390" y="42" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">folds</text>
+  <rect x="426" y="34" width="130" height="36" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="491" y="57" text-anchor="middle" fill="#eafff8" font-size="12" font-family="SF Mono,monospace">M = CBA</text>
+  <text x="570" y="50" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">exact — nothing is lost</text>
+  <text x="570" y="66" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">and depth was useless</text>
+  <line x1="2" y1="96" x2="758" y2="96" stroke="#232c3b"/>
+  <rect x="2" y="120" width="96" height="36" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="50" y="143" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="SF Mono,monospace">A</text>
+  <path d="M104,120 L124,138 L104,156 z" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="114" y="174" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="SF Mono,monospace">σ</text>
+  <rect x="130" y="120" width="96" height="36" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="178" y="143" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="SF Mono,monospace">B</text>
+  <path d="M232,120 L252,138 L232,156 z" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="242" y="174" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="SF Mono,monospace">σ</text>
+  <rect x="258" y="120" width="96" height="36" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="306" y="143" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="SF Mono,monospace">C</text>
+  <line x1="360" y1="138" x2="420" y2="138" stroke="#ff6b6b" marker-end="url(#c6)"/>
+  <text x="390" y="128" text-anchor="middle" fill="#ff6b6b" font-size="10" font-family="Inter,sans-serif">blocked</text>
+  <rect x="426" y="120" width="130" height="36" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="491" y="143" text-anchor="middle" fill="#ffdede" font-size="12" font-family="SF Mono,monospace">no exact M</text>
+  <text x="570" y="136" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">only approximation is possible</text>
+  <text x="570" y="152" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">and depth is now doing work</text>
+  <rect x="2" y="196" width="756" height="52" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="20" y="218" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">The junction that makes the model powerful is the same junction that makes exact compression impossible.</text>
+  <text x="20" y="238" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Lossless would mean linear, and a linear model cannot make a face.</text>
+</svg>
+
+<div class="callout truth"><span class="t">The nonlinearity is both the power and the wall</span>
+<p>The <b>same</b> junction that gives the model its capability — without it, depth is worthless and the entire stack is one flat matrix — is <b>exactly why it cannot be collapsed for free</b>. Thévenin's clean guarantee dies at the first nonlinearity. Past that point only <em>approximate</em>, lossy compression is on the table.</p>
+<p>That is not a failure of technique. It is the reason the model works at all. Lossy compression is the only game because lossless would imply linearity, and a linear model cannot make a face.</p></div>
+
+There is a satisfying footnote to that. The one compression this project performed that *was* exactly lossless — chunking the int8 matmul in <a href="29-where-numbers-live.html">ch.29</a>, proven bit-identical — was not a compression of the model at all. It changed the order in which the same arithmetic was carried out. The theorem is not violated: nothing about the network was replaced, so nothing about the network was lost. Every genuine free win on this box has had that character.
+
+<div class="callout truth"><span class="t">Six things this lens gives, for free</span>
+<ol>
+<li><b>A model is a circuit:</b> activations are the signal, weights are the impedances, activation functions are the nonlinear junctions.</li>
+<li><b>Parallel adds throughput; series adds latency.</b> Three independent renders work today; a pipeline chain cannot make one render faster.</li>
+<li><b>The denoise is sequential on two axes</b> — across steps and across blocks — and splitting inside a step pays 0.27 GB per hand-off at 4.9 GB/s.</li>
+<li><b>Idle cards as a weight cache does not work:</b> predicted 1.3–1.5×, found ~1.0×. The 5.70 GB activation evicts the cache the instant a card computes, and peer transfer is slower than RAM.</li>
+<li><b>Thévenin ↔ compression:</b> low-rank, distillation, pruning and quantization all replace something expensive with a smaller stand-in. This box runs a pruned model, so it is living in that theorem already.</li>
+<li><b>Nonlinearity blocks the free collapse</b> — which is simultaneously the reason depth is worth anything and the reason exact compression is impossible.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">series / parallel</span><span class="badge">impedance</span><span class="badge">superposition</span><span class="badge">Thévenin equivalent</span><span class="badge">nonlinear junction</span><span class="badge">pipeline parallelism</span><span class="badge">throughput vs latency</span><span class="badge">communication tax</span><span class="badge">peer-to-peer</span><span class="badge">activation scratch</span><span class="badge">cache eviction</span><span class="badge">sequence / context parallelism</span><span class="badge">low-rank factorization</span><span class="badge">distillation</span><span class="badge">pruning</span><span class="badge">lossy vs lossless</span></p>
+<p>If those feel solid, the practical question they were all pointing at is ready to be asked.</p></div>
+
+Next: what all of this means for the thing actually wanted — long video on a small card, and the honest ways to get it.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

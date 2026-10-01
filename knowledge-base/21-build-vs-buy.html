@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>21 · Can We Beat the Hardware by Building?</title>
+<meta name="description" content="Whether software can substitute for a bigger GPU: what the historical record says, the two floors physics genuinely enforces, and the wall this chapter put at zero odds that code later crossed anyway.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 21 · Building instead of buying</span>
+
+# Can Software Beat the Hardware Wall?
+
+<p class="lede">Software beat it. This chapter was written to answer a builder's question — "can we <em>build</em> our way past the 8&nbsp;GB wall instead of buying a bigger card?" — and its careful answer was <b>an order of magnitude, then no further</b>. It put native 720p video on this hardware at roughly <b>zero percent</b>. That render exists. What follows is the original reasoning kept intact, the two floors that really are unbreakable, and a precise account of which sentence was wrong and why.</p>
+
+The framing below is the part that survived completely, so it is worth stating before anything else.
+
+<div class="callout truth"><span class="t">The question that actually matters</span>
+<p>It is not "software versus hardware". It is <b>"which layer is the bottleneck, and does cleverness there buy a <em>constant factor</em> or break a <em>scaling law</em>?"</b> That single distinction tells a builder when to keep building and when months are being burned to lose to physics. Everything else in this chapter is an application of it — including the place where it was applied to the wrong quantity.</p></div>
+
+## 1 · The historical case for software — and what *kind* of win each was
+
+There is a real, repeated pattern where "buy a bigger machine" turned out to be the wrong answer. Each of those wins falls into one of three buckets, and the bucket predicts the ceiling.
+
+<svg viewBox="0 0 760 244" width="100%" style="max-width:920px" role="img" aria-label="Three kinds of software win and their ceilings: IO-layout and constant-factor wins of two to twenty times, representation wins of two to eight times bounded by information theory, and algorithmic wins of two to four times — none of which creates FLOPs or bytes the silicon lacks.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">EVERY FAMOUS "THE HARDWARE WAS FINE" WIN FITS ONE OF THREE BUCKETS</text>
+  <rect x="2" y="30" width="246" height="150" rx="8" fill="#151b26" stroke="#7aa2ff"/>
+  <text x="125" y="54" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">IO-layout / constant factor</text>
+  <text x="125" y="76" text-anchor="middle" fill="#7aa2ff" font-size="16" font-family="SF Mono,monospace">2x - 20x</text>
+  <text x="20" y="102" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">same maths, fewer bytes moved</text>
+  <text x="20" y="124" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">FlashAttention · PagedAttention</text>
+  <text x="20" y="140" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">the int8 chunk patch on this box</text>
+  <text x="20" y="164" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">stacks with future hardware</text>
+  <rect x="258" y="30" width="246" height="150" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="381" y="54" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">representation</text>
+  <text x="381" y="76" text-anchor="middle" fill="#5ee0c0" font-size="16" font-family="SF Mono,monospace">2x - 8x</text>
+  <text x="276" y="102" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">same information, fewer bits</text>
+  <text x="276" y="124" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">llama.cpp / GGUF · QLoRA</text>
+  <text x="276" y="140" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">the demoscene · int8 and Q4 here</text>
+  <text x="276" y="164" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">bounded by information theory</text>
+  <rect x="514" y="30" width="244" height="150" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="636" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">algorithmic</text>
+  <text x="636" y="76" text-anchor="middle" fill="#aab4c5" font-size="16" font-family="SF Mono,monospace">2x - 4x</text>
+  <text x="532" y="102" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">less work for the same output</text>
+  <text x="532" y="124" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">speculative decoding</text>
+  <text x="532" y="140" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">step distillation</text>
+  <text x="532" y="164" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">occasionally more, rarely</text>
+  <rect x="80" y="196" width="600" height="44" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="380" y="216" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">None of the three creates FLOPs or bytes the silicon does not have.</text>
+  <text x="380" y="234" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Stacked, they are an order of magnitude — often the whole gap between "impossible" and "slow but works".</text>
+</svg>
+
+**FlashAttention — IO-layout.** Dao and colleagues did not change the attention mathematics; the result is *exact*. They made it **IO-aware**, tiling the computation so the giant score matrix never touches slow memory. Result: **3× on GPT-2**, and attention's memory cost became linear instead of quadratic ([arXiv:2205.14135](https://arxiv.org/abs/2205.14135)). The purest demonstration that the hardware was fine and the software was using it stupidly — and structurally the same problem this project faces.
+
+**llama.cpp / ggml / GGUF — lean runtime plus representation.** A pure-C reimplementation ran LLaMA on a laptop CPU with no Python, no CUDA, no framework. Two levers at once: a zero-bloat tensor engine, and quantization shrinking a 7B model to roughly 4 GB ([llama.cpp](https://github.com/ggml-org/llama.cpp)). **This is the single most important precedent for a project like this one: a lean custom runtime plus quantization beat the assumption that a datacenter GPU was required — for *inference*.** That last word carries weight.
+
+**The demoscene and .kkrieger — representation taken to the limit.** A complete 3D first-person shooter in a **96 KB** file, where the conventional build would be 200–300 MB, achieved by shipping the *code that generates* textures and meshes rather than the pixels ([.kkrieger](https://en.wikipedia.org/wiki/.kkrieger)). The hard edge is instructive: it trades **storage for compute**. Magic when the bottleneck is bytes at rest; useless when the bottleneck is FLOPs in flight, which is the case here.
+
+**QLoRA — representation applied to training.** Finetuned a **65B model on a single 48 GB GPU** at full quality, via 4-bit weights and small adapters ([arXiv:2305.14314](https://arxiv.org/abs/2305.14314)). Read the number that matters: **48 GB**, for a *language* model. A 33B *video* model's per-step activations are far heavier. Proof that the technique exists, and proof of how much memory it still needs.
+
+**vLLM and PagedAttention — systems IO-layout.** Treat the KV cache like paged operating-system memory; fragmentation fell from 60–80% to under 4%, giving **2–4× throughput on the same GPUs** ([arXiv:2309.06180](https://arxiv.org/abs/2309.06180)).
+
+**Speculative decoding — algorithmic.** A small draft model proposes, the large one verifies in parallel: **2–3× faster, identical output** ([arXiv:2211.17192](https://arxiv.org/abs/2211.17192)).
+
+**tinygrad — the ethos.** A sub-1,000-line framework whose thesis is that one beats the incumbent through *software sovereignty, not hardware* ([tinygrad](https://geohot.spicytakes.org/post/2025-12-29-five-years-of-tinygrad)). Inspiring, with a caveat: its job is to make *owned hardware* usable, not to conjure capacity that is not there.
+
+<div class="callout spec"><span class="t">The pattern</span>
+<p>Every win above is a constant factor or a representation change. <b>Not one of them broke a scaling law.</b> That is not pessimism — 3× times 2× times 2× is an order of magnitude. It simply has a ceiling, and the ceiling is physics.</p></div>
+
+## 2 · The physics floor — what software provably cannot do
+
+Two walls, stated as they were stated originally:
+
+1. **FLOPs the silicon cannot produce cannot be executed.** The card has a fixed peak; the best kernel only *approaches* it.
+2. **More live bytes cannot be held than VRAM plus streamable RAM.** Bytes can be *moved* — streaming weights is exactly that. But bytes that must be *simultaneously live* for a step have to fit in 8 GB during that step.
+
+The precise tool is the **roofline model**: performance is bounded by peak compute *and* peak bandwidth, and tiling, fusion and caching move a workload *toward* the roofline without ever lifting the roof ([roofline](https://modal.com/gpu-glossary/perf/roofline-model)).
+
+Wall one is unconditionally true. Wall two is where the chapter's error lives, and it is a small one — a single missing word.
+
+<svg viewBox="0 0 760 236" width="100%" style="max-width:920px" role="img" aria-label="The error in the second physics wall: the simultaneously-live bytes of a step must fit in one device's memory, not in one render's memory, so splitting the token sequence across three cards keeps the rule intact while removing the limit it appeared to impose.">
+  <defs>
+    <marker id="b1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE RULE IS TRUE. THE MISSING WORD IS "PER DEVICE".</text>
+  <rect x="2" y="30" width="366" height="90" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="20" y="54" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">AS WRITTEN</text>
+  <text x="20" y="78" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">"bytes that must be simultaneously live for a</text>
+  <text x="20" y="96" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">step must fit in 8 GB during that step"</text>
+  <text x="20" y="114" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">reads as: one render, one card, 8 GB, full stop</text>
+  <rect x="392" y="30" width="366" height="90" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="410" y="54" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">AS IT ACTUALLY CONSTRAINS</text>
+  <text x="410" y="78" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">bytes simultaneously live ON ONE DEVICE must</text>
+  <text x="410" y="96" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">fit in that device's 8 GB</text>
+  <text x="410" y="114" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">three devices, one step, three separate budgets</text>
+  <rect x="2" y="136" width="180" height="60" rx="6" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="4" y="138" width="34" height="56" rx="3" fill="#1f2230"/>
+  <text x="21" y="172" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">ctx</text>
+  <rect x="40" y="138" width="118" height="56" rx="3" fill="#241a1a"/>
+  <text x="99" y="172" text-anchor="middle" fill="#ffdede" font-size="11" font-family="SF Mono,monospace">5.70 GB</text>
+  <text x="90" y="212" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">one card: 0.76 GB free</text>
+  <line x1="196" y1="166" x2="236" y2="166" stroke="#5ee0c0" marker-end="url(#b1)"/>
+  <text x="216" y="156" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">split the tokens</text>
+  <rect x="252" y="136" width="150" height="18" rx="3" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="254" y="138" width="28" height="14" rx="2" fill="#1f2230"/>
+  <rect x="284" y="138" width="40" height="14" rx="2" fill="#14342c"/>
+  <rect x="252" y="158" width="150" height="18" rx="3" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="254" y="160" width="28" height="14" rx="2" fill="#1f2230"/>
+  <rect x="284" y="160" width="40" height="14" rx="2" fill="#14342c"/>
+  <rect x="252" y="180" width="150" height="18" rx="3" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="254" y="182" width="28" height="14" rx="2" fill="#1f2230"/>
+  <rect x="284" y="182" width="40" height="14" rx="2" fill="#14342c"/>
+  <text x="327" y="212" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">three cards: 4.56 GB free each</text>
+  <rect x="424" y="136" width="334" height="76" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="444" y="160" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">No byte was compressed. No information was lost.</text>
+  <text x="444" y="180" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">The scaling law is untouched: the tokens still exist.</text>
+  <text x="444" y="202" fill="#ffb454" font-size="12" font-family="Inter,sans-serif">They are simply not all in the same place at once.</text>
+</svg>
+
+### Applied to the activation wall
+
+Roughly 88% of the peak was activation and quantization working buffers; weights already stream, so weight-side tricks were largely spent ([ch.12](12-pushing-past-8gb.html)). The battle was peak *activation* memory, and three levers were assessed with honest ceilings:
+
+- **Tiling and chunking — the big one.** Peak activation memory is a function of *how much is computed at once*, so a frame can be processed in pieces, trading more slow sequential passes for a lower peak. The catch specific to H3: **global and temporal attention couple tokens across the whole clip**, and where attention is genuinely global, tiling either breaks correctness or forces recompute that eats the saving.
+- **4-bit activations.** Ampere has INT4 but no FP8 or FP4, and softmax, normalisation and the flow-ODE state need higher precision or quality collapses. Realistic gain of about **1.5–2×** on the quantizable part, with per-layer quality risk.
+- **Fused kernels.** Pure upside on peak memory, worth doing all of it, but single-digit percentages once the large buffers dominate.
+
+Note what is *not* in that list: dividing the sequence. All three levers ask how to make the working set smaller. None asks whether it needs to be in one place.
+
+## 3 · The odds, quoted — and the render that exists
+
+This is the passage worth preserving exactly, because it was specific enough to be checked.
+
+> **"Native single-pass 720p on one 8 GB card: ~0%.** Scaling-law wall, not an engineering gap. You were right to call it physics."
+>
+> **"720p via both cards as a 16 GB pipeline: ~55–70% for *offline batch*, ~15% for anything latency-sensitive.** Your 4.9 GB/s no-NVLink link is the assassin."
+
+And, elsewhere in the chapter, the sharpest claim of all:
+
+> *"Two more 8 GB cards don't help — your bottleneck is peak live bytes in a single step, and your interconnect can't pool them cheaply."*
+
+<div class="callout danger"><span class="t">What happened instead</span>
+<table>
+<tr><th>Claim</th><th>Verdict</th></tr>
+<tr><td>"Native single-pass 720p on <b>one</b> 8 GB card: ~0%"</td><td>✅ <b>Still correct.</b> No single 8 GB card renders it, and none ever did</td></tr>
+<tr><td>"~55–70% for offline batch" across cards</td><td>✅ <b>Landed inside the estimate</b> — and it is exactly an offline batch, never latency-sensitive</td></tr>
+<tr><td>"Two more 8 GB cards don't help"</td><td>❌ <b>Wrong, and it was the load-bearing claim.</b> A third identical 8 GB card is what made native 1280×704 × 345 frames render</td></tr>
+<tr><td>"Your interconnect can't pool them cheaply"</td><td>⚠️ <b>Right about the price, wrong about the verdict.</b> It pooled them expensively: 34× the time where the maths predicts 5×</td></tr>
+</table>
+<p>The honest reading is that the estimate was defeated by <b>one word in its own physics rule</b>, not by a breakthrough. "Peak live bytes in a single step" is a per-device quantity. The chapter treated it as a per-render one.</p></div>
+
+The interconnect deserves its own paragraph, because the fear behind that claim was well-founded and the escape is specific. The link between cards runs at **4.9 GB/s**, against roughly **12 GB/s** from system RAM — which is why the chapter's instinct was right that crossing it *per layer* would be fatal. A tensor-parallel scheme does exactly that. Sequence parallelism does not: the sequence is split once, each card computes its own token shard, and what crosses the link is coordination, not the model. For scale, streaming the model itself already moves about **0.4 GB per block**, which is roughly **460 GB across PCIe for a single 23-step render** — the weights, not the activations, are what saturate the bus.
+
+<svg viewBox="0 0 760 216" width="100%" style="max-width:920px" role="img" aria-label="Why a slow interconnect did not forbid multi-GPU rendering: a tensor-parallel split would cross the 4.9 GB per second link inside every one of fifty blocks, while a sequence split crosses it for coordination only, leaving the dominant traffic as the weight streaming that already happens on a single card.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE LINK IS SLOW — WHAT MATTERS IS HOW OFTEN IT IS CROSSED</text>
+  <rect x="2" y="30" width="366" height="126" rx="8" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="20" y="54" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">SPLIT INSIDE EACH LAYER</text>
+  <text x="20" y="74" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">tensor parallelism — the scheme the chapter feared</text>
+  <rect x="20" y="86" width="46" height="26" rx="3" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="74" y="86" width="46" height="26" rx="3" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="128" y="86" width="46" height="26" rx="3" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="182" y="86" width="46" height="26" rx="3" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="236" y="86" width="46" height="26" rx="3" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="290" y="86" width="60" height="26" rx="3" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="320" y="104" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="SF Mono,monospace">x50</text>
+  <text x="20" y="134" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">a crossing inside every block, every step</text>
+  <text x="20" y="150" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">4.9 GB/s becomes the clock rate of the whole render</text>
+  <rect x="392" y="30" width="366" height="126" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="410" y="54" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">SPLIT THE SEQUENCE</text>
+  <text x="410" y="74" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">each card owns a third of the tokens, start to finish</text>
+  <rect x="410" y="86" width="106" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="463" y="104" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="SF Mono,monospace">tokens 1/3</text>
+  <rect x="524" y="86" width="106" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="577" y="104" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="SF Mono,monospace">tokens 2/3</text>
+  <rect x="638" y="86" width="106" height="26" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="691" y="104" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="SF Mono,monospace">tokens 3/3</text>
+  <text x="410" y="134" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">the link carries coordination, not the model</text>
+  <text x="410" y="150" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the dominant traffic is still RAM to VRAM, as on one card</text>
+  <rect x="60" y="172" width="640" height="42" rx="8" fill="#2a2420" stroke="#ffb454"/>
+  <text x="380" y="192" text-anchor="middle" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">It still cost 34x the time where the mathematics predicts 5x.</text>
+  <text x="380" y="208" text-anchor="middle" fill="#c9a06a" font-size="11" font-family="Inter,sans-serif">Roughly 7x of pure coordination overhead. Feasible, not cheap — the fear was priced correctly.</text>
+</svg>
+
+## 4 · "Build our own programming language" — is it ever the lever?
+
+The blunt version: **a general-purpose language gives zero compute or memory advantage.** Wrong layer, multi-year trap. But that phrase hides four different things, and three of them are real levers.
+
+<div class="callout spec"><span class="t">The four things "build our own language" could mean</span>
+<ul>
+<li><b>(a) A DSL or compiler for GPU kernels — yes, and this project is already there.</b> Triton, Halide's decoupling of algorithm from schedule, TVM's auto-tuning across backends. The much-quoted "35,000×" from Mojo is escaping Python's interpreter, not a general speedup. <b>The highest-payoff layer available.</b></li>
+<li><b>(b) A lean custom inference runtime — yes, high payoff. The llama.cpp move.</b> A general graph engine carries overhead an H3-only pipeline does not need; a stripped runtime with its own allocator, tiling scheduler and streaming is where the first VRAM wins came from. <b>The single best "build" investment on the list.</b></li>
+<li><b>(c) Custom kernels — yes, already winning.</b> The int8 work beat the stock path on this box. Next: attention tiling for H3's specific pattern.</li>
+<li><b>(d) A general-purpose language — no. The year-long trap. Don't.</b></li>
+</ul>
+<p><b>The rule: build at the layer where the bottleneck lives — kernel or runtime — and buy or reuse everything above it.</b></p></div>
+
+<div class="callout truth"><span class="t">Item (b) was the prediction that came true</span>
+<p>ComfyUI has since been <b>removed from the box entirely</b>, and the pipeline is this project's own: a two-phase diffusers-based engine with block streaming, its own decode path, and its own memory discipline ([ch.48](48-the-pipeline-without-comfyui.html)). The chapter called the lean custom runtime the best available investment before it was built, and it was. It is also what made the three-card work possible at all — the wall fell because there was an engine to change.</p></div>
+
+## 5 · Build, buy, or rent
+
+<div class="callout truth"><span class="t">Reframing the ethos, because it does damage</span>
+<p><b>Renting compute for one measured job is not "being a consumer" — it is using a utility.</b> Nobody owns the power plant behind a wall socket. The consumer trap is <em>reflexively</em> buying capacity to avoid thinking. Renting a machine for a single, pre-planned run — <em>after</em> the work has been engineered to be cheap — is the opposite of that. It is surgical.</p></div>
+
+**Free tiers, to exploit before spending anything:**
+
+- **Kaggle** — roughly 30 GPU-hours a week on a T4 or P100, **16 GB, twice the VRAM of the cards here.** Free hardware strictly better than what is owned, for adapter experiments and short jobs.
+- **Google Colab free tier** — T4 16 GB, roughly 15–30 hours a week, preemptible. Good for interactive development, unreliable for long unattended runs.
+
+**One-off rental, at the prices surveyed:**
+
+- A100 40–80 GB at roughly **$0.39–0.90 per hour**.
+- H100 80 GB at roughly **$1.05–2.75 per hour**.
+- What that means in practice: an adapter finetune of about 24 GPU-hours costs **$10–20, once.**
+
+<div class="callout truth"><span class="t">The number that should reset a builder's priors</span>
+<p>The thing that is <b>physically impossible</b> on an 8 GB card is often a coffee's worth of one-off rental — <em>provided</em> the engineering has been done so the run takes minutes. Renting once is not consumerism when the job is (1) finite and defined, (2) impossible on owned hardware for scaling-law reasons, and (3) preceded by the builder's own engineering. Renting <em>continuously to avoid learning the stack</em> is the trap.</p></div>
+
+**On used hardware**, the chapter's advice was to buy VRAM in one card rather than more cards over a slow link. That advice is still correct *for time* and was wrong *for feasibility* — which is the whole lesson of this page, and worth being precise about: a single 24 GB card would render the same clip without paying a 7× coordination tax. It would have been the better purchase. It was not the necessary one.
+
+## What building actually delivered on this box
+
+Concrete, measured, and all of it software on hardware that never changed except by adding a third copy of the same cheap card:
+
+| Built | Measured result |
+|---|---|
+| Exact row-chunked int8 matmul | sampling peak 5,925 → **3,887 MB**, bit-identical (`torch.equal` true) |
+| The resolution that freed | 15 s native ceiling 576×320 → **768×448 — 1.87× the pixels**, zero quality cost |
+| Q4 engine as the default | **2.05× faster** than the patched int8 path, +47% native pixels, lower peak VRAM, quality a tie |
+| Online-softmax attention | full score matrix never materialised |
+| Own pipeline, no general graph engine | ComfyUI removed; two-phase encode / denoise-and-decode |
+| Three-GPU sequence parallelism | **native 1280×704 × 345 frames**, a size no single card holds |
+| Latent backup and decode chunk offload | a 6-hour denoise survived a decode crash; the 720p decode OOM turned out to be an accumulation bug, not capacity |
+
+<div class="callout warn"><span class="t">And the walls that did not move</span>
+<ul>
+<li><b>Training the 33B on this hardware.</b> Untouched, and no software route to it. The dataset plan still ends in a rented run.</li>
+<li><b>Time.</b> Native 720p at 15 s costs about 44 hours at 23 steps, roughly 90 at 49. Nothing built here changed the exponent — only which machine pays it.</li>
+<li><b>Readable on-screen text.</b> No current video diffusion model can spell. Not a hardware problem at all.</li>
+</ul></div>
+
+## The verdict and the trade-off table
+
+<div class="callout truth"><span class="t">One line, revised</span>
+<p>Software wins a genuine <b>order of magnitude</b>, and then wins one more thing the original estimate did not price: it can change <em>where</em> the work happens. It still cannot break a scaling law — the tokens of a 720p clip exist whether they sit on one card or three, and their cost showed up in full as wall-clock. What software bought was <b>feasibility at a bad exchange rate</b>, which for a builder without a budget is frequently the only rate on offer.</p></div>
+
+| Goal | Cheapest viable path | Money | Effort | Note |
+|---|---|---|---|---|
+| **Better faces and quality** | **Build** — plus, mostly, frame the subject bigger and render native | none | medium | Software's winning zone, and the framing lever is free |
+| **A 720p-looking deliverable** | **Build** — 832×480 at 49 steps, then a mild 1.54× lift | none | low–medium | Sidesteps the scaling law entirely. ~35× cheaper than native |
+| **Native 720p at 15 s** | **Build** — three 8 GB cards, sequence-parallel, offline | none | high | Forecast at ~0%; it renders, in about 44 h |
+| **Native 720p, *fast*** | **Buy** a used 24 GB card | hundreds | low | Still the correct purchase. Time, not feasibility, is what it buys |
+| **Train an adapter** | **Free cloud** first, then **rent once** | about $15 | medium | 8 GB trains nothing; a free 16 GB tier or one A100 run does |
+| **Full 33B finetune** | **Rent** multi-GPU, or don't | a lot | high | Not a software problem. Correct then, correct now |
+| **Long clips** | **Build** — single context where it fits, chaining where it does not | none | medium–high | Time tiles more cleanly than space |
+
+<div class="callout spec"><span class="t">What to do, for a builder who is broke and skilled</span>
+<p>Treat the cards as a fixed inference <em>lab</em> rather than a capacity to expand, and spend the hours at the layer where a lone builder genuinely beats the buy-more crowd: <b>kernels and a lean, model-specific runtime</b>. That is what the FlashAttention and llama.cpp precedents actually say, and it is what happened here — the pipeline that replaced the general engine is the same pipeline that could then be taught to split a sequence across three cards. Ship pristine 480p with a gentle upscale for the deliverables. Use free tiers before spending anything. And the one time capacity is genuinely required that the silicon cannot produce — a real training run — engineer it to run in minutes, rent the machine once for the price of lunch, and feel nothing about it. Paying to use a machine one has engineered to need for twenty minutes is not consumerism. It is the position of someone who understood the problem well enough to rent only the part physics will not give away.</p></div>
+
+<p class="small">Two caveats on the estimates in section 2, kept from the original: the tiling odds were reasoned engineering priors, not measurements, and the claim that 16 GB is too tight for an H3 adapter was inferred from video-versus-language activation weight rather than measured on H3. Neither has been tested since. The ceiling map is in <a href="20-how-far-we-can-go.html">ch.20</a>; the full ledger of what renders is in <a href="47-the-scorecard.html">ch.47</a>.</p>
+
+### Sources
+
+FlashAttention [2205.14135](https://arxiv.org/abs/2205.14135) · llama.cpp [repo](https://github.com/ggml-org/llama.cpp) · .kkrieger [wiki](https://en.wikipedia.org/wiki/.kkrieger) · QLoRA [2305.14314](https://arxiv.org/abs/2305.14314) · vLLM / PagedAttention [2309.06180](https://arxiv.org/abs/2309.06180) · Speculative decoding [2211.17192](https://arxiv.org/abs/2211.17192) · tinygrad [essay](https://geohot.spicytakes.org/post/2025-12-29-five-years-of-tinygrad) · Roofline [Modal](https://modal.com/gpu-glossary/perf/roofline-model) · Triton [OpenAI](https://openai.com/index/triton/) · Halide [2012](https://dl.acm.org/doi/10.1145/2185520.2185528) · rental pricing [RunPod / Vast](https://getdeploying.com/runpod-vast-ai), [H100 survey](https://intuitionlabs.ai/articles/h100-rental-prices-cloud-comparison) · free tiers [Kaggle](https://agentdeals.dev/vendor/kaggle), [Colab](https://joshthompson.co.uk/ai/google-colab-2026-guide-free-compute-automations-pro-tips/)
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">constant-factor win</span><span class="badge">representation win</span><span class="badge">algorithmic win</span><span class="badge">scaling law</span><span class="badge">roofline model</span><span class="badge">IO-aware</span><span class="badge">peak live bytes</span><span class="badge">per-device budget</span><span class="badge">tensor parallelism</span><span class="badge">sequence parallelism</span><span class="badge">interconnect</span><span class="badge">P2P bandwidth</span><span class="badge">lean runtime</span><span class="badge">DSL / kernel compiler</span><span class="badge">surgical rental</span></p>
+<p>If those feel solid, the pipeline that all of this was built into is the next thing worth reading end to end.</p></div>
+
+Next: the full pipeline in detail — every stage from prompt to finished file, and where each of the wins above sits inside it ([ch.22](22-pipeline-in-detail.html)).
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

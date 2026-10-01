@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>04 · The Software Stack</title>
+<meta name="description" content="The layers between a graphics card and a model — driver, CUDA, PyTorch, diffusers — why version pairing matters, and how quantization turned 66 GB into 20.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
@@ -12,77 +14,139 @@
 
 # The Software Stack
 
-<p class="lede">Between your GPU and the model sit five layers of software, each translating for the one above it. When something breaks, it's almost always a mismatch between two of these layers — so it pays to know them.</p>
+<p class="lede">Nothing in this system talks directly to anything else. Between a sentence and a spinning graphics card sit six layers of software, each one translating for the layer above it — and when a setup breaks, it is almost never the model. It is two neighbouring layers disagreeing about a version number.</p>
 
-## The stack, top to bottom
+Learning to read the stack is the difference between "it doesn't work" and "PyTorch was built against CUDA 12.8 and my driver only exposes 12.1."
 
-```mermaid
-flowchart TD
-    A["Your prompt / ComfyUI workflow"] --> B
-    B["ComfyUI 0.30<br/>orchestrates the pipeline & nodes"] --> C
-    C["PyTorch 2.11<br/>runs the math as tensor operations"] --> D
-    D["CUDA 12.8 runtime<br/>PyTorch's bridge to NVIDIA hardware"] --> E
-    E["NVIDIA driver 595.84<br/>talks to the physical card"] --> F
-    F["RTX 3060 Ti · CUDA 13.2 capable"]
-    style B fill:#14342c,stroke:#5ee0c0,color:#eafff8
-    style C fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style F fill:#0f141d,stroke:#5ee0c0,color:#eafff8
-```
+## The stack
 
-Each layer only needs to be *compatible* with its neighbours — not identical. Notice the driver exposes **CUDA 13.2**, but we run a PyTorch built for **CUDA 12.8**. That's fine: newer drivers run older CUDA builds. Getting this pairing right is half the battle of setup.
+<svg viewBox="0 0 760 372" width="100%" style="max-width:920px" role="img" aria-label="The software stack from top to bottom: the scene file, our own pipeline, diffusers and torchao, PyTorch, the CUDA runtime, the NVIDIA driver, and finally the three graphics cards.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">EACH LAYER ONLY HAS TO AGREE WITH ITS NEIGHBOURS</text>
+  <rect x="2" y="26" width="756" height="40" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="51" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">the scene file — a prompt, a resolution, a frame count</text>
+  <text x="740" y="51" text-anchor="end" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">what you write</text>
+  <rect x="2" y="74" width="756" height="40" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="20" y="99" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">our pipeline — phase A encode, phase B denoise</text>
+  <text x="740" y="99" text-anchor="end" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">was ComfyUI 0.30</text>
+  <rect x="2" y="122" width="756" height="40" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="20" y="147" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">diffusers 0.40 + torchao 0.18 — model loading, quantization</text>
+  <text x="740" y="147" text-anchor="end" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">the library layer</text>
+  <rect x="2" y="170" width="756" height="40" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="20" y="195" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">PyTorch 2.11 — turns operations into GPU kernels</text>
+  <text x="740" y="195" text-anchor="end" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">built for cu128</text>
+  <rect x="2" y="218" width="756" height="40" rx="7" fill="#12161f" stroke="#3a4a63"/>
+  <text x="20" y="243" fill="#aab4c5" font-size="12.5" font-family="Inter,sans-serif">CUDA runtime 12.8 — NVIDIA's compute platform</text>
+  <text x="740" y="243" text-anchor="end" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">must be ≤ driver's</text>
+  <rect x="2" y="266" width="756" height="40" rx="7" fill="#12161f" stroke="#3a4a63"/>
+  <text x="20" y="291" fill="#aab4c5" font-size="12.5" font-family="Inter,sans-serif">NVIDIA driver 595.84 — speaks to the physical card</text>
+  <text x="740" y="291" text-anchor="end" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">exposes CUDA 13.2</text>
+  <rect x="2" y="314" width="756" height="44" rx="7" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="20" y="341" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">3 × RTX 3060 Ti — Ampere, sm_86, 8 GB each</text>
+  <text x="740" y="341" text-anchor="end" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">the actual silicon</text>
+</svg>
 
-## What each layer is
+Notice the pairing between the two grey layers. The driver exposes **CUDA 13.2**, while PyTorch was built against **CUDA 12.8**. That mismatch is fine — and understanding *why* saves hours.
+
+<div class="callout spec"><span class="t">The version rule that matters</span>
+<p><b>A newer driver runs older CUDA builds. An older driver cannot run newer ones.</b></p>
+<p>So the check is never "do these match?" but "is the driver's CUDA version <em>at least</em> what PyTorch was built for?" 13.2 ≥ 12.8, so it runs. Had the driver been on 12.1, the same PyTorch would have failed at import with a message about the CUDA runtime — and that error names the wrong culprit, which is why people reinstall PyTorch when they should be updating a driver.</p></div>
+
+## What each layer is, and what it cost us
 
 <table>
-<tr><th>Layer</th><th>Role</th><th>Gotcha we hit</th></tr>
-<tr><td><b>NVIDIA driver</b></td><td>The OS's translator for the physical GPU. Provides <code>nvidia-smi</code>.</td><td>Needed a reboot to load the kernel module after install.</td></tr>
-<tr><td><b>CUDA</b></td><td>NVIDIA's platform for general-purpose GPU computing. PyTorch is compiled against a specific CUDA version.</td><td>We installed the <code>cu128</code> PyTorch build; it runs fine on the newer driver.</td></tr>
-<tr><td><b>PyTorch</b></td><td>The deep-learning framework. Turns model operations into GPU kernels.</td><td>No wheels for Python 3.14 → we made a Python 3.12 environment.</td></tr>
-<tr><td><b>ComfyUI</b></td><td>A node-based engine to load models and wire up the generation pipeline. Has native H3 support + the DynamicVRAM offload.</td><td>Needed extra custom-node packs the workflow relied on.</td></tr>
+<tr><th>Layer</th><th>Role</th><th>Gotcha hit in practice</th></tr>
+<tr><td><b>NVIDIA driver</b></td><td>The operating system's translator for the physical GPU. Provides <code>nvidia-smi</code></td><td>Needed a reboot to load the kernel module after installing</td></tr>
+<tr><td><b>CUDA</b></td><td>NVIDIA's general-purpose GPU computing platform. PyTorch is compiled against one specific version</td><td>Installed the <code>cu128</code> build; it runs happily on the newer driver</td></tr>
+<tr><td><b>PyTorch</b></td><td>The deep-learning framework. Turns model operations into GPU kernels</td><td>No wheels existed for Python 3.14 → had to build a Python 3.12 environment</td></tr>
+<tr><td><b>diffusers</b></td><td>Model definitions, loaders, schedulers, the pipeline abstraction</td><td>The model was saved with 0.36; we run 0.40 — see the drift warning below</td></tr>
+<tr><td><b>torchao</b></td><td>Quantization — the int8 arithmetic that makes 20 GB possible</td><td>Loudly fails to load kernels for GPUs we do not own, every run</td></tr>
+<tr><td><b>The pipeline</b></td><td>Orchestration: what loads when, what runs where</td><td>Was ComfyUI; now our own (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>)</td></tr>
 </table>
 
-## Why a separate Python (the `uv` env)
+## The stack changed — and that is the story
 
-Your Ubuntu ships **Python 3.14** — so new that PyTorch has no prebuilt package for it yet. Rather than fight the system Python (and risk breaking OS tools), we used **`uv`**, a fast tool that installed an isolated **Python 3.12** just for ComfyUI.
+This chapter was first written when ComfyUI ran everything. It no longer does.
+
+<div class="callout truth"><span class="t">Then and now</span>
+<table class="arc">
+<tr><th>Layer</th><th>At the start</th><th>Now</th></tr>
+<tr><td>Orchestration</td><td>ComfyUI 0.30 + custom node packs</td><td><b>Our own two-phase pipeline</b></td></tr>
+<tr><td>Library</td><td>ComfyUI's own loaders</td><td>diffusers 0.40 + torchao 0.18</td></tr>
+<tr><td>Offloading</td><td>ComfyUI "DynamicVRAM"</td><td><b>Explicit group offloading we control</b></td></tr>
+<tr><td>PyTorch</td><td colspan="2" style="text-align:center">2.11 + cu128 — unchanged throughout</td></tr>
+<tr><td>Driver / CUDA</td><td colspan="2" style="text-align:center">595.84 / 13.2 — unchanged throughout</td></tr>
+</table>
+<p>The bottom half never moved. Everything that changed sits in the top two layers — which is exactly what a well-layered stack is supposed to allow. We replaced the orchestration without touching the driver, CUDA, or PyTorch once.</p></div>
+
+## Why a separate Python
+
+The system shipped **Python 3.14** — new enough that PyTorch had no prebuilt package for it. Rather than fight the system interpreter and risk breaking OS tooling, we installed an isolated **Python 3.12** using `uv`.
 
 <div class="callout spec"><span class="t">The principle: isolate everything</span>
-<p>A <b>virtual environment</b> is a sandboxed Python with its own packages. Golden rule of self-hosting: never install AI packages into the system Python. One project, one env. It keeps versions from colliding and makes cleanup a one-line delete.</p></div>
+<p>A <b>virtual environment</b> is a sandboxed Python with its own packages. The golden rule of self-hosting: <b>never install AI packages into the system Python.</b> One project, one environment. Versions stop colliding, and cleanup becomes a single directory delete.</p></div>
 
 ## Two file formats: safetensors vs GGUF
 
-Model weights come in different container formats, and **picking the wrong one cost us a 20 GB re-download** — so this section is earned in blood.
+Weights arrive in different containers, and choosing wrong cost a **20 GB re-download**.
 
 <table>
 <tr><th></th><th>safetensors</th><th>GGUF</th></tr>
-<tr><td>Made for</td><td>PyTorch / ComfyUI / diffusers</td><td><code>llama.cpp</code> / <code>stable-diffusion.cpp</code> ecosystems</td></tr>
-<tr><td>ComfyUI native loader</td><td>✅ <code>UNETLoader</code>, <code>CLIPLoader</code></td><td>Only via the <code>ComfyUI-GGUF</code> add-on, and only for architectures it supports</td></tr>
-<tr><td>What happened to us</td><td>Worked perfectly</td><td>The H3 GGUF was built for stable-diffusion.cpp; ComfyUI's GGUF loader rejected it: <em>"Unknown model architecture."</em></td></tr>
+<tr><td>Built for</td><td>PyTorch, diffusers</td><td><code>llama.cpp</code>, <code>stable-diffusion.cpp</code></td></tr>
+<tr><td>What happened</td><td>Loaded first try</td><td>Rejected: <em>"Unknown model architecture"</em></td></tr>
 </table>
 
-<div class="callout warn"><span class="t">Lesson</span>
-<p>A file being "MiniMax-H3" and "GGUF" isn't enough — the <b>loader</b> has to understand that specific architecture. When in doubt, prefer the format the <b>official</b> repo (here, <code>Comfy-Org/MiniMax-H3</code>) publishes for your engine. We switched to the native int8 <b>safetensors</b> and it loaded first try.</p></div>
+The GGUF we downloaded was genuinely MiniMax-H3 — but built for a different runtime. The loader could open the container and still not recognise what was inside.
+
+<div class="callout warn"><span class="t">The lesson</span>
+<p>"MiniMax-H3" plus "GGUF" is not enough information. The <b>loader</b> has to understand that specific architecture, in that specific container. Prefer whatever format the official repository publishes <em>for your engine</em>. Later a different Q4 GGUF <em>did</em> work, from a repo that targeted our stack (<a href="13-int8-vs-q4.html">ch.13</a>) — proving the format was never the problem. The pairing was.</p></div>
 
 ## Quantization: how 66 GB becomes 20 GB
 
-The full H3 transformer in its original precision (bf16, 16 bits per number) is **~66 GB**. We ran a **20 GB** version. The shrinking technique is **quantization**: store each weight with fewer bits.
+The transformer in its original precision — bf16, 16 bits per number — is about **66 GB**. We run a **20 GB** version. The technique is **quantization**: store each weight in fewer bits.
 
 <table>
-<tr><th>Precision</th><th>Bits/weight</th><th>Size of the 33B transformer</th><th>Runs well on your Ampere card?</th></tr>
-<tr><td>bf16 (original)</td><td>16</td><td>~66 GB</td><td>Way too big for 8 GB</td></tr>
-<tr><td><b>int8 (what we used)</b></td><td>8</td><td>~20 GB (pruned)</td><td>✅ Yes — native int8 ops</td></tr>
-<tr><td>fp8</td><td>8</td><td>~21 GB</td><td>⚠️ Emulated — no hardware fp8 on Ampere (needs Ada/Hopper)</td></tr>
-<tr><td>fp4 / nvfp4</td><td>4</td><td>~13 GB</td><td>❌ Needs Blackwell GPUs — avoid on a 3060 Ti</td></tr>
+<tr><th>Precision</th><th>Bits per weight</th><th>Size</th><th>On Ampere (sm_86)?</th></tr>
+<tr><td>bf16 (original)</td><td>16</td><td>~66 GB</td><td>Far too large</td></tr>
+<tr><td><b>int8 — what we use</b></td><td>8</td><td><b>~20 GB</b> (pruned)</td><td>✅ Native int8 hardware</td></tr>
+<tr><td>fp8</td><td>8</td><td>~21 GB</td><td>⚠️ Emulated — needs Ada or Hopper</td></tr>
+<tr><td>fp4 / nvfp4</td><td>4</td><td>~13 GB</td><td>❌ Needs Blackwell</td></tr>
 </table>
 
-<div class="callout truth"><span class="t">Why we deliberately chose int8, not the smaller fp4</span>
-<p>Smaller isn't always better. Your GPU (Ampere, sm_86) has fast <b>int8</b> hardware but <b>no</b> native fp8/fp4. The workflow defaulted to an fp4 encoder — we swapped it for int8, which your card actually accelerates. Matching the quantization format to your GPU generation is a real skill, and it's why "just grab the smallest file" is bad advice.</p></div>
+<div class="callout truth"><span class="t">Why int8 and not the smaller fp4</span>
+<p>Smaller is not automatically better. Ampere has fast <b>int8</b> hardware and <b>no</b> native fp8 or fp4. A workflow that defaults to an fp4 encoder will run — by emulating the format in software, slowly — while a format the silicon actually implements runs at full speed.</p>
+<p><b>Match the quantization format to the GPU generation</b>, not to the smallest file. "Just grab the smallest download" is how people end up with a model that fits and crawls.</p></div>
 
-Quantization does cost a little quality (fewer bits = coarser numbers), but for int8 it's usually a fair trade for making the model runnable at all.
+### Your own logs prove this every run
 
-Next: the unedited story of our build — every command, every wall we hit, and how we got around it.
+Look at the first two lines of any render log on this machine:
+
+```
+Failed to load .../torchao/_C_cutlass_90a.abi3.so
+Failed to load .../torchao/_C_mxfp8.cpython-310-x86_64-linux-gnu.so
+Unable to import `torchao` Tensor objects.
+```
+
+Those look alarming and are completely harmless. Read the filenames:
+
+- **`cutlass_90a`** — `90a` means **sm_90a**, the compute capability of **Hopper** datacentre cards. We are on sm_86.
+- **`mxfp8`** — microscaling FP8, a **Blackwell**-era format.
+
+torchao ships kernels for every GPU generation and tries them all at import. On Ampere, the Hopper and Blackwell ones cannot load, so it says so and falls back to what our silicon does support. **Two error messages, every render, that are simply the library discovering which decade of hardware it is running on.**
+
+<div class="callout warn"><span class="t">Version drift is real — and quiet</span>
+<p>The model's own config records <code>_diffusers_version: 0.36.0.dev0</code>. The installed library is <b>0.40.0.dev0</b>. It works, but that gap is exactly where subtle breakage lives — a renamed argument, a changed default, a function body that moved.</p>
+<p>This matters concretely here: some of our fixes are patches that copy upstream function bodies and change one line (<a href="46-the-first-15-seconds.html">ch.46</a>). An upgrade cannot revert them — but it can silently <em>outdate</em> them. <b>Pin your versions, and re-check any patch after upgrading.</b></p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">driver</span><span class="badge">CUDA</span><span class="badge">compute capability / sm_86</span><span class="badge">PyTorch</span><span class="badge">diffusers</span><span class="badge">torchao</span><span class="badge">kernel</span><span class="badge">virtual environment</span><span class="badge">safetensors</span><span class="badge">GGUF</span><span class="badge">quantization</span><span class="badge">bf16 / int8 / fp8 / fp4</span><span class="badge">version drift</span></p>
+<p>If those feel solid, you can read a setup failure instead of guessing at it.</p></div>
+
+Next: the unedited story of the build — every wall hit, and how each one was got around.
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

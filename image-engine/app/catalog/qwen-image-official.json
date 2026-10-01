@@ -1,0 +1,15 @@
+{
+  "id": "qwen-image-2.1",
+  "enabled": true,
+  "name": "Qwen-Image 2.1",
+  "engine": "diffusers",
+  "blurb": "Official Alibaba Qwen-Image 2.1 · int8 · reference diffusers pipeline. One 8 GB card.",
+  "model": "models/qwen-image-2.1-official",
+  "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg": 4.0 },
+  "limits": { "min_side": 256, "max_side": 1536, "max_steps": 60 },
+  "device": 1,
+  "notes": [
+    "Official weights + reference pipeline + int8 (int8 ~= bf16, proven in H3). Highest quality here.",
+    "Rendered in-process by worker_qwen.py (resident, loads once). device 1 — GPU 0 is audio."
+  ]
+}

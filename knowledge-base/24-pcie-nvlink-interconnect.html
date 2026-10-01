@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>24 · PCIe &amp; NVLink — The Interconnect</title>
+<meta name="description" content="The wire between the chips: PCIe 3.0 x16 with no NVLink, a mixed PHB/SYS topology, a measured 4.9 GB/s card-to-card, and why that one number decides which multi-GPU schemes are worth attempting.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 24 · Technical Deep-Dive</span>
+
+# PCIe &amp; NVLink — The Interconnect
+
+<p class="lede">The <b>interconnect</b> is the wire between chips, and on this box it is <b>PCIe 3.0 ×16 with no NVLink anywhere</b> — three RTX 3060 Ti cards, 24 GB of VRAM between them, and a card-to-card path measured at <b>4.9 GB/s</b>. That single number, not the GPU count, is what decides whether three cards can make one render faster.</p>
+
+Here is the measurement that makes the case better than any argument. Going from 832×480 to 1280×704 at 345 frames multiplies the token count by **2.26×**. Attention costs grow with the square of the sequence, so the arithmetic predicts roughly $2.26^2 \approx 5\times$ the time.
+
+The measured cost was **34×**.
+
+The mathematics was not wrong. The larger sequence no longer fit the single-card path, so it was run split across three cards — and that split carries about **7× overhead beyond what the equations predict**. That overhead does not live in any equation in [ch.23](23-math-from-scratch.html). It lives in the wire.
+
+<div class="callout truth"><span class="t">The one idea</span>
+<p>Multi-GPU work means <b>moving data between cards</b>. How fast that data can move — the <b>interconnect bandwidth</b> — sets a hard ceiling on which multi-GPU schemes pay off. On a fast link almost everything works. On a slow link most schemes <em>lose</em> to a single card doing the same work alone.</p>
+<p>The wire is the boss, and it is the part of a machine nobody puts on a spec sheet.</p></div>
+
+## What an interconnect is, and why it matters at all
+
+A GPU is extraordinarily fast on data that is **already in its own memory** and merely fast at everything else. The moment a job needs two GPUs, they must hand data back and forth: one card's results become the other's inputs. The road that data travels is the interconnect, and there are two kinds worth naming.
+
+- **PCIe** — the general-purpose bus that connects everything in a computer: GPU to CPU, CPU to RAM, and by extension GPU to GPU. Every machine has it.
+- **NVLink** — a dedicated, direct chip-to-chip bridge between GPUs. Datacentre cards have it. Consumer cards, including every card in this box, do not.
+
+The useful mental model is distance, and it is a genuinely structural analogy rather than a decorative one, because the distances really are different in kind.
+
+<svg viewBox="0 0 760 254" width="100%" style="max-width:920px" role="img" aria-label="Nested bands showing the memory hierarchy on this box: the compute cores sit inside the card's own VRAM at about 448 gigabytes per second, then system RAM across PCIe 3.0 at about 12 gigabytes per second, then another card at about 4.9 gigabytes per second.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">HOW FAR EACH BYTE HAS TO TRAVEL</text>
+  <rect x="2" y="30" width="756" height="212" rx="10" fill="#0d1017" stroke="#ff6b6b"/>
+  <text x="18" y="52" fill="#ff9d9d" font-size="11" font-family="Inter,sans-serif">another card in the same chassis — about 4.9 GB/s</text>
+  <text x="742" y="52" text-anchor="end" fill="#ff9d9d" font-size="11" font-family="Inter,sans-serif">91× slower</text>
+  <rect x="40" y="66" width="680" height="142" rx="10" fill="#12161f" stroke="#ffb454"/>
+  <text x="56" y="88" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">system RAM over PCIe 3.0 ×16 — about 12 GB/s</text>
+  <text x="704" y="88" text-anchor="end" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">37× slower</text>
+  <rect x="96" y="102" width="568" height="88" rx="10" fill="#151b26" stroke="#7aa2ff"/>
+  <text x="112" y="124" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">this card's own VRAM, GDDR6 — about 448 GB/s</text>
+  <text x="648" y="124" text-anchor="end" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">the baseline</text>
+  <rect x="252" y="138" width="256" height="40" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="380" y="163" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">the compute cores</text>
+  <text x="2" y="252" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">each band out is a different kind of distance, not a faster version of the same one</text>
+</svg>
+
+The bands are not decoration. A byte in VRAM is on the same board as the arithmetic units. A byte in system RAM is on the far side of a bus shared with everything else in the machine. A byte on another card, on this hardware, has to leave one card, land somewhere, and be picked up again — which is why it is slower than fetching from RAM even though both cards are inches apart.
+
+<div class="callout spec"><span class="t">The bandwidth hierarchy on this box — the numbers to design against</span>
+<table>
+<tr><th>Path</th><th>Bandwidth</th><th>Notes</th></tr>
+<tr><td>On-card VRAM (GDDR6)</td><td><b>~448 GB/s</b></td><td>per card, unchanged since the first one</td></tr>
+<tr><td>System RAM (DDR3-1600, dual channel)</td><td>~25 GB/s</td><td>the ceiling on how fast weights can even leave RAM</td></tr>
+<tr><td>Host to GPU (PCIe 3.0 ×16)</td><td>~12 GB/s</td><td>the offload path — 460 GB of it per 23-step render</td></tr>
+<tr><td><b>GPU to GPU (no P2P, host-staged)</b></td><td><b>~4.9 GB/s</b></td><td><b>the wall</b></td></tr>
+</table>
+<p>Card-to-card is roughly <b>91× slower</b> than a card talking to its own memory. The rule of thumb that falls out: <b>treat every byte that crosses between cards as about a hundred times more expensive than a byte that does not.</b></p></div>
+
+## PCIe — the everyday road
+
+PCIe comes in **generations**, each roughly doubling the per-lane rate, and **lane widths** from ×1 to ×16. A graphics card normally occupies an ×16 slot.
+
+<table>
+<tr><th>Generation</th><th>×16 theoretical</th><th>×16 realistic</th><th>Where it is found</th></tr>
+<tr><td>Gen3</td><td>~15.75 GB/s</td><td><b>~12 GB/s</b></td><td><b>this box</b> — a 2012-era dual-Xeon board</td></tr>
+<tr><td>Gen4</td><td>~31.5 GB/s</td><td>~26 GB/s</td><td>modern desktops</td></tr>
+<tr><td>Gen5</td><td>~63 GB/s</td><td>~55 GB/s</td><td>current platforms</td></tr>
+</table>
+
+The gap between theoretical and realistic is protocol overhead — encoding, packet headers, flow control. Roughly three quarters of the advertised number is what a sustained transfer actually sees, and that is the figure worth budgeting with.
+
+<div class="callout warn"><span class="t">Why nvidia-smi reports Gen1 or Gen2 when nothing is running</span>
+<p>Querying link speed on an idle machine reports <b>Gen1</b> or <b>Gen2</b>, which looks like a misconfigured slot and is not. PCIe links downclock at rest to save power and ramp back to full <b>Gen3 ×16</b> under sustained transfer.</p>
+<p>Check the link width and generation while a render is actually moving weights, not while the box is idle, or the conclusion will be wrong by a factor of four.</p></div>
+
+## NVLink — the private bridge
+
+NVLink is a direct chip-to-chip link built for exactly this hand-off. There is no shared bus, no CPU in the path, no system memory in the path — just two GPUs wired together.
+
+<table>
+<tr><th>Link</th><th>Bandwidth</th><th>Where</th></tr>
+<tr><td>PCIe Gen3 ×16</td><td>~12 GB/s</td><td>this box</td></tr>
+<tr><td>NVLink 3 (A100)</td><td><b>~600 GB/s</b></td><td>datacentre</td></tr>
+<tr><td>NVLink 4 (H100)</td><td><b>~900 GB/s</b></td><td>datacentre</td></tr>
+</table>
+
+<div class="callout danger"><span class="t">The gap is 50 to 100×, and it is structural</span>
+<p>An A100's NVLink moves data roughly <b>50× faster</b> than PCIe Gen3 ×16 on this board, and well over <b>100×</b> faster than what these cards actually manage card-to-card. When a hosted service does something on the same model that this box cannot, the difference is very often not a better model or better code — it is a faster wire between the same class of chips.</p>
+<p>The RTX 3060 Ti has <b>no NVLink at all</b>. Consumer Ampere never had it, and the generation after dropped the bridge from the flagship too. This is not a setting, a driver flag, or a tuning problem. It is absent silicon, and every design decision in <a href="43-the-dalang-engine.html">ch.43</a> starts from accepting that.</p></div>
+
+## The part that actually bites: P2P, and the difference between PHB and SYS
+
+When two GPUs talk over PCIe there are two very different things that can happen, and which one occurs depends entirely on the **path** between the cards.
+
+**Peer-to-peer, or P2P.** The cards DMA straight to each other across the bus. The data never lands in system RAM; the CPU's root complex routes it without copying it. This requires both cards to sit under the same root complex or PCIe switch. It is capped by PCIe, but it is one hop.
+
+**No P2P — staged through host RAM.** If the path crosses between CPU sockets, or the chipset simply does not permit peer access, the "GPU to GPU" copy silently becomes **GPU → system RAM → GPU**. Two hops, with the CPU's memory controller in the middle. The code looks identical; the cost does not.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="The box topology: two Xeon sockets joined by a QPI link, each with its own RAM bank, GPU 0 hanging off socket 0 and GPUs 1 and 2 off socket 1; below, two traces show that GPU 1 to GPU 2 passes through one host bridge while GPU 0 to GPU 2 crosses the socket link and is staged through system RAM.">
+  <defs>
+    <marker id="w1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="w2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE TOPOLOGY nvidia-smi REPORTS</text>
+  <rect x="20" y="40" width="120" height="40" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="80" y="65" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">RAM bank A</text>
+  <rect x="160" y="40" width="140" height="40" rx="6" fill="#151b26" stroke="#3a4a63"/>
+  <text x="230" y="65" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">Xeon socket 0</text>
+  <line x1="140" y1="60" x2="158" y2="60" stroke="#232c3b"/>
+  <line x1="302" y1="60" x2="418" y2="60" stroke="#ffb454" stroke-width="1.6"/>
+  <text x="360" y="52" text-anchor="middle" fill="#ffb454" font-size="10" font-family="Inter,sans-serif">QPI</text>
+  <rect x="420" y="40" width="140" height="40" rx="6" fill="#151b26" stroke="#3a4a63"/>
+  <text x="490" y="65" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">Xeon socket 1</text>
+  <line x1="562" y1="60" x2="578" y2="60" stroke="#232c3b"/>
+  <rect x="580" y="40" width="120" height="40" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="640" y="65" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">RAM bank B</text>
+  <line x1="230" y1="82" x2="230" y2="116" stroke="#3a4a63"/>
+  <line x1="470" y1="82" x2="452" y2="116" stroke="#3a4a63"/>
+  <line x1="510" y1="82" x2="570" y2="116" stroke="#3a4a63"/>
+  <rect x="160" y="118" width="140" height="40" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="230" y="143" text-anchor="middle" fill="#ffdede" font-size="10.5" font-family="Inter,sans-serif">GPU 0</text>
+  <rect x="396" y="118" width="112" height="40" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="452" y="143" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="Inter,sans-serif">GPU 1</text>
+  <rect x="514" y="118" width="112" height="40" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="570" y="143" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="Inter,sans-serif">GPU 2</text>
+  <text x="2" y="192" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">GPU 1 to GPU 2 — labelled PHB: one host bridge, peer-to-peer possible</text>
+  <rect x="20" y="200" width="100" height="30" rx="5" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="70" y="220" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">GPU 1</text>
+  <line x1="122" y1="216" x2="140" y2="216" stroke="#5ee0c0" marker-end="url(#w1)"/>
+  <rect x="144" y="200" width="150" height="30" rx="5" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="219" y="220" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">PCIe host bridge</text>
+  <line x1="296" y1="216" x2="314" y2="216" stroke="#5ee0c0" marker-end="url(#w1)"/>
+  <rect x="318" y="200" width="100" height="30" rx="5" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="368" y="220" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">GPU 2</text>
+  <text x="2" y="256" fill="#ff9d9d" font-size="11" font-family="Inter,sans-serif">GPU 0 to GPU 2 — labelled SYS: across the socket link, staged through system RAM</text>
+  <rect x="20" y="264" width="84" height="30" rx="5" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="62" y="284" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">GPU 0</text>
+  <line x1="106" y1="280" x2="122" y2="280" stroke="#ff6b6b" marker-end="url(#w2)"/>
+  <rect x="126" y="264" width="96" height="30" rx="5" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="174" y="284" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">socket 0</text>
+  <line x1="224" y1="280" x2="240" y2="280" stroke="#ff6b6b" marker-end="url(#w2)"/>
+  <rect x="244" y="264" width="84" height="30" rx="5" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="286" y="284" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">QPI</text>
+  <line x1="330" y1="280" x2="346" y2="280" stroke="#ff6b6b" marker-end="url(#w2)"/>
+  <rect x="350" y="264" width="96" height="30" rx="5" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="398" y="284" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">socket 1</text>
+  <line x1="448" y1="280" x2="464" y2="280" stroke="#ff6b6b" marker-end="url(#w2)"/>
+  <rect x="468" y="264" width="84" height="30" rx="5" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="510" y="284" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">GPU 2</text>
+  <text x="562" y="284" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">with a stop in host RAM on the way</text>
+</svg>
+
+`nvidia-smi topo -m` prints the label for each pair of cards. From fastest to slowest:
+
+<table>
+<tr><th>Label</th><th>Meaning</th><th>On this box</th></tr>
+<tr><td><b>NV#</b></td><td>NVLink, where # counts the links</td><td>never — no NVLink present</td></tr>
+<tr><td>PIX / PXB</td><td>through one, or several, PCIe switches</td><td>not present</td></tr>
+<tr><td><b>PHB</b></td><td>through the PCIe host bridge — the CPU's root complex</td><td><b>GPU 1 ↔ GPU 2</b></td></tr>
+<tr><td><b>SYS</b></td><td>across the socket link between two CPUs</td><td><b>GPU 0 ↔ everything</b> — the slowest path</td></tr>
+</table>
+
+<div class="callout truth"><span class="t">This box is mixed, and half of it cannot do P2P at all</span>
+<p>The three cards do not share one clean path. <b>GPU 1 and GPU 2</b> sit under the same host bridge, so peer-to-peer between them is possible. <b>GPU 0</b> hangs off the <em>other</em> Xeon socket, so every byte between it and the others crosses the QPI link between the two CPUs — no P2P, routed through the host.</p>
+<p>The practical consequence shows up in code as an environment variable. Running a collective library across these three cards needs <code>NCCL_P2P_DISABLE=1</code>, because the library cannot use a capability that only two of the three pairs have. Without it, the run hangs or throws a peer-access error rather than quietly falling back.</p>
+<p>Effective card-to-card lands at <b>~4.9 GB/s</b>, and that is the number every multi-GPU decision in this project was made against.</p></div>
+
+### The inversion that kills the obvious idea
+
+There is a scheme that sounds excellent and is not, and the reason is one comparison.
+
+The idea: while one card computes, the other two are idle with several gigabytes free. Let them hold a **cache** of upcoming transformer blocks, and have the active card pull the next block from a neighbour instead of from system RAM. Weights arrive from a card instead of from a disk-slow bus. Obviously faster.
+
+Except:
+
+$$\text{peer to peer} \approx 4.9\ \text{GB/s} \;\;<\;\; \text{host RAM to GPU} \approx 12\ \text{GB/s}$$
+
+Pulling a block from the card sitting next to it is **less than half as fast** as pulling the same block from system RAM. Peer-as-cache is not a small win or a wash; it is a net loss, and the analysis killed the idea before a line of it was written.
+
+A second problem finishes it off. A card can only hold a large block cache **while it is idle**. The instant it becomes the computing stage it must make room for the activation scratch — around 5.7 GB at the sequence lengths this project works at — and evicts nearly the whole cache before it computes a single one of the blocks it just cached. The card that did the caching is the card that must throw it away.
+
+## Why the wire decides which parallelism works
+
+Different ways of splitting a job across GPUs move **different amounts of data at different frequencies**, and that frequency is what has to be matched to the link.
+
+<svg viewBox="0 0 760 292" width="100%" style="max-width:920px" role="img" aria-label="Four parallelism schemes drawn against one denoise step of fifty blocks: data parallel never crosses the link, pipeline parallel crosses twice at the stage seams, while tensor and sequence parallel cross at every layer.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE DENOISE STEP, FIFTY BLOCKS — EACH MARK IS A CROSSING OF THE WIRE</text>
+  <text x="2" y="46" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">data parallel</text>
+  <text x="2" y="62" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">separate renders</text>
+  <line x1="176" y1="54" x2="740" y2="54" stroke="#232c3b" stroke-width="2"/>
+  <text x="452" y="46" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">nothing crosses, ever</text>
+  <text x="2" y="116" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">pipeline parallel</text>
+  <text x="2" y="132" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">blocks split into 3 stages</text>
+  <line x1="176" y1="124" x2="740" y2="124" stroke="#232c3b" stroke-width="2"/>
+  <g stroke="#5ee0c0" stroke-width="3"><line x1="374" y1="112" x2="374" y2="136"/><line x1="562" y1="112" x2="562" y2="136"/></g>
+  <text x="452" y="152" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">2 crossings per step, about 0.27 GB each</text>
+  <text x="2" y="196" fill="#ff9d9d" font-size="11" font-family="Inter,sans-serif">tensor parallel</text>
+  <text x="2" y="212" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">each matmul split</text>
+  <line x1="176" y1="204" x2="740" y2="204" stroke="#232c3b" stroke-width="2"/>
+  <g stroke="#ff6b6b" stroke-width="2"><line x1="176" y1="194" x2="176" y2="214"/><line x1="198" y1="194" x2="198" y2="214"/><line x1="220" y1="194" x2="220" y2="214"/><line x1="242" y1="194" x2="242" y2="214"/><line x1="264" y1="194" x2="264" y2="214"/><line x1="286" y1="194" x2="286" y2="214"/><line x1="308" y1="194" x2="308" y2="214"/><line x1="330" y1="194" x2="330" y2="214"/><line x1="352" y1="194" x2="352" y2="214"/><line x1="374" y1="194" x2="374" y2="214"/><line x1="396" y1="194" x2="396" y2="214"/><line x1="418" y1="194" x2="418" y2="214"/><line x1="440" y1="194" x2="440" y2="214"/><line x1="462" y1="194" x2="462" y2="214"/><line x1="484" y1="194" x2="484" y2="214"/><line x1="506" y1="194" x2="506" y2="214"/><line x1="528" y1="194" x2="528" y2="214"/><line x1="550" y1="194" x2="550" y2="214"/><line x1="572" y1="194" x2="572" y2="214"/><line x1="594" y1="194" x2="594" y2="214"/><line x1="616" y1="194" x2="616" y2="214"/><line x1="638" y1="194" x2="638" y2="214"/><line x1="660" y1="194" x2="660" y2="214"/><line x1="682" y1="194" x2="682" y2="214"/><line x1="704" y1="194" x2="704" y2="214"/><line x1="726" y1="194" x2="726" y2="214"/></g>
+  <text x="452" y="232" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">an all-reduce at every layer</text>
+  <text x="2" y="272" fill="#ff9d9d" font-size="11" font-family="Inter,sans-serif">sequence parallel</text>
+  <text x="2" y="288" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">tokens split across cards</text>
+  <line x1="176" y1="280" x2="740" y2="280" stroke="#232c3b" stroke-width="2"/>
+  <g stroke="#ff6b6b" stroke-width="2"><line x1="176" y1="270" x2="176" y2="290"/><line x1="198" y1="270" x2="198" y2="290"/><line x1="220" y1="270" x2="220" y2="290"/><line x1="242" y1="270" x2="242" y2="290"/><line x1="264" y1="270" x2="264" y2="290"/><line x1="286" y1="270" x2="286" y2="290"/><line x1="308" y1="270" x2="308" y2="290"/><line x1="330" y1="270" x2="330" y2="290"/><line x1="352" y1="270" x2="352" y2="290"/><line x1="374" y1="270" x2="374" y2="290"/><line x1="396" y1="270" x2="396" y2="290"/><line x1="418" y1="270" x2="418" y2="290"/><line x1="440" y1="270" x2="440" y2="290"/><line x1="462" y1="270" x2="462" y2="290"/><line x1="484" y1="270" x2="484" y2="290"/><line x1="506" y1="270" x2="506" y2="290"/><line x1="528" y1="270" x2="528" y2="290"/><line x1="550" y1="270" x2="550" y2="290"/><line x1="572" y1="270" x2="572" y2="290"/><line x1="594" y1="270" x2="594" y2="290"/><line x1="616" y1="270" x2="616" y2="290"/><line x1="638" y1="270" x2="638" y2="290"/><line x1="660" y1="270" x2="660" y2="290"/><line x1="682" y1="270" x2="682" y2="290"/><line x1="704" y1="270" x2="704" y2="290"/><line x1="726" y1="270" x2="726" y2="290"/></g>
+</svg>
+
+<table>
+<tr><th>Scheme</th><th>What crosses the link</th><th>How often</th><th>Verdict on a slow link</th></tr>
+<tr><td><b>Data parallel</b> — separate renders on separate cards</td><td>nothing</td><td>never</td><td><b>works anywhere</b> — 3× total throughput</td></tr>
+<tr><td><b>Pipeline</b> — blocks split into stages</td><td>one hidden state per seam, ~0.27 GB</td><td>twice per step</td><td><b>tolerant</b> — but see the caveat below</td></tr>
+<tr><td><b>Tensor parallel</b> — each matmul split across cards</td><td>an all-reduce</td><td><b>every layer</b></td><td>needs a fast link</td></tr>
+<tr><td><b>Sequence parallel</b> — the token sequence split across cards</td><td>a ring exchange or an all-to-all</td><td><b>every attention layer</b></td><td>needs a fast link, but see ring below</td></tr>
+</table>
+
+Two crossings per step at 0.27 GB is about **55 milliseconds each** on a 4.9 GB/s link — noise against a 143-second step. Fifty crossings per step is a different universe: at that frequency the cards spend more time talking than computing, and three of them finish later than one would have alone.
+
+<div class="callout warn"><span class="t">The caveat that undermines pipeline parallelism anyway</span>
+<p>Pipeline parallelism is bandwidth-friendly, and it still does not make a single render faster. It is a <b>throughput</b> tool: it keeps every stage busy by having each work on a <em>different</em> sample. With one render there is one latent, so at any instant exactly one card computes and two sit idle. The wall-clock is the same sequential chain a single card would run, minus overheads.</p>
+<p>The diffusion loop makes this worse, not better: step $t+1$ needs step $t$'s complete output, so there is no cross-step pipeline to fill either. The cards take turns. Nobody is helped.</p></div>
+
+## Ring, Ulysses, and a head count that settled the argument
+
+Sequence parallelism is the only scheme that both splits the *compute* of a single render and shrinks the thing that actually fills 8 GB — the activation scratch, which divides by three when the sequence does, from about 5.7 GB to about 1.9 GB per card. That makes it the only route to a genuine single-render speedup here, so it got a serious look.
+
+It comes in two shapes, and the hardware chose between them.
+
+**Ulysses** splits the attention **heads** across cards and exchanges them with an all-to-all every layer. It is low-latency and hungry for bandwidth — designed for machines with NVLink. It was disqualified twice over. First on arithmetic: the degree must divide the head count, and H3 has **56 attention heads**; 3 does not divide 56. Second on the wire: an all-to-all every layer is the single worst traffic pattern for a slow link.
+
+**Ring** splits the **sequence** and passes keys and values around a ring of cards. Its per-step bandwidth demand is much lower, and it is explicitly the pattern recommended for long sequences on limited bandwidth. Published benchmarks for a different diffusion model on four consumer RTX 4090s without NVLink show ring parallelism running successfully — a data point for "this pattern survives PCIe", though on a different model and a different card.
+
+So the configuration this box forces is **ring, degree 3**, with peer-to-peer disabled because of the mixed topology, and with the relaxed variant that tolerates a sequence length not divisible by three.
+
+<div class="callout danger"><span class="t">What happened when it was actually run</span>
+<p><b>Ring degree 3 ran out of memory.</b> Not because the maths was wrong — the per-card activation really does divide by three — but because the offload layer re-copied the weights <em>per process</em>. Three worker processes meant three copies of everything the offloader touched, and the card ran out before the sequence split could help.</p>
+<p>There is a matching constraint on the host side. Three processes each holding a full CPU copy of the weights to stream from means three copies in system RAM. At bf16 that is 3 × 66 GB = <b>198 GB</b> against 125 GB installed — it simply does not fit. The int8 copies do fit, which is one more reason quantization is load-bearing on this build rather than a convenience.</p>
+<p>Keep the failure and the arithmetic together: the plan was sound about VRAM and wrong about process memory, and only running it revealed which.</p></div>
+
+## The honest accounting of the sharded path
+
+The three-card path was not abandoned. It is what made the largest renders on this box possible at all — native 1280×704 at 345 frames, fifteen seconds, which does not fit any single-card path here. But it should be chosen with the receipt visible.
+
+<div class="callout truth"><span class="t">2.26× the tokens, 34× the time</span>
+<table>
+<tr><th>Quantity</th><th>Value</th></tr>
+<tr><td>Token growth, 832×480 → 1280×704 at 345 frames</td><td><b>2.26×</b></td></tr>
+<tr><td>What quadratic attention predicts</td><td>about <b>5×</b></td></tr>
+<tr><td>What was measured</td><td><b>34×</b></td></tr>
+<tr><td>Unexplained by the mathematics</td><td>roughly <b>7×</b></td></tr>
+</table>
+<p>That residual is the cost of the wire, the synchronisation, and the coordination between three processes that cannot cheaply share anything. It is the single most important number in this chapter, because it is the difference between the machine an equation describes and the machine on the desk.</p>
+<p>The practical conclusion is in <a href="47-the-scorecard.html">the scorecard</a>: native 720p at fifteen seconds is a <b>proven capability</b> at roughly 44 hours per clip, and rendering the same fifteen seconds at 832×480 then upscaling costs about 35× less for a difference most viewers cannot see. Capability and workflow are different claims.</p></div>
+
+## What three cards are genuinely good for
+
+<div class="callout spec"><span class="t">The two schemes that pay on this interconnect</span>
+<ol>
+<li><b>Data parallelism — three independent renders at once.</b> Nothing crosses the wire, ever. A linear 3× on total work, with no engine code and no P2P. When the deliverable is a minute of finished video made of many shots and many seeds, this is simply the correct answer, and it is easy to overlook while chasing a more interesting one.</li>
+<li><b>A weight-sharded pipeline.</b> Split the fifty blocks into three stages, one per card. Activations cross only at the two seams, which the slow link tolerates comfortably. It does not make one render faster, but it makes renders possible that do not otherwise fit — which is a different and sometimes more valuable thing.</li>
+</ol></div>
+
+And the schemes that do not: anything exchanging data **per layer**. Tensor parallelism and all-to-all sequence parallelism are not badly tuned on this box, they are structurally mismatched to it, and no amount of configuration turns 4.9 GB/s into 600.
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>The interconnect is the wire between chips.</b> Multi-GPU means moving data across it, and its bandwidth is a hard ceiling on which schemes help.</li>
+<li><b>PCIe Gen3 gives about 12 GB/s; NVLink gives 600 to 900.</b> A 50 to 100× gap, and consumer cards have no NVLink to gap it with.</li>
+<li><b>Without P2P, card-to-card is staged through host RAM</b> — two hops, measured at <b>4.9 GB/s</b>, roughly 91× slower than a card's own memory and slower than reading from RAM.</li>
+<li><b>Match the parallelism to the wire.</b> Slow link: data parallel and pipeline. Fast link: everything else becomes available.</li>
+<li><b>The wire, not the GPU count, is why three cards are not one fast render</b> — and the 34× measurement is what that sentence costs in hours.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">interconnect</span><span class="badge">PCIe generation</span><span class="badge">lane width</span><span class="badge">NVLink</span><span class="badge">P2P / peer access</span><span class="badge">DMA</span><span class="badge">root complex</span><span class="badge">host bridge</span><span class="badge">PHB</span><span class="badge">SYS</span><span class="badge">QPI / socket link</span><span class="badge">NUMA</span><span class="badge">host-staged copy</span><span class="badge">all-reduce</span><span class="badge">all-to-all</span><span class="badge">ring exchange</span><span class="badge">data parallel</span><span class="badge">pipeline parallel</span><span class="badge">tensor parallel</span><span class="badge">sequence / context parallel</span><span class="badge">activation scratch</span></p>
+<p>If those feel solid, the reasons the industry's inference engines are built the way they are will read as consequences rather than conventions.</p></div>
+
+Next: the landscape of inference engines — what vLLM, TensorRT and the diffusion runtimes each optimise for, and which of their assumptions survive on hardware like this.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

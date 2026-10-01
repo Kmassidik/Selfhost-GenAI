@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>07 · Optimizing for 720p</title>
+<meta name="description" content="Why 720p was a memory-fit problem rather than a capability problem, the prediction that native 720p was unreachable, and what actually happened when three cards made it possible.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
@@ -12,88 +14,267 @@
 
 # Pushing for 720p on 8 GB
 
-<p class="lede">"Why can't we just get 720p?" is the right question to interrogate. We researched it properly — papers, repos, and three parallel research agents — and the answer reshaped how we generate. Here's the whole investigation and the pipeline it produced.</p>
+<p class="lede">720p was never a question of whether the model could <em>draw</em> it — the answer to that was always yes. It was a question of whether an 8 GB card could hold the working set while it drew. It could not. Three cards later it can, and the result is stranger than a plain yes or no: native 720p works, a fifteen-second clip costs about <b>44 hours</b>, and it is still almost never the right way to obtain a 720p file.</p>
 
-## The core truth: it's a *fit* problem, not a *capability* problem
+This chapter was written twice. The first version was an investigation that ended in a firm prediction. The second version has to report that the prediction was wrong in the most interesting possible way — not because the reasoning was bad, but because the machine changed underneath it. Both versions are kept, because the gap between them is the actual lesson.
 
-MiniMax-H3's native trained canvas is **1344×768** — 720p is literally inside its comfort zone. The blocker isn't the model's ability; it's that during each diffusion step the **DiT activations + the video latent must live on the GPU** and can't be offloaded. At 720p × many frames, those resident tensors alone exceed 8 GB.
+## The core truth: a *fit* problem, not a *capability* problem
+
+MiniMax-H3's native trained canvas is **1344×768**. 720p is comfortably inside it. The model has never been the obstacle.
+
+The obstacle is that a diffusion step is not one operation but a chain of fifty transformer blocks, and while that chain runs, two very different kinds of memory are in play. The **weights** are read-only and used once per block, so they can be fetched, used, and thrown away. The **latent and its activations** are the thing being computed on. They are written to, read back, and carried forward from block to block. They cannot leave the card in the middle of a step, because the next block needs them.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="Diagram contrasting the transformer weights, which stream from system RAM into VRAM one block at a time and can be evicted, with the latent and activations, which must stay resident in VRAM for the whole step and grow with width times height times frames.">
+  <defs>
+    <marker id="p1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="p2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT OFFLOADING MOVES, AND WHAT IT CANNOT</text>
+  <rect x="2" y="30" width="180" height="250" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="92" y="54" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">system RAM · 125 GB</text>
+  <rect x="22" y="68" width="140" height="20" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="22" y="94" width="140" height="20" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="22" y="120" width="140" height="20" rx="4" fill="#151b26" stroke="#5ee0c0"/>
+  <rect x="22" y="146" width="140" height="20" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="22" y="172" width="140" height="20" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <text x="92" y="216" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">50 transformer blocks</text>
+  <text x="92" y="234" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">~0.4 GB each · 20 GB total</text>
+  <text x="92" y="262" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">read-only, used once</text>
+  <line x1="186" y1="118" x2="294" y2="118" stroke="#5ee0c0" marker-end="url(#p1)"/>
+  <text x="240" y="110" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">one block in</text>
+  <line x1="294" y1="150" x2="186" y2="150" stroke="#6f7b8f" marker-end="url(#p2)"/>
+  <text x="240" y="168" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">evicted again</text>
+  <rect x="300" y="30" width="458" height="250" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="318" y="54" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">VRAM · 8 GB on one card</text>
+  <rect x="318" y="68" width="422" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="336" y="88" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">block in flight — ~0.4 GB</text>
+  <text x="336" y="104" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">offloading works here</text>
+  <rect x="318" y="126" width="422" height="136" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="336" y="152" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">latent + activations</text>
+  <text x="336" y="176" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">written, read back, carried block to block</text>
+  <text x="336" y="198" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">size grows with width × height × frames</text>
+  <text x="336" y="220" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">cannot be paged out mid-computation</text>
+  <text x="336" y="248" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">offloading does nothing here — this is the ceiling</text>
+  <text x="2" y="296" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Swapping libraries changes the left half. The right half is arithmetic, and it is what decides the maximum resolution.</text>
+</svg>
 
 <div class="callout truth"><span class="t">What offloading can and cannot do</span>
-<p>Offloading (ComfyUI's DynamicVRAM, diffusers' group-offload) streams <b>weights</b> in and out of VRAM. It does <b>nothing</b> for the live activation/latent working set, which must stay resident mid-computation. That resident set — driven by <code>width × height × frames</code> — is the true ceiling. This is why no library swap fixes it.</p></div>
+<p>Group offloading — whether ComfyUI's "DynamicVRAM" or the explicit diffusers version this build now uses — streams <b>weights</b> in and out of VRAM. It does <b>nothing</b> for the live activation and latent working set, which must stay resident mid-computation. That resident set, driven by <code>width × height × frames</code>, is the true ceiling. This is why no library swap fixes it, and why every "just use X instead" suggestion missed the point.</p></div>
 
-## What we ruled out (and why)
+The practical consequence is that resolution and clip length are not two independent dials. They multiply into a single number — the size of the resident tensor — and that number is what either fits or does not. Doubling the frame count costs exactly what doubling the pixel count costs.
 
-```mermaid
-flowchart TD
-    Q["Goal: 720p on 8 GB"] --> A{Bypass ComfyUI<br/>→ raw diffusers?}
-    A -->|"No — no sub-12GB recipe,<br/>needs ~75GB RAM we lack"| X1[✗ same ceiling]
-    Q --> B{SageAttention<br/>to save memory?}
-    B -->|"No — known H3 bug:<br/>outputs pure noise"| X2[✗ broken for H3]
-    Q --> C{Caching<br/>TeaCache etc?}
-    C -->|"Speed only,<br/>slight VRAM cost"| X3[✗ doesn't raise res]
-    Q --> D{Native 1280×720<br/>generation?}
-    D -->|"Decode wall,<br/>undocumented on 8GB"| X4[✗ not reliable]
-    Q --> W["✓ Generate ~1024×576<br/>+ AI-upscale to 720p"]
-    style W fill:#14342c,stroke:#5ee0c0,color:#eafff8
-    style Q fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-```
+## What was ruled out, and why
 
-<div class="callout danger"><span class="t">The SageAttention trap we avoided</span>
-<p>SageAttention is a normal go-to for saving attention memory. But there's an <b>open ComfyUI bug specific to H3</b>: with <code>--use-sage-attention</code>, H3's attention routes through an int8 path and produces <b>pure noise</b> — a 55-minute render into garbage, with no error. Our research caught this before we wasted a run. Lesson: verify before enabling "known good" tricks on a new model.</p></div>
+The original investigation went through the obvious escape routes one at a time. Four were dead ends; one became the pipeline.
 
-## What actually works on 8 GB
+<svg viewBox="0 0 760 296" width="100%" style="max-width:920px" role="img" aria-label="Decision tree from the goal of 720p on 8 GB to five candidate routes: bypassing ComfyUI, SageAttention, step caching and native 1280 by 720 were all rejected, while generating small and upscaling was accepted.">
+  <defs>
+    <marker id="p3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">FIVE ROUTES, INVESTIGATED BEFORE ANY WERE RUN</text>
+  <rect x="2" y="108" width="200" height="68" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="102" y="136" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">Goal: 720p</text>
+  <text x="102" y="156" text-anchor="middle" fill="#9fb6e8" font-size="12" font-family="Inter,sans-serif">on one 8 GB card</text>
+  <line x1="206" y1="142" x2="226" y2="46" stroke="#6f7b8f" marker-end="url(#p3)"/>
+  <line x1="206" y1="142" x2="226" y2="94" stroke="#6f7b8f" marker-end="url(#p3)"/>
+  <line x1="206" y1="142" x2="226" y2="142" stroke="#6f7b8f" marker-end="url(#p3)"/>
+  <line x1="206" y1="142" x2="226" y2="190" stroke="#6f7b8f" marker-end="url(#p3)"/>
+  <line x1="206" y1="142" x2="226" y2="238" stroke="#6f7b8f" marker-end="url(#p3)"/>
+  <rect x="230" y="26" width="528" height="40" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="248" y="51" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">bypass ComfyUI → raw diffusers</text>
+  <text x="740" y="51" text-anchor="end" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">✗ same ceiling · needs ~75 GB RAM</text>
+  <rect x="230" y="74" width="528" height="40" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="248" y="99" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">SageAttention to shrink attention memory</text>
+  <text x="740" y="99" text-anchor="end" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">✗ outputs pure noise on H3</text>
+  <rect x="230" y="122" width="528" height="40" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="248" y="147" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">step caching (TeaCache and friends)</text>
+  <text x="740" y="147" text-anchor="end" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">✗ speed only · raises no resolution</text>
+  <rect x="230" y="170" width="528" height="40" rx="6" fill="#12161f" stroke="#ffb454"/>
+  <text x="248" y="195" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">native 1280×720 generation</text>
+  <text x="740" y="195" text-anchor="end" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">✗ decode wall — later overturned</text>
+  <rect x="230" y="218" width="528" height="40" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="248" y="243" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">generate small, then upscale</text>
+  <text x="740" y="243" text-anchor="end" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">✓ the route that shipped</text>
+  <text x="230" y="286" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">The amber row is the prediction. It held for exactly as long as the machine had one card in it.</text>
+</svg>
 
-Three levers, applied together:
+Three of those rejections have never needed revising. The first is arithmetic — a different library does not change the resident set. The third is a category error that is worth naming: caching schemes skip redundant work *between* steps, so they shorten a render that already fits. They cannot make one that does not fit start fitting.
+
+The second is worth a warning of its own.
+
+<div class="callout danger"><span class="t">The SageAttention trap</span>
+<p>SageAttention is a normal go-to for saving attention memory, and on most models it is a free win. On H3 it is not. Attention routes through an int8 path that produces <b>pure noise</b> — a 55-minute render that completes without a single error message and contains nothing. Research caught this before a run was wasted on it. Keep it off. The general lesson is larger than the specific bug: on a model this new, a "known good" trick is only known good on the models people have tried it on.</p></div>
+
+## What actually worked on 8 GB
+
+With the escape routes closed, the single-card build leaned on four levers applied together.
 
 <table>
-<tr><th>Optimization</th><th>What it does</th><th>Our setting</th></tr>
-<tr><td><b>Tiled VAE decode</b></td><td>Decodes the video in spatial tiles + temporal chunks, so the decode step (the usual OOM point at high res) is bounded by tile size, not full clip</td><td><code>VAEDecodeTiled</code> — tile 128, overlap 32, temporal 32/4</td></tr>
-<tr><td><b><code>--disable-smart-memory</code></b></td><td>Stops ComfyUI caching that triggered the H3 low-VRAM decode crash</td><td>on (in the systemd service)</td></tr>
-<tr><td><b><code>--reserve-vram 0.6</code></b></td><td>Leaves headroom so the OS/decoder isn't squeezed → fewer OOMs</td><td>on</td></tr>
-<tr><td><b><code>expandable_segments</code></b></td><td>PyTorch allocator setting that reduces memory fragmentation</td><td>on (env var)</td></tr>
+<tr><th>Lever</th><th>What it does</th><th>Outcome</th></tr>
+<tr><td><b>Tiled VAE decode</b></td><td>Decodes the video in spatial tiles and temporal chunks, so the decode step — the usual OOM point at high resolution — is bounded by tile size rather than by the whole clip</td><td>Right idea, wrong implementation — see below</td></tr>
+<tr><td><b><code>--disable-smart-memory</code></b></td><td>Stops the engine caching in a way that triggered the H3 low-VRAM decode crash</td><td>On, in the service file</td></tr>
+<tr><td><b><code>--reserve-vram 0.6</code></b></td><td>Leaves headroom so the OS and the decoder are not squeezed out of the last few hundred megabytes</td><td>On — measurably fewer OOMs</td></tr>
+<tr><td><b><code>expandable_segments</code></b></td><td>A PyTorch allocator setting that reduces fragmentation, so a large allocation can still find a contiguous home late in a run</td><td>On, as an environment variable</td></tr>
 </table>
 
-**Result:** generating **1024×576** now uses only ~**5.7 GB VRAM** — comfortable headroom where 720p would have OOM'd.
+Together these brought generation at **1024×576** down to roughly **5.7 GB of VRAM** — comfortable headroom on a card where 720p had been OOMing outright.
 
-## The 720p pipeline: generate small, upscale smart
+<div class="callout warn"><span class="t">The tiled-decode detail that had to be corrected</span>
+<p>The original plan named a specific node, <code>VAEDecodeTiled</code>, with tile 128 and overlap 32. That node turned out to be <b>incompatible with H3</b>: H3's latent is a NestedTensor, and the node cannot take one. The idea survived; the implementation did not. What actually does the tiling is the VAE's <em>own</em> built-in support, which is <b>on by default</b> at 256×256 tiles with 64 px of overlap. The lever was already in the model. It just had to stop being fought.</p></div>
 
-This is how the whole field ships HD AI video on consumer cards — cascaded generation + upscaling is standard, not a hack.
+That correction is a small example of a pattern that repeats through this whole guide. The mechanism was reasoned about correctly — bound the decode by tile size, not by clip size — and the first concrete component chosen to deliver it was wrong. Being right about the mechanism is what makes the second attempt cheap.
 
-```mermaid
-flowchart LR
-    G["Generate<br/>1024×576 · 73 frames<br/>(fits 8 GB)"] --> V["Tiled VAE decode<br/>→ frames"]
-    G --> AU["Audio VAE decode<br/>→ 32 kHz stereo"]
-    V --> U["4×-UltraSharp upscale<br/>→ 4096×2304"]
-    U --> D["Downscale (lanczos)<br/>→ 1280×720"]
-    D --> M["Mux with original audio"]
-    AU --> M
-    M --> OUT[[genuine 720p mp4]]
-    style G fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style OUT fill:#14342c,stroke:#5ee0c0,color:#eafff8
-```
+## The prediction
 
-**The upscaler:** `4x-UltraSharp.pth` (from `Kim2091/UltraSharp`, ~64 MB) → `models/upscale_models/`. The 4× overshoot then downscale-to-720p is what turns a soft generation into a crisp final frame and hides model artifacts. ESRGAN upscaling is chosen over diffusion refine because it's **temporally stable** (no frame-to-frame flicker) and cheap on 8 GB.
+Here is what the first version of this chapter concluded, quoted exactly:
 
-## Speed: the Turbo-LoRA lever (future)
+> **Native max ≈ 1024×576** for a short clip. Native 1280×720 is not reliable on 8 GB.
+>
+> **720p output is achieved by upscaling** — a real, production-standard route to a genuine 720p file.
+>
+> For long *and* high-res, the honest answer is a bigger GPU (24 GB+) or a rented cloud one.
 
-Our research also found **MiniMax-H3-Turbo-LoRA** (`larryvrh/MiniMax-H3-Turbo-Lora`), which distills sampling from ~20 steps down to **4–8 steps — roughly 5× faster**, with no resolution loss. Not yet wired into our pipeline, but it's the single biggest *speed* win available and would cut a 17-minute render to ~3–4 minutes.
+Every sentence of that was correct for the machine it described. The last one turned out to be a prophecy — 24 GB did arrive, just not in the shape anyone pictured. It arrived as **three** 8 GB cards, and splitting one video across three cards is a very different animal from having one big card ([ch.45](45-three-gpu-sequence-parallelism.html)).
 
-## Honest bottom line
+## What actually happened
 
-<div class="callout warn"><span class="t">The real limits of this box</span>
+Native 1280×704 works. Not marginally, not as a curiosity — it produces clips described in the render log as *beautiful*.
+
+<div class="callout spec"><span class="t">The measured renders that overturned the prediction</span>
+<table>
+<tr><th>Scene</th><th>Resolution × frames</th><th>Steps</th><th>Time</th><th>s/step</th><th>Result</th></tr>
+<tr><td><code>an1</code></td><td><b>1280×704</b> × 124 (5 s)</td><td>23</td><td>3295 s (55 min)</td><td>143 s</td><td><b>beautiful</b></td></tr>
+<tr><td><code>e720hq</code></td><td>1280×704 × 124</td><td>23</td><td>3486 s (58 min)</td><td>152 s</td><td>good</td></tr>
+<tr><td><code>g4k</code></td><td>1280×704 × 345 (14.4 s)</td><td>3</td><td>~5.5 h</td><td>6600 s</td><td><b>mud</b></td></tr>
+<tr><td><code>g4final</code></td><td>1280×704 × 345</td><td>23</td><td>~44 h</td><td>6845 s</td><td>in progress</td></tr>
+</table>
+<p>The prediction said 1280×720 was not reliable. On one card it was not. On three, it is a routine capability with a brutal price tag.</p></div>
+
+Notice the shape of that table. Going from 124 frames to 345 at the same resolution does not triple the per-step cost — it multiplies it by roughly **48**, from 143 s to 6845 s. That is the quadratic cost of attention plus the extra overhead of coordinating three cards, and it is the single most important number in the entire build.
+
+Notice also `g4k`. It is the same 345-frame shot at 3 steps instead of 23, and it cost five and a half hours to produce something unusable. **Steps are not a quality slider that can be turned down when a render is expensive.** Step count is a property of the *scene*: a tight close-up settles at 4, a character mid-shot at 23, a wide vista with a small distant subject needs 49. A wide 720p shot at 3 steps is not a rough version of the same clip. Its composition never had time to resolve, so it is mud.
+
+## The two routes, priced
+
+<svg viewBox="0 0 760 292" width="100%" style="max-width:920px" role="img" aria-label="Two routes to a fifteen-second 720p file: the native route renders 1280 by 704 at 23 steps for about 44 hours, while the practical route renders 832 by 480 at 49 steps in 2.6 hours of denoise and then upscales by 1.54 times.">
+  <defs>
+    <marker id="p4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#ffb454" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ROUTE A — NATIVE · PROVEN CAPABILITY</text>
+  <rect x="2" y="26" width="170" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="87" y="49" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">1280×704</text>
+  <text x="87" y="67" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">345 frames · 15 s</text>
+  <line x1="176" y1="54" x2="192" y2="54" stroke="#6f7b8f" marker-end="url(#p4)"/>
+  <rect x="196" y="26" width="150" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="271" y="59" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">23 steps</text>
+  <line x1="350" y1="54" x2="366" y2="54" stroke="#6f7b8f" marker-end="url(#p4)"/>
+  <rect x="370" y="26" width="170" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="455" y="49" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">6845 s per step</text>
+  <text x="455" y="67" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">split across 3 cards</text>
+  <line x1="544" y1="54" x2="560" y2="54" stroke="#6f7b8f" marker-end="url(#p4)"/>
+  <rect x="564" y="26" width="194" height="56" rx="7" fill="#241a1a" stroke="#ffb454"/>
+  <text x="661" y="49" text-anchor="middle" fill="#ffb454" font-size="14" font-family="Inter,sans-serif">~44 hours</text>
+  <text x="661" y="67" text-anchor="middle" fill="#c9a06f" font-size="11" font-family="Inter,sans-serif">for one 15 s clip</text>
+  <line x1="2" y1="112" x2="758" y2="112" stroke="#232c3b"/>
+  <text x="2" y="142" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ROUTE B — GENERATE SMALL, UPSCALE · THE PRACTICAL WORKFLOW</text>
+  <rect x="2" y="154" width="170" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="87" y="177" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">832×480</text>
+  <text x="87" y="195" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">345 frames · 15 s</text>
+  <line x1="176" y1="182" x2="192" y2="182" stroke="#6f7b8f" marker-end="url(#p4)"/>
+  <rect x="196" y="154" width="150" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="271" y="187" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">49 steps</text>
+  <line x1="350" y1="182" x2="366" y2="182" stroke="#6f7b8f" marker-end="url(#p4)"/>
+  <rect x="370" y="154" width="170" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="455" y="177" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">2.6 h of denoise</text>
+  <text x="455" y="195" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">more steps, fewer pixels</text>
+  <line x1="544" y1="182" x2="560" y2="182" stroke="#6f7b8f" marker-end="url(#p4)"/>
+  <rect x="564" y="154" width="194" height="56" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="661" y="177" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">1.54× upscale</text>
+  <text x="661" y="195" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">→ a genuine 720p file</text>
+  <text x="2" y="244" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Same fifteen seconds. Same final resolution. Roughly <tspan fill="#5ee0c0" font-size="14">35× apart</tspan> in cost.</text>
+  <text x="2" y="268" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Route B also spends 49 steps rather than 23 — it buys back with sampling what it gave up in pixels, and still wins by an order of magnitude.</text>
+</svg>
+
+<div class="callout truth"><span class="t">A proven capability is not a workflow</span>
+<p>Native 720p × 15 s <b>works</b> and costs about <b>44 hours</b> at 23 steps, or something closer to 90 at 49. The same fifteen seconds at 832×480 and 49 steps is <b>2.6 hours of denoise</b>, followed by a 1.54× upscale — roughly <b>35× cheaper</b> for a difference most viewers cannot see. Proving the machine can do a thing and choosing to do it that way are separate decisions, and conflating them is how a render queue turns into a two-day wait for one shot.</p></div>
+
+The original chapter got the *shape* of this right and the numbers wrong. It proposed generating at 1024×576 and upscaling 4× before downsampling to 720p. The route that survived generates lower still, at 832×480, spends the savings on more denoise steps, and upscales by a modest 1.54×. Fewer pixels, better-resolved pixels, a gentler upscale. That reordering — buying sampling quality with resolution — is the most transferable finding in this chapter.
+
+### Why 832 and not 848
+
+One trap deserves its own diagram, because the error message it produces names everything except the actual cause.
+
+<svg viewBox="0 0 760 192" width="100%" style="max-width:920px" role="img" aria-label="Diagram showing that a width of 848 divided by 16 gives 53, an odd number that cannot be split into 2 by 2 patches and fails with a shape error, while 832 divided by 16 gives 52, which splits cleanly into 26 patches.">
+  <defs>
+    <marker id="p5" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE 848-PIXEL TRAP — VAE ÷16, THEN 2×2 PATCHING</text>
+  <rect x="2" y="26" width="170" height="56" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="87" y="59" text-anchor="middle" fill="#ffdede" font-size="13" font-family="Inter,sans-serif">width 848</text>
+  <line x1="176" y1="54" x2="192" y2="54" stroke="#6f7b8f" marker-end="url(#p5)"/>
+  <rect x="196" y="26" width="190" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="291" y="59" text-anchor="middle" fill="#ff6b6b" font-size="12.5" font-family="Inter,sans-serif">÷16 = 53 — odd</text>
+  <line x1="390" y1="54" x2="406" y2="54" stroke="#6f7b8f" marker-end="url(#p5)"/>
+  <rect x="410" y="26" width="140" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="480" y="59" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">2×2 patching</text>
+  <line x1="554" y1="54" x2="570" y2="54" stroke="#6f7b8f" marker-end="url(#p5)"/>
+  <rect x="574" y="26" width="184" height="56" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="666" y="49" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">✗ shape error</text>
+  <text x="666" y="67" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">never mentions resolution</text>
+  <rect x="2" y="102" width="170" height="56" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="87" y="135" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">width 832</text>
+  <line x1="176" y1="130" x2="192" y2="130" stroke="#6f7b8f" marker-end="url(#p5)"/>
+  <rect x="196" y="102" width="190" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="291" y="135" text-anchor="middle" fill="#5ee0c0" font-size="12.5" font-family="Inter,sans-serif">÷16 = 52 — even</text>
+  <line x1="390" y1="130" x2="406" y2="130" stroke="#6f7b8f" marker-end="url(#p5)"/>
+  <rect x="410" y="102" width="140" height="56" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="480" y="135" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">2×2 patching</text>
+  <line x1="554" y1="130" x2="570" y2="130" stroke="#6f7b8f" marker-end="url(#p5)"/>
+  <rect x="574" y="102" width="184" height="56" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="666" y="135" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">✓ 26 patches wide</text>
+  <text x="2" y="184" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Pick widths and heights where the value after dividing by 16 is itself even. 1280→80, 704→44, 832→52, 480→30 all pass.</text>
+</svg>
+
+The VAE compresses space by a factor of 16, and the transformer then groups the result into 2×2 patches — `patch_size` is `[1,2,2]` in the config. So a dimension has to survive *two* divisions. 848 ÷ 16 = 53, which is odd, and the patching fails with a tensor-shape mismatch that mentions only tensor dimensions. Hours can go into debugging the wrong layer. The rule is small and worth memorising: **after dividing by 16, the result must still be even.**
+
+## Things from the first version that did not survive
+
+Three more items from the original chapter deserve an honest update.
+
+**The Turbo-LoRA.** The first version identified a distilled LoRA that cuts sampling from around 20 steps to 4–6 — roughly a 5× speedup — and called it "the single biggest speed win available." It was never wired into this pipeline. The one LoRA that *was* tried, at 480p, **softened the image**; the base model was sharper. That is one experiment on one scene, not a verdict on LoRAs in general ([ch.40](40-lora-how-it-works.html)), but it is the only measurement this build has, and it points the other way from the prediction. There is also a ceiling on how much a sampling speedup can buy: once denoise is cheap, the fixed costs — encoding, decoding, upscaling — become the wall ([ch.14](14-the-math-behind-it.html)).
+
+**"A bigger GPU (24 GB+)."** 24 GB arrived, as three cards. Splitting a single video's sequence across three cards is not equivalent to one 24 GB card: going from 832×480×345 to 1280×704×345 is 2.26× the tokens, and quadratic attention predicts about 5× the time. The measured cost was **34×**. The sharded path therefore carries roughly **7× of overhead** beyond what the mathematics accounts for — communication between cards, redundant work, and synchronisation. Capacity was bought. Efficiency was not.
+
+**Two settings that must stay off.** `ring-3` context parallelism OOMs, because offloading re-copies weights per process. And `use_stream=True` on offloading pins tens of gigabytes and gets the process OOM-killed by the kernel with no traceback at all — the worst failure mode there is, because there is nothing to read afterwards.
+
+## What is still true
+
+<div class="callout warn"><span class="t">Limits that have not moved</span>
 <ul>
-<li><b>Native max ≈ 1024×576</b> for a short clip. Native 1280×720 is not reliable on 8 GB.</li>
-<li><b>720p output is achieved by upscaling</b> — a real, production-standard route to a genuine 720p file.</li>
-<li><b>2K is impossible locally in any stack</b> — it requires H3-Regenerate-2K, which MiniMax hasn't open-sourced (API only).</li>
-<li><b>Readable on-screen text remains impossible</b> — no diffusion video model can spell.</li>
-<li>For long <em>and</em> high-res, the honest answer is a bigger GPU (24 GB+) or a rented cloud one.</li>
+<li><b>2K is not available locally in any stack.</b> It requires a regenerate-2K model that has not been open-sourced — API only.</li>
+<li><b>Readable on-screen text remains impossible.</b> No current video diffusion model spells; letters come out as plausible-looking marks.</li>
+<li><b>Identity drifts across chained clips</b> for photoreal faces. Stylised characters hold far better ([ch.33](33-long-video-small-card.html)).</li>
+<li><b>The 15-second ceiling is the model's trained range</b>, not a hardware limit. More VRAM would not extend it.</li>
 </ul>
 </div>
 
-This chapter is the template for the mindset the whole guide teaches: don't accept "it can't" or assume "it can" — research the specific mechanism, verify on your hardware, and build the pipeline the constraints actually allow.
+And the decode stage remains the most dangerous part of a long render, because it runs last. `g4k` denoised for hours and then hit an OOM at clip 14 of the decode — not a capacity wall, but an accumulation bug: every finished pixel chunk was being appended to a GPU-resident list, each around 216 MB at 1280×704. A sibling run, `g4j`, completed **6 hours 10 minutes** of denoise and died on the first line of decode over a device mismatch. Both were one-line fixes. Both cost most of a day ([ch.46](46-the-first-15-seconds.html)).
+
+## The method, which outlasted every number in this chapter
+
+<div class="callout truth"><span class="t">What the two versions of this chapter have in common</span>
+<p>Do not accept "it can't" and do not assume "it can". Find the specific mechanism — here, that the resident activation set is what does not fit, and that offloading only ever touched weights — then verify it on the actual hardware, then build the pipeline the constraint allows. The mechanism held perfectly. The <em>conclusion</em> drawn from it expired the moment the hardware changed, which is exactly what a well-reasoned conclusion is supposed to do.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">resident working set</span><span class="badge">activations</span><span class="badge">group offloading</span><span class="badge">tiled VAE decode</span><span class="badge">expandable_segments</span><span class="badge">reserve-vram</span><span class="badge">SageAttention</span><span class="badge">step caching</span><span class="badge">cascaded generation</span><span class="badge">upscale factor</span><span class="badge">patch_size</span><span class="badge">the 848 trap</span><span class="badge">sharding overhead</span></p>
+<p>If those feel solid, the reason a render costs what it costs is no longer mysterious — it is a resident tensor and a step count.</p></div>
+
+Next: the whole journey from a sentence to a finished file, stage by stage, with the numbers each stage actually moves — [Chapter 08](08-how-a-prompt-becomes-video.html).
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

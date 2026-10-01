@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>35 · Is It Really Ours?</title>
+<meta name="description" content="Everything this project built is the systems layer — ways to run someone else's weights on hardware that should not hold them. That is genuinely ours, and it never changes what the model can generate.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 35 · Ownership — what was built here, what was borrowed, and exactly where the line falls</span>
+
+# Is It Really Ours?
+
+<p class="lede">Yes — but only the plumbing, and the plumbing is smaller than it feels. Everything this project built is the <b>systems layer</b>: ways to run somebody else's trained weights on hardware that should not be able to hold them. That work is real, it is genuinely ours, and it does not change what the model is able to generate.</p>
+
+Here is the whole tension in one line of Python:
+
+```python
+decoded_chunks.append(chunk.to("cpu", copy=True))
+```
+
+That line is the difference between a 720p decode that dies and a 720p decode that finishes. It dropped GPU residency during decode from **7729 MiB to 5639 MiB**, with byte-identical output ([ch.46](46-the-first-15-seconds.html)). Nobody else wrote it. It is also *one line*, and it taught the model nothing.
+
+Holding both of those facts at once — this is ours, and this is small — is the honest position. Most of this chapter is an attempt to be precise about it rather than modest about it, because vague modesty and vague pride are equally useless when the next question is *what to build next*.
+
+<div class="callout truth"><span class="t">Two words to fix before anything else</span>
+<p><b>Training</b> is the one-time run that <em>makes</em> a model: feed it millions of clips and it slowly settles on the weights that turn noise into a face. <b>Inference</b> is every run after that: take the finished weights and generate one video. The thing that gets run then splits in two. The <b>generative core</b> is the model itself — its architecture, its weights, what it is capable of producing at all — and every bit of that was decided during training. The <b>systems layer</b> is the engine that runs those weights: the scheduling, the memory management, the kernels, the pipeline. This chapter is one question with a sharp edge: <b>which of those two did this project actually build?</b></p></div>
+
+## Two different questions a machine answers
+
+A refinery is a useful way to hold this apart. The chemistry decides what molecules can be made at all — that is settled by the process, not by the pipework. The pipework decides throughput: how much of it can be made, how fast, at what cost, and whether the plant runs at all on a given site. A brilliant pipe-fitter never invents a new molecule. A plant with no pipework produces nothing.
+
+So there are two separate questions, and it is easy to answer one while believing the other has been answered:
+
+- **What is possible?** — fixed at training time. 4–15 seconds, 24 fps, 32 kHz stereo, eleven languages, short side 768 by default ([ch.03](03-how-h3-works.html)). Nothing done on this box moved any of that by a millimetre.
+- **What is reachable?** — decided by the systems layer. In August the answer was *one 8 GB card, 512×288, and 15 seconds only if the picture was soft*. Now it is *three cards, 1280×704, 345 frames, natively* ([ch.46](46-the-first-15-seconds.html)).
+
+<svg viewBox="0 0 760 262" width="100%" style="max-width:920px" role="img" aria-label="A large dashed box labelled capability, fixed at training time, containing two smaller boxes: the small August reachable region at 512 by 288 on one card, and the much larger current reachable region at 1280 by 704 by 345 frames on three cards. An arrow between them is labelled everything this project built. The outer boundary never moves.">
+  <defs>
+    <marker id="own1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT IS POSSIBLE  vs  WHAT IS REACHABLE</text>
+  <rect x="4" y="30" width="752" height="196" rx="10" fill="#12161f" stroke="#7aa2ff" stroke-dasharray="5 4"/>
+  <text x="20" y="52" fill="#9fb6e8" font-size="12" font-family="Inter,sans-serif">CAPABILITY — decided in MiniMax's training run. Never moved from here.</text>
+  <rect x="28" y="86" width="188" height="112" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="122" y="112" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">reachable, August</text>
+  <text x="122" y="134" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">512 x 288</text>
+  <text x="122" y="152" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">one 8 GB card</text>
+  <text x="122" y="176" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">long or sharp, never both</text>
+  <rect x="304" y="66" width="424" height="152" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="516" y="94" text-anchor="middle" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">reachable now</text>
+  <text x="516" y="120" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">1280 x 704, 345 frames, native</text>
+  <text x="516" y="142" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">three 8 GB cards, our own pipeline</text>
+  <text x="516" y="168" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">same weights, same architecture,</text>
+  <text x="516" y="186" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">same trained ceiling of 15 seconds</text>
+  <line x1="222" y1="142" x2="298" y2="142" stroke="#5ee0c0" marker-end="url(#own1)"/>
+  <text x="260" y="132" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">all of it</text>
+  <text x="4" y="248" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">The inner region grew by a large factor. The dashed outer edge did not move at all.</text>
+</svg>
+
+Everything in this project lives inside that dashed line. That is not a small achievement, and it is not the achievement it is sometimes mistaken for.
+
+## 1 · What was actually built
+
+Seven things, named honestly. All seven are systems-layer work — ways to run someone else's model cheaper, or at all, on 8 GB cards.
+
+<div class="callout spec"><span class="t">The four inventions</span>
+<ul>
+<li><b>The idle-GPU weight cache</b> — a scheduler for consumer boxes with no NVLink: the cards not currently computing pin prefetched int8 blocks and cut the streaming wait, still 100% int8. A <em>scheduler</em>, not new maths. → <a href="32-thinking-like-a-circuit.html">ch.32</a></li>
+<li><b>The 8 GB streaming memory scheduler</b> — int8 block-streaming that runs a 33-billion-parameter model on an 8 GB card by keeping one layer's weights resident and feeding the rest from RAM. Changes what <em>fits</em>, not what the model is. → <a href="29-where-numbers-live.html">ch.29</a></li>
+<li><b>Fused rotary and chunked attention / FFN kernels</b> — our own kernels for long video on tiny VRAM: fuse <code>_apply_rotary_emb</code>, tile attention and the SwiGLU feed-forward over the sequence so peak memory goes flat in $N$. → <a href="34-open-use-close-flashattention.html">ch.34</a></li>
+<li><b>Chunk-and-chain orchestration</b> — render a few seconds at a time and stitch, to beat the single-context length wall. → <a href="33-long-video-small-card.html">ch.33</a></li>
+</ul></div>
+
+<div class="callout spec"><span class="t">And three small ones the render logs forced out</span>
+<ul>
+<li><b>The decode device fix</b> — the sharded forward returns latents on CPU while <code>_execution_device</code> answers <code>cuda:0</code>, so the first line of decode throws. Present in <em>both</em> decode steps, at <code>decoders.py:185</code> and <code>:245</code>. → <a href="46-the-first-15-seconds.html">ch.46</a></li>
+<li><b>The latent-backup rule</b> — write the latents to disk the instant denoise hands them over, before anything downstream can fail. Cost: 69 MB. → <a href="46-the-first-15-seconds.html">ch.46</a></li>
+<li><b>The VAE chunk offload</b> — finished pixel chunks were accumulating on the GPU inside <code>_decode</code>; moving them to CPU on append dropped decode residency from 7729 to 5639 MiB with identical arithmetic. → <a href="46-the-first-15-seconds.html">ch.46</a></li>
+</ul>
+<p>Every one of the seven is a way to <em>run</em> H3. Not one of them is H3.</p></div>
+
+## 2 · The honest critique, stated plainly
+
+<div class="callout warn"><span class="t">All of it is logic around the core, not the core</span>
+<p>The core — the architecture, the maths, <em>what the model can generate at all</em> — was forged in MiniMax's training run, on hardware and data this project will never touch. Memory scheduling does not change what is <b>possible</b>; it changes what runs on a $750 box. Fusing a rotary kernel does not teach the model a new kind of motion; it stops the card running out of memory while it computes a motion the weights already knew. This is real engineering, and it is plumbing, not physics. If MiniMax had never trained H3, there would be nothing here to schedule.</p></div>
+
+The sharpest version of the critique is this: none of the seven changed a single weight. Every render on this box produces frames that a datacentre running the same checkpoint would also produce. The work moved *where* the computation can happen and *how much it costs*, never *what it computes*.
+
+## 3 · The bar — when does systems work count as core work?
+
+Here is the part that cuts both ways, and it is the most useful idea in the chapter.
+
+**vLLM's reputation rests on PagedAttention. SGLang's rests on RadixAttention. Both are "just" systems logic too** — and both are famous. So systems work *can* be core-worthy. The bar is not *whether the weights were touched.* The bar is **whether a new algorithm was invented.**
+
+In one line each: **PagedAttention** is vLLM's memory algorithm, which pages an LLM's key/value cache the way an operating system pages RAM, taking fragmentation from 60–80% down to under 4%. **RadixAttention** is SGLang's algorithm for *reusing* that cache across requests which share a prefix. Neither touched a weight. Both changed the field.
+
+That is the proof that the weights are not the only place ownership lives. It also sets an uncomfortable standard for this project's own list: a *scheduler* clears the bar only if the scheduling idea itself is new. The idle-GPU weight cache is the one candidate on the list — and [ch.32](32-thinking-like-a-circuit.html) is where its ceiling gets measured rather than assumed.
+
+## 4 · The ladder of ownership
+
+Four rungs, from where this project stands up to the true core. The honest column is the last one.
+
+<svg viewBox="0 0 760 292" width="100%" style="max-width:920px" role="img" aria-label="A four-rung ladder of ownership: inference systems, reachable today on the box; model surgery, reachable with modest rent; a new algorithm, the affordable deep core needing one rented validation run; and training from scratch, which needs datacenter money. An arrow shows the jump from rung one to rung three is an ideas jump, not a hardware jump.">
+  <defs>
+    <marker id="own2" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">FOUR RUNGS  ·  THE LAST COLUMN IS THE HONEST ONE</text>
+  <rect x="4" y="222" width="520" height="56" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="24" y="246" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">1 · Inference systems — run their model cheaper</text>
+  <text x="24" y="266" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">scheduling, memory, kernels, pipeline</text>
+  <text x="540" y="252" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">running on the box today</text>
+  <rect x="4" y="154" width="520" height="56" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="24" y="178" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">2 · Model surgery — fine-tune, LoRA, prune, distil</text>
+  <text x="24" y="198" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">the result is partly ours</text>
+  <text x="540" y="184" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">a modest rented run</text>
+  <rect x="4" y="86" width="520" height="56" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="24" y="110" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">3 · A new algorithm — a new idea in how generation works</text>
+  <text x="24" y="130" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">step distillation, a continuity method, a compression method</text>
+  <text x="540" y="116" fill="#7aa2ff" font-size="12" font-family="Inter,sans-serif">the affordable deep core</text>
+  <rect x="4" y="30" width="520" height="44" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="24" y="48" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">4 · Train from scratch — our own architecture and weights</text>
+  <text x="24" y="66" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">the true core</text>
+  <text x="540" y="56" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">datacenter money</text>
+  <path d="M700,236 L700,124" fill="none" stroke="#ffb454" marker-end="url(#own2)"/>
+  <text x="712" y="196" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">an ideas</text>
+  <text x="712" y="212" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">jump, not a</text>
+  <text x="712" y="228" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">hardware one</text>
+</svg>
+
+| Level | Meaning | Reachable on this budget? |
+|---|---|---|
+| **Inference systems** *(where this project sits)* | Run their model cheaper — scheduling, memory, kernels | **doing it** |
+| **Model surgery** | Fine-tune, LoRA, prune, distil an existing model, so the result is partly ours | **with modest rent** — a ~$5 LoRA run ([ch.20](20-how-far-we-can-go.html)) |
+| **New algorithm / method** | A new idea in *how generation works* | **the affordable deep core** — validated with one rented run |
+| **Train from scratch** | Our own architecture and weights — the true core | **no** — millions of dollars, thousands of GPU-hours |
+
+Only rung 4 needs a fortune. The jump from rung 1 to rung 3 costs almost nothing in hardware and almost everything in thinking, which is precisely why it stays unclimbed by most people who could afford it.
+
+## 5 · Where ideas beat money
+
+<div class="callout truth"><span class="t">The biggest leaps in this field were algorithms, not bigger clusters</span>
+<p>Look at what actually moved diffusion forward. <b>Flow matching. Consistency models. LCM. Rectified flow. SVDQuant.</b> Not one of them was "we had more GPUs." Every one was an <b>idea</b>, proven at small scale, that then generalised to the big models. That is the door an individual can walk through: MiniMax's cluster is not a prerequisite for MiniMax's <em>insight</em>. The insight is free. Only the final validation costs money — and the validation is the cheap half.</p></div>
+
+This is not optimism, it is a structural feature of the field. An architecture idea is expressed in a few hundred lines and tested at a scale that fits on a hobbyist's card; the expensive part is scaling a *proven* idea, and scaling proven ideas is exactly what funded labs are good at. The asymmetry runs in the small builder's favour at the one stage that matters most.
+
+## 6 · The three core moves that could actually be attempted
+
+Rung 3 is not abstract. Three concrete shots at it, in order of feasibility.
+
+- **Step distillation, 49 steps down to about 4.** Teach a student model to jump in ~4 steps what the teacher does in 49. This changes the **generative maths itself**, not the plumbing. The measured step counts on this box make the prize obvious: a wide vista with a small distant subject needs **49 steps**; that same content at 1280×704 × 345 frames costs about **90 hours** of denoise ([ch.47](47-the-scorecard.html)). Cutting the step count by an order of magnitude does not make the box faster — it makes the *job* smaller. Needs one modest rented training run. **The bet.**
+- **A real long-video continuity method.** Solve the chunk-and-chain seam, drift and audio-state problem ([ch.33](33-long-video-small-card.html)) with a genuinely new *conditioning* algorithm rather than a bigger overlap window. An open research problem; identity drift on photoreal faces across chained clips is a measured failure here, not a theoretical one.
+- **A new compression method, SVDQuant-class.** *Invent* a better way to compress a model rather than *apply* an existing quantization. Provable at small scale, then generalised — the same shape as every win in §5.
+
+## 7 · The honest cost
+
+<div class="callout spec"><span class="t">Ideas are free; validating them costs GPU-hours</span>
+<p>The asymmetry is the whole point. <b>Systems work runs on this box today</b> — the streaming scheduler, the kernels, chunk-and-chain, the three-GPU sharded forward, all of it ran on 8 GB cards that were already bought. <b>Core work needs a rented run to prove the idea.</b> A distillation run means renting a few large GPUs briefly: build the dataset here for free, rent the training ([ch.20](20-how-far-we-can-go.html)). Nobody buys the cluster; what gets rented is the twenty minutes of it that physics will not give away. The idea is the hard part and it is free. The proof is the easy part and it is rented.</p></div>
+
+## 8 · Can this engine beat ComfyUI? Yes — by a number smaller than it sounds
+
+Worth stating precisely, because the exciting version of this claim is false.
+
+Our fused int8 GEMM kernel **beat ComfyUI's path by about 3× on the matmul specifically** ([ch.21](21-build-vs-buy.html)). But matmuls are only about **12% of the forward pass**, and about **9.5% end-to-end** ([ch.20](20-how-far-we-can-go.html)). Amdahl's law does the rest of the arithmetic. With $p$ the fraction of the work sped up and $s$ the speedup on that fraction ([`math-model`](14-the-math-behind-it.html)):
+
+$$\text{overall} = \frac{1}{(1-p) + p/s} = \frac{1}{0.905 + 0.095/3} \approx 1.07\times$$
+
+<svg viewBox="0 0 760 216" width="100%" style="max-width:920px" role="img" aria-label="A bar showing an end-to-end render: about nine and a half percent is matmul, the rest is everything else. Making the matmul three times faster removes about six percent of the total, which is an overall speedup of roughly one point zero seven times, not three times.">
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">A 3x KERNEL WIN, SPENT THROUGH AMDAHL'S LAW</text>
+  <text x="4" y="46" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">one render, before</text>
+  <rect x="4" y="56" width="72" height="36" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="76" y="56" width="680" height="36" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <text x="40" y="79" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">9.5%</text>
+  <text x="416" y="79" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">the other 90.5% — attention plumbing, norms, rotary, streaming, decode</text>
+  <text x="4" y="128" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">one render, after the 3x kernel</text>
+  <rect x="4" y="138" width="24" height="36" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="28" y="138" width="680" height="36" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <rect x="708" y="138" width="48" height="36" rx="4" fill="#12161f" stroke="#232c3b" stroke-dasharray="4 3"/>
+  <text x="16" y="161" text-anchor="middle" fill="#eafff8" font-size="10" font-family="Inter,sans-serif">3.2</text>
+  <text x="732" y="161" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">saved</text>
+  <text x="4" y="200" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">3x on 9.5% of the work = about 1.07x overall. A real flag on one kernel. Not a 3x pipeline.</text>
+</svg>
+
+<div class="callout warn"><span class="t">What the 3× is, and what it is not</span>
+<p>It is <b>proof that a hand-built engine can outperform a prebuilt tool on a kernel that matters</b> — the foundation of the whole "build the engine" argument. It is <b>not</b> a finished victory, and the claim "we beat ComfyUI 3×" should never be made. The measured position is: 3× on roughly a tenth of the work, which is about <b>1.07× end to end</b>. One brick, not a building.</p></div>
+
+And the counter-example is on the box too, which is what makes it honest. When the int8 path was benchmarked head-to-head against a **Q4_K_M GGUF** on the same scene, Q4 finished in **52 minutes against int8's 107** — a **2.05× win for the path we did not write**, at *lower* peak VRAM (7.06 GB vs 7.5 GB) and *higher* native resolution (704×384 vs 576×320), with quality a tie by eye ([ch.13](13-int8-vs-q4.html)). Part of that gap is self-inflicted: our own chunking patch added per-row loop overhead to int8. Owning the code cuts both ways.
+
+## 9 · The smallest honest unit of ownership
+
+The most defensible thing on the list is also the smallest, and it is worth looking at closely because it shows what "ours" means when the claim is precise.
+
+Profiling the 8 GB wall found that roughly **88%** of the real-tensor peak was not weights at all — it was the int8 GEMM's working buffers, with a single `fast_int8_mm` temporary of **2.24 GB** ([`math-model`](14-the-math-behind-it.html)). That temporary is the full $[M,N]$ int32 output materialised in one shot. But the rows of an int8 linear are independent — each row has its own scale — so the product can be computed in row blocks and never materialised whole:
+
+$$\mathbf{Y}[R_i,:] = \big(\mathbf{X}_8[R_i,:]\,W_8^\top\big)\cdot(s_{R_i}\,s_w), \qquad \bigcup_i R_i = \{1..M\}$$
+
+<div class="callout truth"><span class="t">A patch small enough to verify completely</span>
+<p>Peak memory fell from <b>5.9 GB to 3.9 GB</b>, and the output was proven <b>bit-identical</b> — not "close", not "within tolerance", but <code>torch.equal</code> returning true. The two gigabytes bought resolution: <b>576×320 → 768×448</b>, which is $344064 / 184320 = \mathbf{1.87\times}$ the pixels on the same card.</p>
+<p>That is the shape of every honest claim in this chapter. It is provably correct, it is provably ours, it is measured in gigabytes rather than in capability — and it cost speed elsewhere. Ownership at this scale comes with a receipt on both sides.</p></div>
+
+## 10 · The verdict
+
+<div class="callout truth"><span class="t">The engine is the vehicle; the core is the soul</span>
+<p>The systems engine is the <b>vehicle</b>; the algorithmic core is the <b>soul</b>. The cheap consumer engine gets built because it makes experiments cheap — and then it gets used to chase the one algorithmic idea that would genuinely be ours. The two are not rivals, they are a sequence. <b>The plumbing earns the right to attempt the physics.</b> Without the engine, every experiment costs rental money. With it, the box becomes a lab, and a lab is where a new idea gets proven before anybody will fund the run that scales it.</p></div>
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>Everything built here is the systems layer</b> — streaming scheduler, idle-GPU cache, fused and chunked kernels, chunk-and-chain, plus three small render-log fixes. Ways to <em>run</em> H3, never H3 itself. Plumbing, not physics.</li>
+<li><b>The capability envelope never moved.</b> What grew was the reachable region inside it: 512×288 on one card to native 1280×704 × 345 frames on three.</li>
+<li><b>Systems work can still be core-worthy.</b> PagedAttention and RadixAttention were "just" systems logic — but they were <em>new algorithms</em>. The bar is whether a new algorithm was invented, not whether the weights were touched.</li>
+<li><b>The ladder has four rungs</b> — inference systems, model surgery, new algorithm, train from scratch. Rung 1 to rung 3 is an ideas jump; only rung 4 needs a fortune.</li>
+<li><b>Ideas beat money at the one stage that matters.</b> Flow matching, consistency models, LCM, rectified flow, SVDQuant were insights proven small, not larger clusters.</li>
+<li><b>The bet is step distillation</b> — 49 steps to about 4 changes the generative maths, and the 90-hour native-720p figure shows exactly what it would be worth.</li>
+<li><b>The ComfyUI win is 3× on ~9.5% of the work</b>, which Amdahl turns into about <b>1.07×</b> end to end. Meanwhile a Q4 path we did not write beat our int8 path <b>2.05×</b>. Owning the code cuts both ways.</li>
+<li><b>The most defensible claim is the smallest one</b> — a row-blocked int8 matmul, bit-identical by <code>torch.equal</code>, 5.9 GB down to 3.9 GB, 1.87× the pixels. Provable, ours, and modest.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">training</span><span class="badge">inference</span><span class="badge">generative core</span><span class="badge">systems layer</span><span class="badge">capability vs reachability</span><span class="badge">PagedAttention</span><span class="badge">RadixAttention</span><span class="badge">ladder of ownership</span><span class="badge">model surgery</span><span class="badge">step distillation</span><span class="badge">Amdahl's law</span><span class="badge">bit-identical</span></p>
+<p>If those feel solid, the next chapter is one of the systems-layer inventions taken apart in full.</p></div>
+
+Next: the first serious attempt to make three cards work on a single render — context parallelism, what came back green, and the wall it hit.
+
+<p class="small">The idle-GPU weight cache is examined in <a href="32-thinking-like-a-circuit.html">ch.32</a>; the build-versus-buy accounting behind the 3× is <a href="21-build-vs-buy.html">ch.21</a>; the engine landscape where vLLM and SGLang live is <a href="25-inference-engine-landscape.html">ch.25</a>; the ceiling map and the dataset-plus-rent plan are <a href="20-how-far-we-can-go.html">ch.20</a>; the fused and chunked kernels are <a href="34-open-use-close-flashattention.html">ch.34</a>; the int8 versus Q4 benchmark is <a href="13-int8-vs-q4.html">ch.13</a>; the three small fixes are <a href="46-the-first-15-seconds.html">ch.46</a>; and the full ledger of what renders is <a href="47-the-scorecard.html">ch.47</a>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

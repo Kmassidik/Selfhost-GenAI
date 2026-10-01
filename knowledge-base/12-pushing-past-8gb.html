@@ -3,78 +3,282 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>12 · Pushing Past 8GB — What the Research Says</title>
+<title>12 · Pushing Past 8 GB — What the Research Says</title>
+<meta name="description" content="Why quantization shrinks weights but not activations, what three papers said about fitting native 720p video into 8 GB, and how the wall they described was eventually walked around rather than broken.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
 <span class="kicker">Chapter 12 · Research, honestly</span>
 
-# Pushing Past 8GB — What the Papers Actually Say
+# Pushing Past 8 GB — What the Papers Actually Say
 
-<p class="lede">We asked the real question: can we optimize the <em>code</em> to break the 8GB ceiling, and contribute it back to the community? So we read the actual research. This chapter is what we learned — including the parts that killed our own ideas. That's the point: measure and read <em>before</em> you build.</p>
+<p class="lede">The research says the 8 GB ceiling on video generation is set by <b>activations</b> — the temporary working data a render creates — and not by the weights everyone tries to shrink. That diagnosis was correct, it was confirmed by profiling on this box, and it made a prediction about native 720p that this project later disproved without ever contradicting the physics.</p>
+
+There is a specific moment worth describing, because it is where this chapter began. A memory snapshot of a single denoising step came back with 272 live allocations, and the largest one was **2,240 MB — a single temporary tensor** created by the quantization kernel that was supposed to be *saving* memory. Nothing about the model architecture was in the top five. The weights were not the problem. The arithmetic *about* the weights was.
 
 <div class="callout truth"><span class="t">The one lesson that governs everything below</span>
-<p>A big model has two kinds of memory cost: the <b>weights</b> (the model's stored numbers) and the <b>activations</b> (the temporary working data during a render). <b>Quantization shrinks the weights. It does almost nothing for activations.</b> And for <em>video</em>, the activations — especially attention over hundreds of frames — are the real wall. This is exactly what we measured on our own box, and every paper confirms it.</p></div>
+<p>A big model has two kinds of memory cost: the <b>weights</b> (the model's stored numbers, fixed for the life of the file) and the <b>activations</b> (the temporary working data that exists only during a forward pass). <b>Quantization shrinks the weights. It does almost nothing for activations.</b> For video, where attention runs over hundreds of frames at once, the activations are the wall. Every paper below says so; so did our own profiler.</p></div>
 
-## Why this matters for us specifically
+## Two budgets that look like one number
 
-We wanted to know: could a smarter quantization (W4A8) let us render **native 720p** on 8GB, killing the upscale-crutch that causes our boil, soft eyes, and judder? The papers give an honest answer, and it's nuanced.
+`nvidia-smi` reports a single figure, which is why the distinction is so easy to miss. A useful structural analogy: a workshop has a **stock room** of raw material and a **workbench** where a part is being cut. Buying thinner stock (quantization) fills the stock room with more parts. It does not make the bench bigger, and it does nothing about the pile of offcuts, jigs and scrap that accumulate on the bench while a single part is being machined. On this build the bench is 8 GB, and the offcuts are enormous.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Two separate memory budgets: weights, which quantization shrinks from 66 GB in bf16 to 20 GB in int8 and which stream from RAM a block at a time, and activations, a 5.9 GB per-step working set that quantization does not shrink and in fact partly creates.">
+  <defs>
+    <marker id="p1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="p2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE NUMBER ON THE METER · TWO COMPLETELY DIFFERENT BUDGETS</text>
+  <rect x="2" y="28" width="366" height="196" rx="10" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="52" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">WEIGHTS — what the model is</text>
+  <text x="20" y="70" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">stored once · streamed from RAM one block at a time</text>
+  <rect x="20" y="84" width="330" height="26" rx="4" fill="#12161f" stroke="#3a4a63"/>
+  <text x="185" y="102" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="SF Mono,monospace">bf16 transformer — ~66 GB</text>
+  <line x1="185" y1="116" x2="185" y2="132" stroke="#5ee0c0" marker-end="url(#p1)"/>
+  <text x="196" y="129" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">quantize to int8</text>
+  <rect x="20" y="138" width="100" height="26" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="70" y="156" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="SF Mono,monospace">int8 — 20 GB</text>
+  <text x="20" y="186" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">3.3x smaller. Real, and it worked.</text>
+  <text x="20" y="204" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">0.65 GB per block · one block on the card at a time</text>
+  <rect x="392" y="28" width="366" height="196" rx="10" fill="#151b26" stroke="#ff6b6b"/>
+  <text x="410" y="52" fill="#ffdede" font-size="13" font-family="Inter,sans-serif">ACTIVATIONS — what a render makes</text>
+  <text x="410" y="70" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">created and destroyed inside every forward pass</text>
+  <rect x="410" y="84" width="330" height="26" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="575" y="102" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="SF Mono,monospace">5.9 GB of live tensors, per step</text>
+  <line x1="575" y1="116" x2="575" y2="132" stroke="#ff6b6b" marker-end="url(#p2)"/>
+  <text x="586" y="129" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif">quantize the weights again?</text>
+  <rect x="410" y="138" width="322" height="26" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="571" y="156" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="SF Mono,monospace">still 5.9 GB — nothing moved</text>
+  <text x="410" y="186" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">And 88% of it belongs to the int8 kernels themselves.</text>
+  <text x="410" y="204" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the saving in the stock room paid for scrap on the bench</text>
+  <rect x="120" y="234" width="520" height="30" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="380" y="253" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">Shrinking the left box is easy. The right box is the one that decides what renders.</text>
+</svg>
+
+## What the profiler found, before any paper was read
+
+The order matters. Measurement came first, and it killed two plausible ideas before a line of optimisation was written.
+
+**E-0 — does peak VRAM scale with the problem?** Running the same scene at several sizes with two steps produced peaks of 6,570 MB at 73 frames, **6,570 MB again at 181 frames** — identical — and 7,834 MB at 362 frames. Resolution barely registered: 512×288 and 576×320 at 362 frames peaked at 7,834 and 7,832 MB. The conclusion was a **fixed floor of roughly 6.5 GB** that had nothing to do with how big the video was.
+
+**E-1 — which phase owns the peak?** Sampling at 5 Hz across one 576×320 × 362-frame run and aligning the samples to phase markers gave: encoder phase 2,996 MB, sampling phase **7,832 MB**, decode phase 7,578 MB. The hypothesis that the 26 GB text encoder was squatting in VRAM was rejected outright — it never exceeded 3 GB. (The decode figure was later corrected: wrapping the decoder directly showed an allocated peak of only **1,162 MB**. The 7,578 was leftover *reserved* pool from sampling, not consumption. A near-miss that would have sent the whole project chasing the VAE.)
+
+**E-3 — chunk the FFN, the "obvious" fix.** Every survey names the 4×D feed-forward intermediate as the largest transient in a transformer block. Sweeping a chunked-FFN implementation over 2, 4, 8 and 16 chunks gave peaks of 7,832 · 7,832 · 7,162 · 7,832 MB. Flat, except one non-monotonic dip that did not hold when the chunk count doubled — allocator noise, not an effect. **The received wisdom was wrong for this stack**, and only a sweep could have shown it.
+
+**E-3b — the snapshot.** Recording the allocator's history and replaying it to the moment of maximum total gave the breakdown that ended the guessing.
+
+<svg viewBox="0 0 760 226" width="100%" style="max-width:920px" role="img" aria-label="Allocation-site breakdown of the 5.9 GB peak: a single 2,240 MB fast_int8_mm temporary dominates, followed by two 1,119 MB int8_linear sites, about 600 MB of convrot rotation and rounding, and about 500 MB of genuine model forward tensors.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHERE THE 5.9 GB OF LIVE TENSORS ACTUALLY WERE — 272 ALLOCATIONS, ONE STEP</text>
+  <rect x="2" y="34" width="266" height="42" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="270" y="34" width="132" height="42" rx="4" fill="#2a2420" stroke="#ffb454"/>
+  <rect x="404" y="34" width="132" height="42" rx="4" fill="#2a2420" stroke="#ffb454"/>
+  <rect x="538" y="34" width="72" height="42" rx="4" fill="#1f2230" stroke="#6f7b8f"/>
+  <rect x="612" y="34" width="60" height="42" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="674" y="34" width="84" height="42" rx="4" fill="#12161f" stroke="#232c3b"/>
+  <text x="135" y="60" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="SF Mono,monospace">2240 MB</text>
+  <text x="336" y="60" text-anchor="middle" fill="#ffd9a0" font-size="11.5" font-family="SF Mono,monospace">1119</text>
+  <text x="470" y="60" text-anchor="middle" fill="#ffd9a0" font-size="11.5" font-family="SF Mono,monospace">1119</text>
+  <text x="574" y="60" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="SF Mono,monospace">~600</text>
+  <text x="642" y="60" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="SF Mono,monospace">~500</text>
+  <text x="716" y="60" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="SF Mono,monospace">rest</text>
+  <line x1="135" y1="80" x2="135" y2="98" stroke="#ff6b6b"/>
+  <text x="135" y="114" text-anchor="middle" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">fast_int8_mm — quantization.py:754</text>
+  <text x="135" y="130" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">ONE int32 temporary, the full matmul result</text>
+  <line x1="336" y1="80" x2="336" y2="140" stroke="#ffb454"/>
+  <text x="336" y="156" text-anchor="middle" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">int8_linear x9 (:1048)</text>
+  <line x1="470" y1="80" x2="470" y2="164" stroke="#ffb454"/>
+  <text x="470" y="180" text-anchor="middle" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">int8_linear (:1051)</text>
+  <line x1="642" y1="80" x2="642" y2="188" stroke="#7aa2ff"/>
+  <text x="642" y="204" text-anchor="middle" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">the actual model forward</text>
+  <text x="642" y="220" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">rope table, patchify, blocks</text>
+  <text x="574" y="196" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">rotate + round</text>
+  <text x="2" y="212" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">88% of the peak is quantization machinery.</text>
+</svg>
+
+<div class="callout truth"><span class="t">The finding that redirected the project</span>
+<p><b>Roughly 88% of the real peak was int8 quantization and GEMM working buffers</b> — <code>fast_int8_mm</code>, <code>int8_linear</code>, activation rotation, rounding. Not the FFN intermediate. Not attention. Not resident weights. That single fact explains every earlier negative result: FFN-chunking and attention-splitting could not help because the memory was never in the tensors they partition. It was in the arithmetic that made int8 possible in the first place.</p></div>
+
+Around the 5.9 GB of real tensors sat about 0.5–0.7 GB of allocator slack and 1.2–1.4 GB of CUDA context and driver overhead, which together explain the 7.8 GB the meter reported. A later experiment tried to reclaim the gap with `empty_cache()` between phases: 7,568 MB against 7,578 MB. Noise. That overhead is fixed cost, not stranded cache.
+
+## The fix that followed directly from the measurement
+
+`int8_linear` already chunked its *scaling* loop, but it first materialised the complete int32 `[M, N]` matmul result — the 2,240 MB. Because each output row uses only its own row of the input and its own scale factor, the rows are independent, so the matmul can be moved *inside* the row-chunk loop and written into a pre-allocated output buffer. No full intermediate ever exists.
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:920px" role="img" aria-label="The exact chunk patch: before, the whole int32 matmul result is materialised as a 2.24 GB temporary and then scaled; after, the matmul runs inside the row-block loop and writes directly into a pre-allocated output, dropping the sampling peak from 5,925 to 3,887 MB with bit-identical results.">
+  <defs>
+    <marker id="c1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+    <marker id="c2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SAME ARITHMETIC · DIFFERENT ORDER · BIT-IDENTICAL OUTPUT</text>
+  <text x="2" y="42" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">BEFORE</text>
+  <rect x="2" y="52" width="72" height="60" rx="4" fill="#12161f" stroke="#3a4a63"/>
+  <text x="38" y="86" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="SF Mono,monospace">X8</text>
+  <text x="82" y="86" fill="#6f7b8f" font-size="12" font-family="SF Mono,monospace">@</text>
+  <rect x="98" y="52" width="72" height="60" rx="4" fill="#12161f" stroke="#3a4a63"/>
+  <text x="134" y="86" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="SF Mono,monospace">W8t</text>
+  <line x1="176" y1="82" x2="212" y2="82" stroke="#ff6b6b" marker-end="url(#c1)"/>
+  <rect x="216" y="46" width="220" height="72" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="326" y="76" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">full int32 [M, N] result</text>
+  <text x="326" y="98" text-anchor="middle" fill="#ffdede" font-size="14" font-family="SF Mono,monospace">2240 MB, all at once</text>
+  <line x1="440" y1="82" x2="476" y2="82" stroke="#ff6b6b" marker-end="url(#c1)"/>
+  <rect x="480" y="52" width="150" height="60" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="555" y="78" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">scale row by row</text>
+  <text x="555" y="98" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">(already chunked here)</text>
+  <text x="644" y="86" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">-&gt; output</text>
+  <line x1="2" y1="132" x2="758" y2="132" stroke="#232c3b"/>
+  <text x="2" y="158" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">AFTER</text>
+  <rect x="2" y="168" width="72" height="60" rx="4" fill="#12161f" stroke="#3a4a63"/>
+  <text x="38" y="194" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="SF Mono,monospace">X8[Ri]</text>
+  <text x="38" y="212" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">one row block</text>
+  <text x="82" y="202" fill="#6f7b8f" font-size="12" font-family="SF Mono,monospace">@</text>
+  <rect x="98" y="168" width="72" height="60" rx="4" fill="#12161f" stroke="#3a4a63"/>
+  <text x="134" y="202" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="SF Mono,monospace">W8t</text>
+  <line x1="176" y1="198" x2="212" y2="198" stroke="#5ee0c0" marker-end="url(#c2)"/>
+  <rect x="216" y="176" width="106" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="269" y="196" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">one slice</text>
+  <text x="269" y="212" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">scaled at once</text>
+  <line x1="326" y1="198" x2="362" y2="198" stroke="#5ee0c0" marker-end="url(#c2)"/>
+  <rect x="366" y="168" width="180" height="60" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="456" y="192" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">pre-allocated output</text>
+  <text x="456" y="212" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">written in place, block by block</text>
+  <path d="M456,232 L456,242 L269,242 L269,224" fill="none" stroke="#5ee0c0" stroke-dasharray="4 3" marker-end="url(#c2)"/>
+  <rect x="566" y="160" width="192" height="76" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="662" y="182" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">sampling peak</text>
+  <text x="662" y="204" text-anchor="middle" fill="#5ee0c0" font-size="14" font-family="SF Mono,monospace">5925 -&gt; 3887 MB</text>
+  <text x="662" y="224" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">torch.equal == True</text>
+</svg>
+
+The result was **2,038 MB freed during sampling, a 34% reduction, proven bit-identical** — `torch.equal(original, chunked)` returned `True`, maximum absolute difference 0.0, with the rotation path both on and off. Not "close enough". Equal.
+
+That freed memory bought resolution. At 362 frames with two steps, the ceiling moved:
+
+| Native resolution | Peak | Before the patch | After |
+|---|---|---|---|
+| 576×320 | 7,832 MB | the ceiling | comfortable |
+| 640×384 | 7,618 MB | OOM | works |
+| 704×384 | 7,594 MB | OOM | works — the reliable choice, ~600 MB margin |
+| **768×448** | **7,828 MB** | OOM, hard | works — the hard ceiling, ~360 MB margin |
+| 832×480 | — | OOM | still OOM |
+
+<div class="callout truth"><span class="t">1.87x the pixels, for free, on the same card</span>
+<p>768×448 against 576×320 is <b>1.87x the pixels</b> at 15 s, with zero quality cost, no new hardware, and no move to 4-bit weights. A systems optimisation converted directly into picture quality. This was the headline result of the entire single-card phase — and it came from a profiler, not from an idea.</p></div>
 
 ## The three papers, in plain words
 
+Only after the box had been measured did reading the literature become useful, because the papers could then be checked against something.
+
+| Paper | What it does | What it teaches this build |
+|---|---|---|
+| **ViDiT-Q** (2024) | Post-training **W4A8 / W8A8** quantization built for Diffusion Transformers. 2–2.5× memory saving, 1.4–1.7× speedup, "negligible" quality loss. | W4A8 on a DiT is **proven near-lossless** — 4-bit weights are a real option, not a gamble. |
+| **QuantSparse** (2025) | W4A8 **plus attention sparsification** (keep 15% of attention) on Wan2.1-14B and HunyuanVideo. Storage **26.6 → 7.0 GB**. | The number that matters: peak inference memory only fell **42 → 28 GB**. Weights shrank 3.8×; **activations barely moved.** |
+| **Native INT8 GEMM for Consumer GPUs** (2026) | A fused **Triton INT8 kernel** that actually engages Ampere's INT8 tensor cores instead of silently falling back to bf16. | Independently published confirmation of what the snapshot found here: the production int8 path dequantizes and never touches the fast datapath. |
+
+The third paper is the uncomfortable one. It describes, in a peer-reviewed venue, almost exactly the bottleneck that E-3b found by accident — which is both a validation of the method and a reminder that this ground was already claimed. It also killed an idea outright: the paper reports that **"torch.compile graph-breaks at the custom [int8] linears — zero gain."** A speculative ~20% speedup from compilation was struck off the plan before a day was spent on it.
+
+<div class="callout danger"><span class="t">The number that ended the "native 720p on one 8 GB card" dream</span>
+<p>QuantSparse quantized a 14B video model to 4 bits <em>and</em> discarded 85% of its attention — the most aggressive compression in the literature — and still needed <b>28 GB</b> of peak memory for a high-resolution clip. H3 is bigger. The paper's own words: 8 GB is <b>"likely infeasible without aggressive resolution/frame reduction."</b></p></div>
+
+## The prediction — kept, quoted, and then overtaken
+
+This chapter was written when the project ran on one card. It concluded:
+
+> *"Translation: no known technique fits native 720p, 15-second video into 8 GB. The wall is real, and it's activations, not weights."*
+
+And the plan it proposed was modest:
+
+> *"The realistic win: W4A8 weights → free ~8-9 GB → raise native resolution a notch → sharper source. Modest but real."*
+
+Here is what happened instead.
+
+<div class="callout truth"><span class="t">What actually rendered</span>
 <table>
-<tr><th>Paper</th><th>What it does</th><th>What it teaches us</th></tr>
-<tr><td><b>ViDiT-Q</b><br/>(2024)</td><td>Post-training <b>W4A8 / W8A8</b> quantization built specifically for Diffusion Transformers. <b>2–2.5× memory saving, 1.4–1.7× speedup, "negligible" quality loss.</b></td><td>W4A8 on a DiT is <b>proven near-lossless</b> — so shrinking H3's weights 4-bit is a real, safe option, not a gamble.</td></tr>
-<tr><td><b>QuantSparse</b><br/>(2025)</td><td>W4A8 <b>+ attention sparsification</b> (keep only 15% of attention) on Wan2.1-14B & HunyuanVideo. Model storage <b>26.6 → 7.0 GB</b>.</td><td>The killer number: even after all that, <b>peak inference memory only drops 42 → 28 GB.</b> The weights shrank 3.8×; the <em>activations barely moved</em>. Proof that quantization alone can't fit big video on tiny VRAM.</td></tr>
-<tr><td><b>Native INT8 GEMM<br/>for Consumer GPUs</b> (2026)<br/>(the Ideogram paper)</td><td>A fused <b>Triton INT8 kernel</b> that actually uses Ampere's INT8 tensor cores instead of secretly falling back to bf16.</td><td>This is <b>almost exactly our int8 finding</b> — independently published. Confirms our instincts were right, and that this ground is already claimed.</td></tr>
+<tr><th></th><th>Predicted here</th><th>Measured later</th></tr>
+<tr><td>Native 1280×704 × 345 frames (14.4 s)</td><td>"no known technique fits" it</td><td><b>Rendered.</b> 23 steps, ~44 h</td></tr>
+<tr><td>The route</td><td>W4A8 weights, freeing 8–9 GB</td><td><b>W4A8 was never used.</b> The sequence was split across three cards</td></tr>
+<tr><td>Hardware</td><td>implicitly, a bigger card</td><td>a third RTX 3060 Ti — <b>8 GB, same as the others</b></td></tr>
+<tr><td>Cost of being wrong about the route</td><td>—</td><td>the sharded path is <b>34×</b> slower than 832×480, where the maths predicts ~5×</td></tr>
 </table>
+<p>Read the first row carefully, because the prediction was not refuted — it was <em>side-stepped</em>. Nothing here fits native 720p × 15 s into 8 GB. It fits into <b>three</b> 8 GB cards, none of which ever holds the whole activation.</p></div>
 
-<div class="callout warn"><span class="t">The number that ends the "native 720p on 8GB" dream (honestly)</span>
-<p>QuantSparse quantized a 14B video model to 4-bit <em>and</em> threw away 85% of its attention — the most aggressive compression in the literature — and it <b>still needed 28 GB</b> of peak memory for a high-res clip. H3 is bigger (33B). The paper itself says 8GB is <b>"likely infeasible without aggressive resolution/frame reduction."</b> Translation: no known technique fits native 720p, 15-second video into 8 GB. The wall is real, and it's activations, not weights.</p></div>
+The mechanism is worth drawing, because it is the difference between the chapter's framing and reality. The chapter asked "how do we make the working set small enough for one card?" The answer that worked asked a different question: "why does one card have to hold all of it?"
 
-## Two of our own ideas — one survived, one died
+<svg viewBox="0 0 760 258" width="100%" style="max-width:920px" role="img" aria-label="Why three 8 GB cards succeed where one cannot: a single card must host the full 5.7 GB activation scratch plus 1.2 GB of context, leaving 0.76 GB free, while splitting the token sequence three ways drops each card's scratch to about 1.9 GB and leaves 4.56 GB free.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE WALL WAS NEVER MOVED — THE WORK WAS DIVIDED</text>
+  <text x="2" y="40" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">ONE CARD · the whole token sequence</text>
+  <rect x="2" y="50" width="330" height="34" rx="5" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="4" y="52" width="70" height="30" rx="3" fill="#1f2230"/>
+  <text x="39" y="72" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="SF Mono,monospace">ctx 1.20</text>
+  <rect x="76" y="52" width="222" height="30" rx="3" fill="#241a1a"/>
+  <text x="187" y="72" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="SF Mono,monospace">activation scratch 5.70 GB</text>
+  <rect x="300" y="52" width="30" height="30" rx="3" fill="#14342c"/>
+  <text x="342" y="72" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">0.76 GB free — exactly one int8 block</text>
+  <text x="2" y="108" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Nothing left over. Every one of the 50 blocks must stream from RAM, every step.</text>
+  <line x1="2" y1="124" x2="758" y2="124" stroke="#232c3b"/>
+  <text x="2" y="150" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">THREE CARDS · one third of the tokens each</text>
+  <rect x="2" y="160" width="330" height="30" rx="5" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="4" y="162" width="70" height="26" rx="3" fill="#1f2230"/>
+  <text x="39" y="180" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="SF Mono,monospace">ctx 1.20</text>
+  <rect x="76" y="162" width="74" height="26" rx="3" fill="#14342c"/>
+  <text x="113" y="180" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="SF Mono,monospace">1.90</text>
+  <rect x="152" y="162" width="178" height="26" rx="3" fill="#12161f" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <text x="241" y="180" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">4.56 GB free</text>
+  <rect x="2" y="196" width="330" height="24" rx="5" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="4" y="198" width="70" height="20" rx="3" fill="#1f2230"/>
+  <rect x="76" y="198" width="74" height="20" rx="3" fill="#14342c"/>
+  <rect x="152" y="198" width="178" height="20" rx="3" fill="#12161f" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <text x="342" y="212" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">card 2</text>
+  <rect x="2" y="226" width="330" height="24" rx="5" fill="#0f141d" stroke="#232c3b"/>
+  <rect x="4" y="228" width="70" height="20" rx="3" fill="#1f2230"/>
+  <rect x="76" y="228" width="74" height="20" rx="3" fill="#14342c"/>
+  <rect x="152" y="228" width="178" height="20" rx="3" fill="#12161f" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <text x="342" y="242" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">card 3</text>
+  <rect x="416" y="144" width="342" height="106" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="436" y="168" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">The activation is a function of tokens.</text>
+  <text x="436" y="190" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">Give each card a third of the tokens and its</text>
+  <text x="436" y="208" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">scratch is a third: 5.70 -&gt; ~1.90 GB.</text>
+  <text x="436" y="232" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">The bill arrives as time, not as memory.</text>
+</svg>
 
-<div class="callout spec"><span class="t">DIED: "just use torch.compile to go faster"</span>
-<p>The Ideogram paper tried exactly this and reported: <b>"torch.compile graph-breaks at the custom [int8] linears — zero gain."</b> Our int8 path is custom kernels; torch.compile can't fuse through them. So the ~20% speedup I floated earlier <b>isn't real for us.</b> Good thing we read first instead of burning a day on it.</p></div>
+<div class="callout warn"><span class="t">The bill still came</span>
+<p>Splitting the sequence is not free. Going from 832×480 × 345 to 1280×704 × 345 is <b>2.26× the tokens</b>; quadratic attention predicts about <b>5×</b> the time; the measured figure is <b>34×</b>. The three-card path therefore carries roughly a <b>7× overhead beyond the mathematics</b> — hand-rolled ring attention in Python loops, and a copy of every block to every card on every step. It buys memory and sells speed, and the exchange rate is bad ([ch.45](45-three-gpu-sequence-parallelism.html)).</p></div>
 
-<div class="callout truth"><span class="t">SURVIVED: shrink the weights to free VRAM for a bit more resolution</span>
-<p>ViDiT-Q proves W4A8 is near-lossless on DiTs. Our DiT is 20 GB at int8; a good W4A8 quant is ~10-12 GB. That freed VRAM won't get us to native 720p (activations still block it), but it <em>could</em> let us nudge the native generation resolution up a notch (e.g. 576×320 → 704×384) — which directly sharpens the source and reduces the very artifacts we've been fighting. That's a <b>real, testable, honest win</b>, just a modest one.</p></div>
+## What survived from the original chapter, and what did not
 
-## The honest verdict for our build
+<div class="callout spec"><span class="t">Scoring the chapter against what happened</span>
+<table>
+<tr><th>Claim made here</th><th>Verdict</th></tr>
+<tr><td>Quantization shrinks weights, not activations</td><td>✅ <b>Confirmed on the box.</b> The snapshot showed the weights were never the peak</td></tr>
+<tr><td>The activation wall is fundamental to long video</td><td>✅ <b>Still true.</b> It was divided, never removed</td></tr>
+<tr><td><code>torch.compile</code> gives zero gain through custom int8 linears</td><td>✅ Confirmed by the published result; never contradicted here</td></tr>
+<tr><td>"No known technique fits native 720p, 15 s into 8 GB"</td><td>⚠️ <b>True per card, wrong as a project ceiling</b></td></tr>
+<tr><td>W4A8 is the realistic route to more native resolution</td><td>❌ <b>Never used.</b> The 1.87× resolution gain came from an <em>exact</em> chunk patch instead — no precision was traded at all</td></tr>
+<tr><td>Native resolution would rise "a notch", 576×320 → 704×384</td><td>⚠️ <b>Understated.</b> 768×448 at 15 s on one card; 1280×704 at 15 s on three</td></tr>
+</table></div>
 
-```mermaid
-flowchart TD
-    Q["Can code get us to<br/>native 720p on 8GB?"] --> A["Quantize weights<br/>(W4A8, ViDiT-Q)"]
-    A --> B{"Does it fit?"}
-    B -->|"No — activations<br/>still ~28GB (QuantSparse)"| C["native 720p = blocked on 8GB"]
-    A --> D["But weights 20GB → ~11GB<br/>frees VRAM"]
-    D --> E["Push native res a notch<br/>576×320 → 704×384"]
-    E --> F["Sharper source →<br/>less boil / softer-eye / judder"]
-    style Q fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style C fill:#241a1a,stroke:#ff6b6b,color:#ffdede
-    style F fill:#14342c,stroke:#5ee0c0,color:#eafff8
-```
+The pattern is consistent enough to name. Both times this chapter was wrong, it was wrong in the same direction: it assumed the *shape* of the solution — fewer bits — because that was the shape the literature was optimising. The wins that arrived were about **arrangement**: the same arithmetic in a different order (the row-chunk patch), and the same sequence on a different number of devices. Neither threw away a single bit of information.
 
-- **The dream (native 720p on 8GB):** not achievable with any published method. The activation/attention wall is fundamental to long video. Honest.
-- **The realistic win:** W4A8 weights → free ~8-9 GB → raise native resolution a notch → sharper source. Modest but real.
-- **The community contribution:** not a novel algorithm (that's claimed), but a genuinely useful <b>applied</b> thing — "MiniMax-H3 on 8GB: a measured memory recipe + activation-buffer chunk patch + W4A8 weights for higher native res," packaged as a ComfyUI node + a HF writeup. Nobody has published that for H3.
-
-<div class="callout spec"><span class="t">"We have spare RAM — can't we just up the DiT?" (a great question, honest no)</span>
-<p><b>RAM = warehouse</b> (huge, stores the model). <b>VRAM = workbench</b> (tiny 8 GB, where each layer actually computes). Streaming means one layer at a time moves from warehouse to workbench. A <em>bigger/higher-precision</em> DiT (bf16) has (a) <b>bigger parts</b> — 2× layer size — and (b) <b>bigger material on the bench</b> — 2× activations, and for video the activations already fill the 8 GB. So a bigger DiT needs a bigger <b>workbench (VRAM)</b>, not a bigger <b>warehouse (RAM)</b>. Spare RAM can't change what fits in VRAM to compute — which is exactly why we measured 30 GB of it sitting idle. On 8 GB the move isn't "up the DiT," it's <b>down-the-weights (W4A8), up-the-resolution.</b> "Up the DiT" is what the 24 GB card is for.</p></div>
-
-<div class="callout warn"><span class="t">Honesty rule for anything we publish</span>
-<p>The HF community will check our numbers. Every claim — bit-identical, VRAM freed, resolution gained — must be <b>re-measured on the box and reproducible</b>. We share what we can prove, and we cite the papers our work stands on. No overclaiming. Ever.</p></div>
+<div class="callout warn"><span class="t">Honesty rule for anything published from this project</span>
+<p>Every claim — bit-identical, VRAM freed, resolution gained — must be <b>re-measured on the box and reproducible</b>. Where a number here has been superseded, both versions stay on the page with their dates and their hardware. No overclaiming, and no quiet deletions.</p></div>
 
 ## Sources
-- ViDiT-Q — Efficient Quantization of Diffusion Transformers: <code>arxiv.org/abs/2406.02540</code>
-- QuantSparse — Compressing Video DiTs with Quantization + Attention Sparsity: <code>arxiv.org/html/2509.23681</code>
-- Realizing Native INT8 Compute for DiTs on Consumer GPUs: <code>arxiv.org/abs/2606.14598</code>
 
-Next: we pick the realistic win — get a W4A8 H3 quant loaded, re-measure the freed VRAM, and see how far up the native resolution can safely go. Every number measured, every step documented here.
+- ViDiT-Q — Efficient Quantization of Diffusion Transformers: `arxiv.org/abs/2406.02540`
+- QuantSparse — Compressing Video DiTs with Quantization + Attention Sparsity: `arxiv.org/html/2509.23681`
+- Realizing Native INT8 Compute for DiTs on Consumer GPUs: `arxiv.org/abs/2606.14598`
+- Profiling, sweeps and the chunk patch: the lab notebook entries E-0 through E-3e, measured on one RTX 3060 Ti.
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">weights</span><span class="badge">activations</span><span class="badge">peak VRAM</span><span class="badge">allocated vs reserved</span><span class="badge">allocator slack</span><span class="badge">CUDA context</span><span class="badge">memory snapshot</span><span class="badge">allocation site</span><span class="badge">GEMM temporary</span><span class="badge">W4A8</span><span class="badge">attention sparsification</span><span class="badge">bit-identical</span><span class="badge">exact vs approximate lever</span><span class="badge">sequence parallelism</span></p>
+<p>If those feel solid, the quantization comparison that follows will read as a measurement rather than a preference.</p></div>
+
+Next: the head-to-head that decided which quantization this build actually runs — int8 against Q4, same scene, same seed, and a result that is a tie on the axis everyone expects it to win.
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>43 · The Dalang Engine</title>
+<meta name="description" content="Cutting the resolution freed almost nothing, because most of the card was fixed overhead — the finding that turned a memory hunt into the decision to write our own inference engine.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 43 · The wall's real name — and the engine we're building to beat it</span>
+
+# The Dalang Engine
+
+<p class="lede">We chased a 15-second take with context parallelism and hit a wall — but the wall wasn't where we thought. It's not the pixels; it's a fixed 2.2&nbsp;GB buffer that sits on every card no matter how small we make the video. That finding points straight at building our own inference engine — one we've named the <b>Dalang</b>.</p>
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p>Dropping resolution barely moved our out-of-memory point, because ~7.5&nbsp;GB of the ~7.66&nbsp;GB we have is <b>fixed per-card overhead</b> — CUDA context plus the int8 GEMM scratch buffer — not the resolution-scaling activation. <b>The int8 buffer is the real wall.</b> The answer is our own engine: <b>one CPU process (the dalang) holding a single shared 33&nbsp;GB model, directing the GPUs (the puppets) with a hand-written ring so the split is truly ÷N end to end.</b></p></div>
+
+## The measured finding: the wall is the buffer, not the pixels
+
+We ran ring-2 context parallelism (see [ch.36](36-splitting-the-video-cp.html)) on a real **15-second, 345-frame** take. The results:
+
+- **832×480 → OOM by ~36&nbsp;MB.** The process used ~**7.38&nbsp;GB** of the ~7.66&nbsp;GB usable on an 8&nbsp;GB card. Agonizingly close.
+- Auto-dropped to **768×448 → ALSO OOM.** ~**7.51&nbsp;GB** used.
+
+Read that twice. We cut the resolution ~14% and freed **almost nothing** — both attempts pinned at ~7.5&nbsp;GB. If activation memory scaled with pixels the way we assumed, 768×448 should have had hundreds of megabytes of headroom. It didn't. So the memory is *not* dominated by the picture size.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Two stacked bars showing VRAM used by a 345-frame ring-2 render at 832 by 480 and at 768 by 448. Both stop just under the 7.66 gigabyte usable ceiling, and the smaller resolution uses slightly more, because the CUDA context and the int8 GEMM scratch buffer are fixed and the resolution-scaling activation is only a minority of the total.">
+  <defs>
+    <marker id="c1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT ACTUALLY FILLS ONE 8 GB CARD — RING-2, 345 FRAMES</text>
+  <rect x="180" y="30" width="72" height="14" fill="#12161f" stroke="#232c3b"/>
+  <text x="216" y="41" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">CUDA ctx</text>
+  <rect x="252" y="30" width="132" height="14" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="318" y="41" text-anchor="middle" fill="#5ee0c0" font-size="9.5" font-family="Inter,sans-serif">int8 GEMM scratch</text>
+  <rect x="384" y="30" width="132" height="14" fill="#151b26" stroke="#232c3b"/>
+  <text x="450" y="41" text-anchor="middle" fill="#aab4c5" font-size="9.5" font-family="Inter,sans-serif">weights, ring K/V, activation</text>
+  <line x1="640" y1="56" x2="640" y2="212" stroke="#ff6b6b" stroke-dasharray="4 4"/>
+  <text x="646" y="66" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">7.66 GB</text>
+  <text x="646" y="82" fill="#ff6b6b" font-size="10" font-family="Inter,sans-serif">usable</text>
+  <text x="2" y="96" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">832 × 480 × 345f</text>
+  <text x="2" y="114" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the take we wanted</text>
+  <rect x="180" y="80" width="72" height="44" fill="#12161f" stroke="#232c3b"/>
+  <rect x="252" y="80" width="132" height="44" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="384" y="80" width="240" height="44" fill="#151b26" stroke="#232c3b"/>
+  <text x="628" y="107" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">7.38</text>
+  <text x="2" y="172" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">768 × 448 × 345f</text>
+  <text x="2" y="190" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">−14% pixels</text>
+  <rect x="180" y="156" width="72" height="44" fill="#12161f" stroke="#232c3b"/>
+  <rect x="252" y="156" width="132" height="44" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="384" y="156" width="246" height="44" fill="#151b26" stroke="#232c3b"/>
+  <text x="634" y="183" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">7.51</text>
+  <line x1="252" y1="128" x2="252" y2="152" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <line x1="384" y1="128" x2="384" y2="152" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <text x="318" y="146" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">unchanged</text>
+  <line x1="180" y1="224" x2="180" y2="236" stroke="#6f7b8f"/>
+  <line x1="640" y1="224" x2="640" y2="236" stroke="#6f7b8f"/>
+  <line x1="180" y1="230" x2="636" y2="230" stroke="#6f7b8f" marker-end="url(#c1)"/>
+  <text x="2" y="234" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">0 GB</text>
+  <text x="2" y="258" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Cutting the picture by 14% moved the ceiling by nothing — the smaller render used slightly more. The lever was attached to the wrong part.</text>
+</svg>
+
+<div class="callout spec"><span class="t">Decomposing the ~7.5&nbsp;GB</span>
+<p>What actually fills the card, and how each part scales:</p>
+<ul>
+<li><b>CUDA context</b> — ~1.2&nbsp;GB. <em>Fixed.</em> The driver's cost of using the GPU at all.</li>
+<li><b>The int8 <code>convrot</code> GEMM scratch buffer</b> — ~2.2&nbsp;GB. The <code>fast_int8_mm</code> temporary from <a href="13-int8-vs-q4.html">ch.13</a>. Barely shrinks with resolution.</li>
+<li><b>Resident block weights + ring K/V buffers</b> — mostly fixed / weakly scaling. One int8 block is 0.65&nbsp;GB (1.29&nbsp;GB in bf16), and only one is resident at a time.</li>
+<li><b>The true resolution-scaling activation</b> — a <em>minority</em> of the total.</li>
+</ul>
+<p>So resolution and frame count are <b>weak levers</b>. The ~2.2&nbsp;GB int8 buffer is the real wall — and it's the same one we measured in <a href="13-int8-vs-q4.html">ch.13</a> as roughly 88% of our peak VRAM.</p></div>
+
+<div class="callout truth"><span class="t">Three ways to kill the buffer</span>
+<p>Now that we know its name, we know where to aim: <b>(1) Q4</b> dequantizes to fp16 and <em>sidesteps</em> the <code>convrot</code> buffer entirely; <b>(2) a custom memory-efficient int8 CUDA kernel</b> that never allocates the 2.2&nbsp;GB temporary ([ch.41](41-python-is-the-glue.html)); or <b>(3) true ÷N context parallelism</b> that shrinks the buffer per card because each card only runs its own slice's matmuls. Option 3 is the engine below — but first we tested all three for real.</p></div>
+
+## The proof: three experiments, one wall
+
+We didn't argue the wall — we ran three experiments to *prove* it. Each produced a hard pass/fail with a real VRAM number, not a claim.
+
+| # | Experiment | Result | The fact |
+|---|---|---|---|
+| **1** | single-card int8, 512×288, 345 frames (15&nbsp;s) | ✅ **PASS** | exit 0, a real **14.375&nbsp;s** clip, no OOM — but 512×288 is a **~−63% pixel** cut vs 832×480. "Long + soft" works: one 8&nbsp;GB card *can* do 15&nbsp;s, but only by nuking resolution. |
+| **2** | int8 ring-2, 832×480, 243 frames (10.1&nbsp;s sharp) | ❌ **FAIL** | OOM — GPU&nbsp;1 hit ~**7.28&nbsp;GB**, tried +400&nbsp;MB. Dropping frames 345→243 (−30%) moved memory only ~7.4→7.28&nbsp;GB. **Frames are a near-useless lever.** |
+| **3** | Q4 — dequant to fp16, sidesteps the buffer | 🚫 **BLOCKED** | The Q4 GGUF is **absent** on the box, *and* it won't load into our engine: `MiniMaxH3Transformer3DModel.from_single_file` does not exist (H3 is too custom; GGUF only ever worked under ComfyUI, a different engine). The easy dodge is **unavailable in our pipeline.** |
+
+<div class="callout truth"><span class="t">What the three prove together</span>
+<p>The ~2.2&nbsp;GB int8 <code>convrot</code> GEMM buffer is the wall, confirmed <b>three independent ways</b>: 768×448 OOM'd, the 243-frame cut OOM'd, and only a brutal <b>−63% resolution nuke</b> fit. And the <em>free</em> dodge — Q4 — is <b>unavailable in our engine</b>: the file isn't here, and even if it were, our diffusers pipeline can't load a GGUF into H3's custom transformer (Q4 only ever lived under ComfyUI). So beating the buffer at full resolution <em>and</em> length has <b>no drop-in fix</b> — the shortcuts are eliminated, not skipped. The only doors left are <b>(1) the Dalang engine</b> — our own ÷N context parallelism that <em>truly</em> splits the buffer per card (diffusers' CP apparently doesn't, which is why ring-2 still OOM'd with the full-size buffer on every card) — or <b>(2) a custom memory-efficient int8/int4 CUDA kernel</b> that never allocates the temporary. That is exactly why we build Dalang.</p></div>
+
+## The Dalang Engine: our own inference engine
+
+In Indonesian *wayang*, the **dalang** is the puppet-master — one person who holds the entire story and gives every puppet its voice and its moves. That is exactly the architecture we want: the **CPU is the dalang**, holding the whole 33&nbsp;GB model and orchestrating everything; the **GPUs are the wayang** — the puppets — pure compute workers doing what they're told.
+
+<svg viewBox="0 0 760 316" width="100%" style="max-width:920px" role="img" aria-label="One CPU process, the dalang, holds a single 33 gigabyte copy of the model in RAM, splits the sequence into three slices, and streams each block's weights to three GPUs, which pass key and value blocks around a ring between themselves.">
+  <defs>
+    <marker id="c2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+    <marker id="c3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <rect x="2" y="24" width="756" height="94" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="20" y="48" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE DALANG — ONE CPU PROCESS</text>
+  <text x="20" y="72" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">holds the 33 GB model ONCE, in RAM — shared, because there is only one program</text>
+  <text x="20" y="92" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">splits the sequence ÷N · streams each block's weights out and back · drives the ring, pass by pass</text>
+  <text x="20" y="110" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">one process ⇒ one copy — so ring-3's 3 × 33 GB RAM wall never forms</text>
+  <line x1="128" y1="120" x2="128" y2="164" stroke="#7aa2ff" marker-end="url(#c2)"/>
+  <line x1="380" y1="120" x2="380" y2="164" stroke="#7aa2ff" marker-end="url(#c2)"/>
+  <line x1="632" y1="120" x2="632" y2="164" stroke="#7aa2ff" marker-end="url(#c2)"/>
+  <text x="392" y="140" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">block weights, one at a time</text>
+  <rect x="18" y="168" width="220" height="82" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="128" y="192" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">GPU 0 — wayang</text>
+  <text x="128" y="212" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">slice 0 of the sequence</text>
+  <text x="128" y="232" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">per-token math, locally</text>
+  <rect x="270" y="168" width="220" height="82" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="192" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">GPU 1 — wayang</text>
+  <text x="380" y="212" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">slice 1 of the sequence</text>
+  <text x="380" y="232" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">per-token math, locally</text>
+  <rect x="522" y="168" width="220" height="82" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="632" y="192" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">GPU 2 — wayang</text>
+  <text x="632" y="212" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">slice 2 of the sequence</text>
+  <text x="632" y="232" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">per-token math, locally</text>
+  <path d="M238 268 L490 268" stroke="#5ee0c0" stroke-dasharray="5 4" fill="none" marker-end="url(#c3)"/>
+  <path d="M490 288 L742 288" stroke="#5ee0c0" stroke-dasharray="5 4" fill="none" marker-end="url(#c3)"/>
+  <path d="M18 288 L18 300 L742 300 L742 268" stroke="#5ee0c0" stroke-dasharray="5 4" fill="none"/>
+  <text x="364" y="264" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">K/V ring — 4.9 GB/s over PCIe, no NVLink</text>
+  <text x="18" y="264" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">↑ ring closes</text>
+</svg>
+
+<div class="callout spec"><span class="t">What one dalang process buys us</span>
+<ul>
+<li><b>One shared model in RAM (~33&nbsp;GB, not 66 or 99).</b> Because it's a <em>single</em> process, the OS memory-isolation problem from <a href="42-why-two-models.html">ch.42</a> simply <em>vanishes</em> — there's only one program, so there's only one copy, shared by default. Ring-3's RAM wall (3 copies = ~99&nbsp;GB → SIGKILL) is gone.</li>
+<li><b>We control the split end to end.</b> The activation <em>and</em> the int8 buffer are truly ÷N per card, because each card only runs the matmuls for its own slice. Diffusers' black-box context parallelism apparently didn't fully do this — which is why our ring-2 still OOM'd at ~7.5&nbsp;GB with the full-size buffer on each card.</li>
+<li><b>It's our code, so we can attack the 2.2&nbsp;GB buffer directly</b> — chunk it, or eventually replace it with a custom CUDA kernel ([ch.41](41-python-is-the-glue.html)).</li>
+</ul></div>
+
+## The foundation: Ring Attention
+
+We don't invent the hard part from scratch — we build on a paper. **Ring Attention** (Liu, Zaharia, Abbeel, [arXiv:2310.01889](https://arxiv.org/abs/2310.01889)) is exactly the algorithm for splitting one sequence across devices:
+
+- **Split the sequence into $N$ blocks, one per device.** Each device holds only $1/N$ of the activations — its query slice $Q_i$ and its key/value slice $KV_i$.
+- **Rotate the K/V blocks around a ring.** Each pass, device $i$ computes attention between its $Q_i$ and the $KV_j$ block that just arrived, then forwards that block to the next device.
+- **After $N$ passes, every token has attended to the whole sequence** — yet no device ever held more than $1/N$ of it.
+- **Overlap the transfer with the compute.** While a device computes attention on the current K/V block, the *next* block is already in flight to it — hiding the PCIe latency, which matters on a box with no NVLink.
+
+<svg viewBox="0 0 760 292" width="100%" style="max-width:920px" role="img" aria-label="Three ring passes across three devices. In each pass every device computes attention between its own query slice and one key-value block, then forwards that block to its neighbour, so after three passes every query has seen the whole sequence while no device ever held more than one third of it.">
+  <defs>
+    <marker id="c4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE RING — THREE PASSES, NOBODY EVER HOLDS THE WHOLE SEQUENCE</text>
+  <text x="146" y="42" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">device 0 · holds Q₀</text>
+  <text x="380" y="42" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">device 1 · holds Q₁</text>
+  <text x="614" y="42" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">device 2 · holds Q₂</text>
+  <text x="2" y="76" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">pass 1</text>
+  <rect x="60" y="56" width="172" height="34" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="146" y="78" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">Q₀ × KV₀</text>
+  <rect x="294" y="56" width="172" height="34" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="380" y="78" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">Q₁ × KV₁</text>
+  <rect x="528" y="56" width="172" height="34" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="614" y="78" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">Q₂ × KV₂</text>
+  <line x1="232" y1="104" x2="290" y2="104" stroke="#5ee0c0" marker-end="url(#c4)"/>
+  <line x1="466" y1="104" x2="524" y2="104" stroke="#5ee0c0" marker-end="url(#c4)"/>
+  <path d="M700 104 L716 104 L716 118 L44 118 L44 104 L56 104" stroke="#5ee0c0" fill="none" marker-end="url(#c4)"/>
+  <text x="380" y="100" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">forward the K/V block one hop</text>
+  <text x="2" y="152" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">pass 2</text>
+  <rect x="60" y="132" width="172" height="34" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="146" y="154" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q₀ × KV₂</text>
+  <rect x="294" y="132" width="172" height="34" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="154" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q₁ × KV₀</text>
+  <rect x="528" y="132" width="172" height="34" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="614" y="154" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q₂ × KV₁</text>
+  <text x="2" y="204" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">pass 3</text>
+  <rect x="60" y="184" width="172" height="34" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="146" y="206" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q₀ × KV₁</text>
+  <rect x="294" y="184" width="172" height="34" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="206" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q₁ × KV₂</text>
+  <rect x="528" y="184" width="172" height="34" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="614" y="206" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q₂ × KV₀</text>
+  <rect x="60" y="234" width="640" height="46" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="380" y="254" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">each device carries a running maximum and a running denominator across all three passes</text>
+  <text x="380" y="272" text-anchor="middle" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">softmax each block on its own and the answer is plausible — and wrong</text>
+</svg>
+
+<div class="callout warn"><span class="t">The correctness-critical requirement</span>
+<p>Softmax must normalize <b>across all $N$ ring passes</b> — it cannot be taken on each block independently. Each device carries a <b>running maximum</b> and a <b>running denominator</b>, and corrects the partial attention scores as each new K/V block arrives. This is FlashAttention's online-softmax, extended around the ring. Get it even slightly wrong and the output is <em>subtly garbage</em> — plausible-looking but incorrect. So the rule is: <b>verify our attention matches the diffusers reference bit-for-bit on a tiny input before we scale anything up.</b></p></div>
+
+## Step-1 plan (designed, not yet built)
+
+This is a multi-session build, and honesty means saying so: at the time of writing, the Dalang Engine is **designed, not done.** The path is staged so every step is *measurable*, and correctness comes before scale:
+
+<div class="callout spec"><span class="t">The build, in order</span>
+<ol>
+<li><b>One GPU, loaded once.</b> A single-process script that loads the model <em>once</em> and runs a short forward on <em>one</em> GPU — output must match our existing diffusers path. This proves the plumbing and gives us a reference.</li>
+<li><b>Two GPUs, one ring block.</b> Add a second GPU and a hand-written ring attention for a <em>single</em> block; verify the online-softmax output matches the reference bit-for-bit. <b>This is the real milestone</b> — our ring, proven correct.</li>
+<li><b>Scale.</b> Extend to all 50 blocks → three GPUs → chase the full-resolution 15-second take that the buffer denied us.</li>
+</ol></div>
+
+<div class="callout truth"><span class="t">What became of this plan</span>
+<p>All three steps were built, in order, and each is logged with its measurements. Step 1 reproduced the reference at <b>max diff 0.000e+00</b> and step 2's two-GPU ring rendered video perceptually identical to the reference engine at <b>PSNR 37.6&nbsp;dB</b> — both in <a href="44-building-dalang.html">ch.44</a>. Step 3 became the three-card sharded forward of <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>, and the full-resolution 15-second take this chapter set out to chase exists as a file in <a href="46-the-first-15-seconds.html">ch.46</a>: <b>1280×704, 345 frames, 14.375&nbsp;s</b>, rendered on three 8&nbsp;GB cards.</p></div>
+
+## The premise this chapter got wrong
+
+The blame above is laid squarely on the 2.2&nbsp;GB `convrot` buffer. That diagnosis was measured, it was consistent with three experiments — and when the engine was actually built it turned out to be the wrong culprit. It is worth keeping the sentence rather than quietly editing it:
+
+<div class="callout warn"><span class="t">"The ~2.2&nbsp;GB int8 <code>convrot</code> GEMM buffer is the wall"</span>
+<p>The first experiment of the new engine ([ch.44](44-building-dalang.html), E1) chunked every linear individually to shrink that buffer and the peak <b>did not move at all</b>. The reason: the 2.2&nbsp;GB <code>fast_int8_mm</code> temporary belongs to ComfyUI's old <code>convrot</code> int8 path (<a href="13-int8-vs-q4.html">ch.13</a>), and the Dalang engine quantizes with torchao <code>Int8WeightOnlyConfig</code> — <b>weight-only</b>, dequantize to bf16, with <em>no activation scratch buffer at all</em>. The real wall was <b>resident activations</b>, chiefly the feed-forward network's 14336-wide intermediate. The right lever was chunking the FFN as a unit, which the buffer theory would never have suggested.</p></div>
+
+<div class="callout truth"><span class="t">Why the wrong premise still produced the right decision</span>
+<p>Note what survived the correction. The <em>measurement</em> — 832×480 and 768×448 both pinned at ~7.5&nbsp;GB, so resolution is a weak lever — was correct and is still correct. Only the <em>attribution</em> was wrong. And the engine that the wrong attribution argued for is exactly the engine the right one needed, because both roads end at the same place: <b>stop treating the memory as a black box and own the forward.</b> A hypothesis that is measurable is useful even when it is false; it was disproved in one experiment because it had been stated precisely enough to test.</p></div>
+
+## The takeaways
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>The wall is not the pixels.</b> 832×480 and 768×448 both OOM'd at ~7.5&nbsp;GB — cutting the resolution freed almost nothing.</li>
+<li><b>~7.5&nbsp;GB is dominated by things that don't scale with the picture</b> — the CUDA context (~1.2&nbsp;GB) plus, on this pipeline, the int8 <code>convrot</code> scratch buffer (~2.2&nbsp;GB); the resolution-scaling activation is a minority. (The buffer's share of the blame did not survive <a href="44-building-dalang.html">ch.44</a>.)</li>
+<li><b>The dodges are eliminated, not skipped</b> — Q4 is absent from the box and cannot load into H3's custom transformer; there is no drop-in fix.</li>
+<li><b>The Dalang Engine</b> — one CPU process (the dalang) holds a single shared 33&nbsp;GB model and directs the GPUs (the wayang); one process means one copy, so ring-3's RAM wall disappears.</li>
+<li><b>Ring Attention is the foundation</b> — split the sequence ÷N, rotate K/V around a ring, and normalize softmax across all passes (running max + denominator).</li>
+<li><b>Correctness before scale</b> — verify our ring matches diffusers bit-for-bit on a tiny input; a wrong online-softmax is subtly garbage.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">dalang</span><span class="badge">wayang</span><span class="badge">ring attention</span><span class="badge">online softmax</span><span class="badge">running maximum</span><span class="badge">running denominator</span><span class="badge">K/V rotation</span><span class="badge">CUDA context</span><span class="badge">GEMM scratch buffer</span><span class="badge">weight-only int8</span><span class="badge">context parallelism</span><span class="badge">÷N split</span><span class="badge">GGUF</span></p>
+<p>If those feel solid, the next chapter is readable as a build log rather than a design document: it is the same engine, measured brick by brick, with the numbers that decided each step.</p></div>
+
+Next: [ch.44](44-building-dalang.html) builds the engine this chapter designed — golden reference, online softmax, a two-GPU ring, and then six memory walls knocked down one at a time until a full 15-second clip fits on a single card.
+
+<p class="small">The int8 buffer this chapter blames is measured in <a href="13-int8-vs-q4.html">ch.13</a>; the context-parallel split it builds on is <a href="36-splitting-the-video-cp.html">ch.36</a>; why Python-level orchestration is fine but a custom kernel is the deep lever is <a href="41-python-is-the-glue.html">ch.41</a>; why a single process shares the model where <code>torchrun</code> can't is <a href="42-why-two-models.html">ch.42</a>. Source: Liu, Zaharia, Abbeel, <a href="https://arxiv.org/abs/2310.01889">"Ring Attention with Blockwise Transformers for Near-Infinite Context," arXiv:2310.01889</a>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

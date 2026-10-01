@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>46 · The First 15 Seconds</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 46 · The render finishes — two bugs, one rescue, and an honest look at the result</span>
+
+# The First 15 Seconds
+
+<p class="lede">[Chapter 45](45-three-gpu-sequence-parallelism.html) ended mid-sentence: the three-GPU sharded forward was proven, block 0 of 50 had cleared, and <em>"the finished clip does not exist yet."</em> This is what happened when it did. Two runs, two crashes, six hours lost and then six hours saved, one file that finally exists — and the uncomfortable discovery that the file looks bad for a reason that has nothing to do with any of it.</p>
+
+## Run g4j — six hours, then nothing
+
+The first full run reached the end of denoise. All three steps at 1280×704×345 completed, roughly **6 h 10 m of GPU work**, every block correct. Then the very first line of the decode stage threw:
+
+```
+diffusers/modular_pipelines/minimax_h3/decoders.py:185
+    latents = block_state.latents * latents_std + latents_mean
+RuntimeError: Expected all tensors to be on the same device,
+              but found at least two devices, cuda:0 and cpu!
+```
+
+No `.mp4`. No `.wav`. Six hours of correct arithmetic, discarded because two tensors sat on different devices.
+
+The cause is a collision between two things that are each individually sensible. The decode step asks the pipeline where to work:
+
+```python
+device = components._execution_device
+```
+
+Our driver's *deferred-VAE fix* leaves `audio_vae` parked on `cuda:0`, so that property answers **cuda:0**. But the sharded forward from [ch.45](45-three-gpu-sequence-parallelism.html) returns its output to `orig_dev` — the device the latents arrived on, which is **CPU**. So the normalisation constants get built on the GPU and the latents are on the CPU, and the multiply refuses.
+
+<div class="callout warn"><span class="t">The same bug, twice</span>
+<p>`MiniMaxH3AudioDecodeStep` at line 245 does the identical thing with `audio_latents`. Fixing only the video step would have moved the crash one block later and cost <em>another</em> six hours to discover. When you find a bug in generated-looking code, grep for its shape before you celebrate.</p></div>
+
+## The rule that came out of it
+
+The fix itself is one line — align the latents to the execution device. The *lesson* is bigger, and it is the real content of this chapter:
+
+<div class="callout spec"><span class="t">Cheap stages must never be able to destroy expensive ones</span>
+<p>Denoise costs <b>hours</b>. Decode costs <b>minutes</b>. A pipeline where a minutes-long stage can annihilate an hours-long one is badly built, no matter how correct each stage is. The moment denoise hands over its latents, <b>they are the render</b> — everything after is cheap, repeatable transformation. So write them to disk immediately, before anything downstream gets a chance to fail.</p></div>
+
+That became `dalang/h3_decode_fix.py`: it replaces both decode steps with faithful copies of the originals, changed in exactly two ways — the device alignment, and a dump of the latents to disk *before the first line that can throw*. The dump carries its own VAE constants (`latents_mean`, `latents_std`, `pixel_mean`, `pixel_std`, sample rate) so it is self-contained; a recovery tool never has to guess what the pipeline knew.
+
+It is installed as a **monkeypatch from the driver**, not an edit to `site-packages`, so a `pip install` cannot silently revert it.
+
+## Run g4k — the backup earns its keep
+
+Second run, same scene, same size. Denoise completed all three steps again. At **03:17** the latents landed on disk:
+
+```
+[g4] BACKUP video -> docs/g4k.video.pt (69 MB; keys=['latents',
+     'latents_mean','latents_std','output_type','pixel_mean',
+     'pixel_std','state__audio_latents','state__latents'])
+```
+
+At **04:38**, an hour and twenty minutes later, decode died anyway — this time out of memory, at `[vae] clip 14`, asking for 146 MiB with 92 MiB free.
+
+<div class="callout truth"><span class="t">The difference between the two nights</span>
+<p>g4j's crash destroyed six hours. g4k's crash destroyed <b>decode time</b>. Same failure stage, same size, same machine — the only change was 69 MB written to disk at the right moment. That is the entire return on the rule above.</p></div>
+
+## The second bug — where the data waits
+
+The OOM looked like a capacity wall: *maybe 1280×704 simply doesn't fit on 8 GB.* Reading the VAE source says otherwise, and the first thing it says is that the wall isn't where you'd think.
+
+```python
+# AutoencoderKLMiniMaxH3.__init__
+self.use_tiling = True          # "MiniMax-H3 ships with tiling enabled"
+self.tile_sample_min_height = 256
+self.tile_sample_min_width  = 256
+```
+
+**Spatial tiling is on by default.** The decoder already splits every frame into 256×256 tiles and blends the overlaps. So per-tile memory is *fixed* — raising the resolution buys you more tiles and more time, never a bigger peak. Resolution was never the problem.
+
+The problem is in `_decode`:
+
+```python
+decoded_chunks = []
+for i in range(num_chunks):
+    clip = self._decode_clip(...)
+    ...
+    decoded_chunks.append(chunk)      # ← stays on cuda:0
+dec = torch.cat(decoded_chunks, dim=2)
+```
+
+Every finished chunk is appended to a list that lives **on the GPU**, and nothing reads those chunks again until the final `torch.cat`. At 1280×704 each chunk is
+
+$$20 \text{ frames} \times 704 \times 1280 \times 3 \times 4\,\text{B} \;\approx\; 216\ \text{MB}$$
+
+so by chunk 14 there is roughly **3 GB of finished pixels** parked on an 8 GB card doing nothing at all. At 832×480 the same chunk is 96 MB and you never notice. At 720p it kills the run.
+
+<div class="callout spec"><span class="t">The fix — one line, identical numerics</span>
+<p><code>decoded_chunks.append(chunk.to("cpu", copy=True))</code>. Only <code>overlap</code> stays resident, because <code>_blend</code> needs it next iteration. Same blending, same ordering, same arithmetic — the <em>only</em> change is where finished data waits. GPU residency during decode fell from <b>7729 MiB → 5639 MiB</b>, and the decode ran to completion.</p></div>
+
+This lives in `dalang/h3_vae_cpu_accum.py`. It is worth naming the class of bug plainly, because it is easy to mistake for physics:
+
+<div class="callout truth"><span class="t">Not a capacity limit — an accumulation bug</span>
+<p>"It OOMs at 720p" sounds like a hardware ceiling and invites you to buy a bigger card. It was finished output loitering in the wrong memory. <b>Before concluding a job doesn't fit, check whether something in it is holding data it no longer needs.</b> A wall is a hypothesis, not a verdict.</p></div>
+
+## The file exists
+
+Decoding the saved latents took 85 minutes for 20 chunks and produced:
+
+| | |
+|---|---|
+| **File** | `g4k.mp4` |
+| **Resolution** | **1280 × 704** (native, no upscale) |
+| **Frames** | **345** @ 24 fps |
+| **Duration** | **14.375 s** |
+| **Integrity** | full decode pass, zero errors |
+
+**Native 720p at ~15 seconds, rendered on three 8 GB cards.** The thing [ch.44](44-building-dalang.html) and [ch.45](45-three-gpu-sequence-parallelism.html) were climbing toward. The soundtrack needed one more pass — the audio VAE OOM'd while the video VAE was still resident — and came back as a separate `g4k.wav` from the same dump, decoded on CPU.
+
+## And it looks bad
+
+Here the chapter stops being a victory log. The clip is mud: no anime style, no floating islands, no hero, a mottled brown-gold smear that barely changes across fourteen seconds. The prompt asked for cel-shaded Ufotable-style shattered islands at dawn.
+
+The temptation is to blame the newest, most complex thing — the sharded forward. The evidence says otherwise, and all of it was already sitting on the box:
+
+| Render | Size | Frames | **Steps** | Result |
+|---|---|---|---|---|
+| `cp15sd` | 512×288 | **345** | **49** | beautiful — islands, ruins, hero, all resolved |
+| `an1` | **1280×704** | 124 | **23** | beautiful — crisp cel-shaded anime |
+| `cmp-ring` vs `cmp-normal` | 832×480 | 124 | 4 | **identical to each other**, both sharp |
+| **`g4k`** | 1280×704 | **345** | **3** | **mud** |
+
+Read those rows carefully, because each one kills a hypothesis:
+
+- **The ring attention is fine.** `cmp-ring` (three GPUs) and `cmp-normal` (reference) are the same picture. Sequence parallelism is not degrading anything.
+- **345 frames is fine.** `cp15sd` is the *same scene at the same length* and it is gorgeous.
+- **1280×704 is fine.** `an1` is the same resolution and it is crisp.
+- **The decode fix is fine.** Every frame decodes clean.
+
+What's left is the one column nobody looks at: **the same scene needed 49 steps. We gave it 3.**
+
+<div class="callout warn"><span class="t">The trap in the 4-step row</span>
+<p>Midway through this diagnosis the <code>cmp</code> pair looked like a refutation — sharp, coherent, at only <b>4 steps</b>. It isn't. <code>cmp</code> renders <code>ns-face</code>, a tight close-up portrait, the <em>easiest</em> possible content. A wide vista of floating islands with "a hero standing tiny on a distant cliff" is the hardest: fine detail everywhere and a subject only a few pixels tall. <b>Step count is not a property of the model, it's a property of the scene.</b> Easy content converges in 4; this scene took 49.</p></div>
+
+## The real wall is time, not memory
+
+So why only three steps? Because at 93k tokens the sharded path runs about **110 minutes per step**. Attention is $O(S^2)$ and this sequence is ~6× longer than `cp15sd`'s:
+
+$$25 \text{ steps} \times 110 \text{ min} \;\approx\; \textbf{46 hours}$$
+
+That is the honest state of native 720p×15 s on this box. Not impossible — *expensive*. And it reframes the whole project: after ch.44 and ch.45 the constraint was **memory**, and we beat it. The constraint is now **time**, which is a different kind of problem with different levers (step distillation, faster attention kernels, or simply not paying the quadratic).
+
+<div class="callout spec"><span class="t">The practical route to a good 15 seconds</span>
+<p>Render <b>768×448 × 345 at 25–49 steps</b> — roughly 4–8 hours — then upscale to 1280×720 with <code>4x-UltraSharp</code>. This is the same "generate near-native, upscale modestly" recipe that produced the best result on this box ([ch.17](17-what-actually-improves-quality.html)). It sidesteps the quadratic instead of paying it, and a well-sampled 768 upscaled beats an under-sampled 1280 every time.</p></div>
+
+<div class="callout truth"><span class="t">Postscript — the number, measured</span>
+<p>That estimate was tested. The same scene, same size, at <b>23 steps</b>: <b>41 h 51 m</b> of denoise at <b>6849 s/step</b>, plus 85 minutes of decode — <b>43.3 hours</b> total, against the ~46 h predicted here. The per-step time drifted by only a few seconds across all 22 iterations.</p>
+<p>And it resolved. Shattered islands above a cloud sea, storm light on the horizon, the swordswoman found on the cliff edge in the closing seconds — sharp line art, defined irises, the scar on her cheek. Every one of those details was mud at 3 steps. <b>The diagnosis on this page was correct: nothing was broken, it was under-sampled by 16×.</b></p>
+<p>The closing run also died in decode — a device collision between the two fixes above, on the very last line of denormalisation, after a fully successful 20-chunk pass. It cost 85 minutes of re-decode instead of two days, because the latents were already on disk. <b>Third time that rule has paid.</b> Full ledger in <a href="47-the-scorecard.html">ch.47</a>.</p></div>
+
+## What this night actually taught
+
+<div class="callout truth"><span class="t">The ledger</span>
+<ol>
+<li><b>The device bug</b> — <code>_execution_device</code> vs the sharded forward's <code>orig_dev</code>, in <em>both</em> decode steps. Fixed, verified end-to-end. ✅</li>
+<li><b>The backup rule</b> — latents to disk the instant denoise hands over. Proved itself the same night: g4j lost six hours, g4k lost only decode time. ✅</li>
+<li><b>The accumulation bug</b> — finished pixel chunks loitering on the GPU. One line, identical numerics, 7729 → 5639 MiB. ✅</li>
+<li><b>Native 720p × 14.375 s exists</b> — 1280×704, 345 frames, on three 8 GB cards. ✅</li>
+<li><b>Quality is under-sampling, not a defect</b> — 3 steps where the scene needs ~49; ring, length, resolution and decode all independently verified innocent. ✅</li>
+<li><b>The new constraint is time</b> — ~110 min/step, ~46 h for a proper native render. <b>Open.</b> ⏳</li>
+</ol></div>
+
+Three method lessons worth more than the fixes:
+
+**A ten-minute smoke test caught two bugs that would each have cost six hours.** Running `ns-face` at 832×480 for two steps exercised the identical code path for a fraction of the price. Never debug a six-hour job by running the six-hour job.
+
+**Look at the artifact.** The first quality diagnosis here was made from a *single frame* and a table, and it was wrong twice — first too confident, then over-corrected. Only a contact sheet across all 345 frames showed that the clip barely moves, which is what pointed at sampling rather than plumbing.
+
+**Check the references you already have.** Every hypothesis in this chapter was killed by a file already sitting in `h3-lab/` — `cmp-ring`, `cmp-normal`, `cp15sd`, `an1`. The answer was on disk the whole time; the work was reading it instead of reasoning about it.
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">_execution_device</span><span class="badge">device mismatch</span><span class="badge">latent backup</span><span class="badge">accumulation bug</span><span class="badge">chunk offload</span><span class="badge">VAE tiling</span><span class="badge">under-sampling</span><span class="badge">monkeypatch</span><span class="badge">denoise / decode split</span></p>
+<p>If those feel solid, the full cost ledger will read cleanly.</p></div>
+
+<p class="small">The sequence-parallel engine this run exercises is <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; the single-card tiling underneath it is <a href="44-building-dalang.html">ch.44</a>; the ring and online-softmax it rests on are <a href="36-splitting-the-video-cp.html">ch.36</a> and <a href="34-open-use-close-flashattention.html">ch.34</a>; why steps and framing dominate quality is <a href="17-what-actually-improves-quality.html">ch.17</a>. Code: <code>source/dalang/h3_decode_fix.py</code> (device fix + latent backup), <code>h3_vae_cpu_accum.py</code> (chunk offload), <code>17_decode_from_latents.py</code> (offline recovery, <code>--audio-only</code> and CPU paths), <code>16_render_3gpu.py</code> (the G4 driver). Artifacts: <code>docs/g4k.video.pt</code> (the 69 MB rescue), <code>outputs/g4k.mp4</code>, <code>g4k.wav</code>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>22 · The Pipeline in Full Detail</title>
+<meta name="description" content="Every stage of a MiniMax-H3 render drawn and derived: encoder, latent, flow-matching loop, one transformer block, weight streaming, guidance and decode — with the measured numbers from this build.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 22 · Technical Deep-Dive</span>
+
+# The Pipeline in Full Detail
+
+<p class="lede">A render is six stages — encode the prompt, fill a latent with noise, denoise it in a loop, run fifty transformer blocks inside each loop iteration, steer with guidance, decode to pixels and sound — and exactly one of them accounts for essentially all the time.</p>
+
+Here is the arithmetic that makes that claim concrete. The render logged as `an1` produced five seconds of 1280×704 video in **3,295 seconds** at 23 steps, averaging **143 seconds per step**. Twenty-three steps at 143 seconds is 3,289 seconds. The entire rest of the pipeline — the noise initialisation, the schedule, the bookkeeping — fits in the six seconds of slack.
+
+That is not because the other stages are trivial. The encoder is the largest file in the model and ran in its own process before that clock started ([ch.03](03-how-h3-works.html)). The decoder is a separate network with its own memory peak, and it has destroyed a completed render more than once. But in wall-clock terms, **the loop is the render**, and everything in this chapter is arranged around that fact.
+
+[Chapter 08](08-how-a-prompt-becomes-video.html) tells this story in plain words. This chapter draws each stage, gives the equation it computes, and says in one line what that equation means.
+
+<div class="callout spec"><span class="t">Notation — a thirty-second primer</span>
+<p>Data moves as <b>tensors</b>: grids of numbers with a <b>shape</b>, written in brackets. A video latent has shape <code>[F, h, w, c]</code> = frames × height × width × channels.</p>
+<p>$\mathbf{x}$ is a tensor. $\theta$ is the model's learned weights. $c$ is the <b>conditioning</b> — the encoded prompt. $t$ is how noisy the latent is right now, running from $t=1$ (pure noise) down to $t=0$ (clean). $\mathbf{v}_\theta$ is the velocity the model predicts. Every symbol here is unpacked one at a time, with worked numbers, in <a href="23-math-from-scratch.html">ch.23</a>.</p></div>
+
+## The whole pipeline, with shapes
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="The full render pipeline: the prompt goes through a 26 GB encoder to produce conditioning; a latent is filled with noise; a 50-block transformer denoises it over 23 steps; the clean latent is expanded by a video VAE into frames and an audio VAE into stereo sound.">
+  <defs>
+    <marker id="a1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="a2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="a3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ENCODE — INITIALISE — DENOISE — DECODE</text>
+  <rect x="2" y="34" width="136" height="84" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="70" y="56" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">1 · INPUTS</text>
+  <text x="70" y="76" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">a text prompt</text>
+  <text x="70" y="94" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">first / last frame</text>
+  <text x="70" y="110" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">images optional</text>
+  <line x1="140" y1="76" x2="164" y2="76" stroke="#6f7b8f" marker-end="url(#a1)"/>
+  <rect x="168" y="34" width="168" height="84" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="252" y="56" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">2 · ENCODER</text>
+  <text x="252" y="76" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">Qwen3-VL-32B, 26 GB</text>
+  <text x="252" y="94" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">tapped at layer 50</text>
+  <text x="252" y="112" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">runs once, own process</text>
+  <line x1="338" y1="76" x2="370" y2="76" stroke="#7aa2ff" marker-end="url(#a1)"/>
+  <text x="354" y="94" text-anchor="middle" fill="#7f93b8" font-size="10" font-family="Inter,sans-serif">c</text>
+  <rect x="374" y="24" width="190" height="106" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="469" y="46" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">3 · DiT — 50 blocks</text>
+  <text x="469" y="64" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">20 GB, int8, pruned</text>
+  <text x="469" y="82" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">predicts a velocity</text>
+  <text x="469" y="100" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">one pass per step</text>
+  <text x="469" y="120" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">4 / 23 / 49 steps by scene</text>
+  <rect x="2" y="158" width="250" height="46" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="127" y="178" text-anchor="middle" fill="#ffdede" font-size="11" font-family="Inter,sans-serif">initialise: pure noise, set by the seed</text>
+  <text x="127" y="196" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">measured shape (1, 24, 37, 30, 52)</text>
+  <path d="M254,174 L370,132" fill="none" stroke="#ff6b6b" marker-end="url(#a3)"/>
+  <line x1="566" y1="76" x2="592" y2="76" stroke="#5ee0c0" marker-end="url(#a2)"/>
+  <rect x="596" y="44" width="162" height="64" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="677" y="68" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">clean latent</text>
+  <text x="677" y="88" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">same shape, not pixels</text>
+  <rect x="380" y="234" width="180" height="54" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="470" y="256" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">4 · Video VAE</text>
+  <text x="470" y="274" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">frames of real pixels</text>
+  <rect x="578" y="234" width="180" height="54" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="668" y="256" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">4 · Audio VAE</text>
+  <text x="668" y="274" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">32 kHz stereo</text>
+  <path d="M652,110 L494,230" fill="none" stroke="#5ee0c0" marker-end="url(#a2)"/>
+  <path d="M690,110 L668,230" fill="none" stroke="#5ee0c0" marker-end="url(#a2)"/>
+</svg>
+
+Read it left to right. The prompt and any reference frames become **conditioning** $c$ — a block of numbers standing for meaning. A latent is filled with random static. The transformer is run once per step, each pass nudging that static toward something the conditioning describes. When the loop ends, two decoders expand the finished latent into frames and a soundtrack.
+
+Note what does *not* appear anywhere in the middle of that picture: a picture. Nothing between the noise box and the two VAEs is watchable. The whole expensive part of a render happens on a grid of numbers no human can look at.
+
+## Stage 1 · The encoder — words become a meaning-tensor
+
+<svg viewBox="0 0 760 152" width="100%" style="max-width:920px" role="img" aria-label="Encoder stages: raw text is split into tokens, each token is looked up in an embedding table, fifty transformer layers let the tokens exchange context, and the hidden state at layer fifty becomes the conditioning tensor.">
+  <defs>
+    <marker id="b1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <rect x="2" y="48" width="132" height="60" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="68" y="72" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">"a woman singing"</text>
+  <text x="68" y="92" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">raw text</text>
+  <line x1="136" y1="78" x2="154" y2="78" stroke="#7aa2ff" marker-end="url(#b1)"/>
+  <rect x="158" y="48" width="132" height="60" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="224" y="72" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">tokens to IDs</text>
+  <text x="224" y="92" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">a / woman / sing / ing</text>
+  <line x1="292" y1="78" x2="310" y2="78" stroke="#7aa2ff" marker-end="url(#b1)"/>
+  <rect x="314" y="48" width="140" height="60" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="384" y="72" text-anchor="middle" fill="#e7ecf3" font-size="10.5" font-family="Inter,sans-serif">embedding lookup</text>
+  <text x="384" y="92" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">each ID becomes a vector</text>
+  <line x1="456" y1="78" x2="474" y2="78" stroke="#7aa2ff" marker-end="url(#b1)"/>
+  <rect x="478" y="36" width="140" height="84" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="548" y="60" text-anchor="middle" fill="#eef3ff" font-size="10.5" font-family="Inter,sans-serif">transformer layers</text>
+  <text x="548" y="80" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">attention + FFN</text>
+  <text x="548" y="100" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">tokens exchange context</text>
+  <line x1="620" y1="78" x2="638" y2="78" stroke="#5ee0c0" marker-end="url(#b1)"/>
+  <rect x="642" y="48" width="116" height="60" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="700" y="72" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="Inter,sans-serif">conditioning c</text>
+  <text x="700" y="92" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">shape [L, d]</text>
+  <text x="478" y="140" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">the hidden state is taken at layer 50, not at the end</text>
+</svg>
+
+A sentence is not a thing a neural network can multiply. So the first move is mechanical: split the string into **tokens**, look each token's ID up in an **embedding table** to get a vector, and stack those vectors into a grid of shape $[L, d]$ — $L$ tokens, each $d$ numbers wide.
+
+That grid is still just a list of dictionary entries. What turns it into *meaning* is the layer stack, and the engine of every layer is **attention**:
+
+$$\text{Attention}(Q,K,V)=\text{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_k}}\right)V$$
+
+$Q$, $K$ and $V$ — query, key and value — are the token vectors multiplied by three learned matrices. **Plain meaning:** each token asks a question ($Q$), every token advertises what it can answer ($K$), the match scores are turned into weights that sum to one, and each token rebuilds itself as a weighted blend of what the others hold ($V$). After enough layers, the vector sitting over the word "singing" carries the whole sentence.
+
+Two details specific to H3 matter here.
+
+**The encoder is enormous, and it is a general-purpose model.** It is Qwen3-VL-32B — a 32-billion-parameter vision-language model, 26 GB on disk, larger than the generator it feeds. Six gigabytes more are spent reading the sentence than painting the video.
+
+**H3 does not use the encoder's output.** It taps the hidden state at **layer 50**, halfway through, and discards everything after. A language model's final layers are specialised toward predicting the next word; its middle layers hold a more general representation of meaning. H3 steals the comprehension and throws away the conclusion.
+
+<div class="callout truth"><span class="t">The encoder never meets the generator</span>
+<p>26 GB and 20 GB do not comfortably coexist on a machine whose cards hold 8 GB each. So the two are never resident together: the encoder runs first, in its own process, writes $c$ to a file, and exits. Only then does a second process load the transformer (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>).</p>
+<p>The side effect is worth having. Because $c$ lives in a file, prompt understanding is <b>reusable</b>: encode a scene once, then re-render it at any resolution, any step count, any seed, without paying the 26 GB read again.</p></div>
+
+Reference images and reference audio, where a variant accepts them, go through the same treatment and are concatenated into the same $c$. From the generator's point of view there is no difference between a sentence and a photograph — both arrive as rows in one grid.
+
+## Stage 2 · The latent — why a 33B model can touch video at all
+
+Raw pixels are hopeless. A single 1280×704 frame is about 2.7 million numbers; 124 of them is a third of a billion. Nothing about that fits on an 8 GB card, and no amount of clever scheduling fixes an object that size.
+
+So H3 never sees pixels. Everything happens in a **latent** — a compressed grid produced by the video VAE, which shrinks each spatial dimension by a factor of **16**:
+
+$$\underbrace{[F, H, W, 3]}_{\text{pixels}} \;\xrightarrow{\;\text{VAE encode}\;}\; \underbrace{\left[F', \tfrac{H}{16}, \tfrac{W}{16}, 24\right]}_{\text{latent}}$$
+
+Time is compressed too, and the latent carries **24 channels** rather than three colours. Those channels mean nothing to a human — only the decoder knows how to turn them back into red, green and blue.
+
+At generation time nothing is encoded. The latent is simply filled with random numbers drawn from a bell curve:
+
+$$\mathbf{x}_1 \sim \mathcal{N}(0, I)$$
+
+**Plain meaning:** a block of static, but a *small* block of static. That compression is the only reason the loop fits in memory at all.
+
+<div class="callout spec"><span class="t">A real latent, read off a crashed render</span>
+<p>When a render died mid-flight the saved latent had shape <code>(1, 24, 37, 30, 52)</code>: one clip, <b>24</b> channels, <b>37</b> latent frames, <b>30</b> tall, <b>52</b> wide — the latent for 832×480 pixels across 124 frames. 832 ÷ 16 = 52 and 480 ÷ 16 = 30, exactly as the compression ratio predicts.</p>
+<p>That is about 1.4 million numbers standing in for a five-second clip. The same clip in pixels is 832 × 480 × 124 ≈ <b>50 million</b> positions, and about 150 million numbers once the three colour channels are counted.</p></div>
+
+Before the numbers enter the transformer they are grouped once more. The config field `patch_size` is `[1, 2, 2]`: one frame deep, two latent cells tall, two wide. Four neighbouring cells become one **token**, which divides the sequence length by four.
+
+Working the arithmetic through on that measured latent: 37 latent frames × (30 ÷ 2) × (52 ÷ 2) = 37 × 15 × 26 = **14,430 video tokens**, with the audio latent's own 32-channel stream packed alongside them. That number — the sequence length — is the single quantity every cost in this guide is a function of.
+
+<div class="callout warn"><span class="t">The 848-pixel trap</span>
+<p>Patching by 2×2 requires the latent grid to have <b>even</b> width and height. A width of 848 gives 848 ÷ 16 = <b>53</b> latent cells, which is odd, and the model fails with a shape error deep inside the stack that never mentions resolution.</p>
+<p>832 gives 52. 1280 gives 80. 1024 gives 64. All even, all fine. The rule to carry: <b>pick widths and heights where the pixel count divided by 16 is even.</b> This cost real debugging time, and the cause was one config value three lines long.</p></div>
+
+## Stage 3 · The denoise loop — flow matching
+
+<svg viewBox="0 0 760 186" width="100%" style="max-width:920px" role="img" aria-label="The denoise progression: a latent of pure noise at t equals one passes through successive transformer steps, becoming coarse blobs, then a recognisable figure, then a clean latent at t equals zero.">
+  <defs>
+    <marker id="c1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <rect x="30" y="40" width="84" height="84" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <g fill="#7a5a5a"><circle cx="48" cy="60" r="2"/><circle cx="84" cy="72" r="2"/><circle cx="62" cy="104" r="2"/><circle cx="98" cy="56" r="2"/><circle cx="44" cy="92" r="2"/><circle cx="76" cy="112" r="2"/></g>
+  <text x="72" y="142" text-anchor="middle" fill="#ff9d9d" font-size="10.5" font-family="Inter,sans-serif">t = 1 · pure noise</text>
+  <rect x="220" y="40" width="84" height="84" rx="8" fill="#2a241f" stroke="#ffb454"/>
+  <text x="262" y="142" text-anchor="middle" fill="#ffb454" font-size="10.5" font-family="Inter,sans-serif">t = 0.6 · masses</text>
+  <rect x="410" y="40" width="84" height="84" rx="8" fill="#20302c" stroke="#8fd8c4"/>
+  <text x="452" y="142" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">t = 0.3 · a figure</text>
+  <rect x="600" y="40" width="84" height="84" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="642" y="142" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">t = 0 · clean latent</text>
+  <line x1="118" y1="82" x2="216" y2="82" stroke="#5ee0c0" marker-end="url(#c1)"/>
+  <line x1="308" y1="82" x2="406" y2="82" stroke="#5ee0c0" marker-end="url(#c1)"/>
+  <line x1="498" y1="82" x2="596" y2="82" stroke="#5ee0c0" marker-end="url(#c1)"/>
+  <text x="166" y="72" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">one full pass</text>
+  <text x="166" y="102" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">50 blocks</text>
+  <text x="356" y="72" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">one full pass</text>
+  <text x="546" y="72" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">and so on</text>
+  <text x="30" y="170" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">early steps settle composition and motion — late steps settle edges, texture, the glint on a blade</text>
+  <text x="30" y="20" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SHAPE NEVER CHANGES — ONLY THE NUMBERS INSIDE IT</text>
+</svg>
+
+H3 is a **flow-matching** model. It does not learn "remove one notch of noise". It learns a **velocity field**: given where the latent is now and how noisy that is, which direction points toward a plausible video, and how fast.
+
+Picture a path between the noise $\mathbf{x}_1$ and the finished latent $\mathbf{x}_0$. The transformer's entire job at each step is to predict the velocity along that path:
+
+$$\mathbf{v}_\theta(\mathbf{x}_t, t, c)\;\approx\;\frac{d\mathbf{x}_t}{dt}$$
+
+Generation walks the path backwards from noise to clean, one small **Euler step** at a time:
+
+$$\mathbf{x}_{t-\Delta t} \;=\; \mathbf{x}_t \;-\; \Delta t\,\cdot\,\mathbf{v}_\theta(\mathbf{x}_t, t, c)$$
+
+**Plain meaning:** *which way should this static move to look more like the prompt? Move a little that way. Repeat.* Generating a video is solving a differential equation by taking small straight-line steps across a curve, and each of those steps is one complete pass of the transformer.
+
+That last clause is where the hours live. A step is not a cheap correction — it is the whole model, all fifty blocks, every parameter, run once.
+
+### Why not take one big step?
+
+Because the true path is curved and a straight-line step is a chord across it. Euler's method has error proportional to the step size: halve the number of steps and roughly double the error. From pure static, one enormous step lands nowhere near the curve.
+
+This is the mechanism behind the most expensive lesson in this project. The render logged as `g4k` was given **3 steps** at 1280×704 across 345 frames. It ran for about five and a half hours and produced **mud** — not a blurry version of the right video, but a video whose composition was never settled, because the first few chords went in the wrong direction and nothing later could recover.
+
+<div class="callout spec"><span class="t">Steps are a property of the scene, not the model</span>
+<table>
+<tr><th>Content</th><th>Steps</th><th>Measured example</th></tr>
+<tr><td>Tight close-up</td><td><b>4</b></td><td><code>cmp-ring</code> / <code>cmp-normal</code>, 832×480 × 124, ~2 min, sharp</td></tr>
+<tr><td>Character mid-shot</td><td><b>23</b></td><td><code>an1</code>, 1280×704 × 124, 3,295 s, beautiful</td></tr>
+<tr><td>Wide vista, small distant subject</td><td><b>49</b></td><td><code>cp15sd</code>, 512×288 × 345, 3,965 s, beautiful</td></tr>
+</table>
+<p>Fine detail spread across the frame, with a small subject, needs more chords to follow a more curved path. A face filling the frame needs very few.</p></div>
+
+<div class="callout spec"><span class="t">Where sigma-shift lives — the free quality knob</span>
+<p>The steps are not spaced evenly along $t$. A <b>schedule</b> decides where they cluster, and a shift parameter $s$ warps it:</p>
+$$t' = \frac{s\,t}{1 + (s-1)\,t}$$
+<p><b>Raising</b> $s$ pushes steps toward the noisy end, spending compute on large structure and motion. <b>Lowering</b> $s$ pulls them toward the clean end, spending it on fine detail — sharper eyes, better teeth. The sampler can even run two clocks, one for the video latent and one for the audio latent, because the two have different curvature and stepping audio on the video schedule corrupts the sound. Same number of steps, different placement, different picture; this costs nothing (<a href="20-how-far-we-can-go.html">ch.20</a>).</p></div>
+
+## Stage 4 · Inside one pass — what fifty blocks actually do
+
+One step is not one operation. It is fifty near-identical **blocks** run in sequence, each doing four things to the token sequence.
+
+<svg viewBox="0 0 760 216" width="100%" style="max-width:920px" role="img" aria-label="Inside one transformer block: adaptive layer norm injects the timestep and conditioning, self-attention relates every patch to every other, cross-attention relates patches to the prompt, and a feed-forward network widens and narrows each token, with a residual connection carrying the input around the whole block.">
+  <defs>
+    <marker id="d1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+    <marker id="d2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE BLOCK OF FIFTY — ABOUT 395 MILLION PARAMETERS</text>
+  <line x1="4" y1="100" x2="26" y2="100" stroke="#7aa2ff" marker-end="url(#d1)"/>
+  <rect x="30" y="70" width="140" height="60" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="100" y="94" text-anchor="middle" fill="#eef3ff" font-size="11" font-family="Inter,sans-serif">AdaLN</text>
+  <text x="100" y="112" text-anchor="middle" fill="#9fb6e8" font-size="9.5" font-family="Inter,sans-serif">inject t and c</text>
+  <text x="100" y="150" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">2688 x 6 x 5376</text>
+  <text x="100" y="164" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">about 87 M</text>
+  <line x1="172" y1="100" x2="194" y2="100" stroke="#7aa2ff" marker-end="url(#d1)"/>
+  <rect x="198" y="70" width="150" height="60" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="273" y="94" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">self-attention</text>
+  <text x="273" y="112" text-anchor="middle" fill="#8fd8c4" font-size="9.5" font-family="Inter,sans-serif">patch to patch, space and time</text>
+  <text x="273" y="150" text-anchor="middle" fill="#5ee0c0" font-size="9.5" font-family="Inter,sans-serif">56 heads x 128 = 7168 wide</text>
+  <text x="273" y="164" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">cost grows with the square of tokens</text>
+  <line x1="350" y1="100" x2="372" y2="100" stroke="#7aa2ff" marker-end="url(#d1)"/>
+  <rect x="376" y="70" width="150" height="60" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="451" y="94" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">cross-attention</text>
+  <text x="451" y="112" text-anchor="middle" fill="#8fd8c4" font-size="9.5" font-family="Inter,sans-serif">patch to prompt c</text>
+  <text x="451" y="150" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">this is where the words</text>
+  <text x="451" y="164" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">reach the picture</text>
+  <line x1="528" y1="100" x2="550" y2="100" stroke="#7aa2ff" marker-end="url(#d1)"/>
+  <rect x="554" y="70" width="150" height="60" rx="8" fill="#2a241f" stroke="#ffb454"/>
+  <text x="629" y="94" text-anchor="middle" fill="#ffe9c2" font-size="11" font-family="Inter,sans-serif">FFN</text>
+  <text x="629" y="112" text-anchor="middle" fill="#ffb454" font-size="9.5" font-family="Inter,sans-serif">widen, then narrow</text>
+  <text x="629" y="150" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">5376 to 14336 to 5376</text>
+  <text x="629" y="164" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">about 154 M</text>
+  <line x1="706" y1="100" x2="728" y2="100" stroke="#7aa2ff" marker-end="url(#d1)"/>
+  <text x="740" y="96" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">next</text>
+  <text x="740" y="110" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">block</text>
+  <path d="M100,68 C 100,34 629,34 629,66" fill="none" stroke="#3a4a63" stroke-dasharray="4 4" marker-end="url(#d2)"/>
+  <text x="364" y="30" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">residual — the input is added back around the whole block</text>
+  <text x="2" y="200" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">every token is a vector of 5376 numbers the whole way through</text>
+</svg>
+
+**AdaLN — adaptive layer normalisation.** The block first normalises its activations, then scales and shifts them using numbers derived from the timestep and the conditioning:
+
+$$h=\gamma(t,c)\odot\text{LN}(\mathbf{x})+\beta(t,c)$$
+
+**Plain meaning:** this is how the block is *told what time it is and what it is making*. The same block behaves differently at $t=0.9$ than at $t=0.1$, because $\gamma$ and $\beta$ differ. With `time_embed_dim` 2688 producing six modulation vectors of width 5376, this alone is about 87 million parameters per block — a fifth of the block, spent purely on conditioning the other four fifths.
+
+**Self-attention.** Every patch attends to every other patch, across space *and* across time. This is what keeps frame 40 consistent with frame 39, and what keeps a mouth in sync with the audio latent riding alongside. With `num_attention_heads` 56 and `attention_head_dim` 128, attention is computed 56 ways in parallel at a working width of 7,168.
+
+Its cost is the one that matters. Comparing every token with every other token means the work grows with the **square** of the token count:
+
+$$\text{attention cost} \sim \mathcal{O}(N^2), \qquad N \propto \text{width} \times \text{height} \times \text{frames}$$
+
+**Cross-attention.** Patches attend to the conditioning $c$. This is the only place in the entire architecture where the prompt actually reaches the picture.
+
+**FFN — the feed-forward network.** Two matrix multiplications with a nonlinearity between them, widening each token and narrowing it back:
+
+$$\text{FFN}(h)=W_2\,\phi(W_1 h), \qquad W_1: 5376 \to 14336, \qquad W_2: 14336 \to 5376$$
+
+The intermediate width of 14,336 is about **2.7×** the hidden size, not the 4× that is conventional in text transformers. It is still the widest tensor in the block, and the working buffers around it are where the memory goes.
+
+<div class="callout spec"><span class="t">Counting one block, and then the file on disk</span>
+<table>
+<tr><th>Component</th><th>Arithmetic</th><th>Parameters</th></tr>
+<tr><td>Attention projections (Q, K, V, output)</td><td>4 × 5376 × 7168</td><td>~154 M</td></tr>
+<tr><td>Feed-forward (up + down)</td><td>2 × 5376 × 14336</td><td>~154 M</td></tr>
+<tr><td>AdaLN modulation</td><td>2688 × 6 × 5376</td><td>~87 M</td></tr>
+<tr><td><b>One block</b></td><td></td><td><b>~395 M</b></td></tr>
+<tr><td><b>All fifty</b></td><td>395 M × 50</td><td><b>≈ 20 billion</b></td></tr>
+</table>
+<p>Twenty billion parameters at one byte each — which is exactly what int8 quantization gives — is the <b>20 GB</b> file on disk. The arithmetic closes against the file listing, which is the cheapest possible check that the config is being read correctly.</p></div>
+
+## Three things the block diagram hides
+
+The four boxes above are the load-bearing structure, but three further mechanisms decide whether the output is coherent at all, and each is visible in the config file.
+
+### Where position comes from
+
+Attention has no inherent sense of order. Shuffle the tokens and the arithmetic gives the same answer, which for a video would be catastrophic — frame 3 would be as good a neighbour for frame 40 as frame 39 is.
+
+Position is therefore injected, and H3 does it with **rotary position embedding**: before the scores are computed, each query and key vector is *rotated* by an angle proportional to its position in the grid. Two tokens close together get similar rotations, so their dot product stays large; two far apart get very different rotations, and their similarity is damped. The consequence is elegant — because a dot product between two rotated vectors depends only on the *difference* of the angles, the model ends up seeing **relative** position rather than absolute, which is exactly what generalises across clip lengths.
+
+The config exposes the single tuning knob: `rope_theta` is **10000**, the base frequency from which the ladder of rotation rates is built. Low-frequency components change slowly across the sequence and carry coarse position; high-frequency ones change fast and carry fine position. It is the same idea as reading a clock with an hour hand and a second hand.
+
+### The refiner layers
+
+The conditioning arrives from a foreign model. Its width is `text_dim` **5120**, while the transformer works at `hidden_size` **5376** — different shapes, different training, different conventions.
+
+`num_refiner_layers` is **2**: two small layers whose only job is to condition the text embedding before generation begins, translating the encoder's representation into something the fifty blocks can consume. They are the adapter between two models that were never trained together, and they are the reason the encoder must be tapped at exactly layer 50 — the refiners were fitted to *that* representation and nothing else.
+
+### The audio is not a second model
+
+`audio_in_channels` is **32**, and those channels travel through the same fifty blocks as the video's 24. There is no separate audio network in the loop, no post-hoc soundtrack: the audio latent is packed into the same token sequence and denoised jointly, which is what lets self-attention relate a mouth shape in the picture to a consonant in the waveform.
+
+Only at the very end do they separate, into two decoders. This is the concrete meaning of "omni-modal" — not two models glued together, but one stack carrying both modalities and one attention mechanism relating them.
+
+<div class="callout spec"><span class="t">The one place the two modalities need separate treatment</span>
+<p>Video and audio latents have different <em>curvature</em> along the flow — the paths from noise to data bend differently. Stepping the audio latent on the video's schedule over-steps it at low step counts and corrupts the sound.</p>
+<p>So a sampler can run a <b>dual clock</b>: one sigma-shift for the video latent, another for the audio. The Turbo sampler used on this build ran video at shift 12 and audio at shift 3. One stack, one set of weights, two schedules.</p></div>
+
+## How the weights get there — the part the equations do not show
+
+Twenty gigabytes of weights, eight gigabytes of card. The equations above quietly assume the model is *present*. On this build it never is.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Weight streaming: the full twenty gigabyte model lives in system RAM as fifty blocks; one block of about 0.4 gigabytes is copied across PCIe into VRAM, used, and discarded, fifty times per step and twenty-three times per render, totalling about 460 gigabytes of bus traffic.">
+  <defs>
+    <marker id="e1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="e2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE WORKSHOP AND THE STOCKROOM</text>
+  <rect x="2" y="32" width="240" height="208" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="122" y="54" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">system RAM — 125 GB</text>
+  <text x="122" y="72" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">the whole 20 GB model, 50 blocks</text>
+  <g fill="#1a2440" stroke="#3a4a63"><rect x="22" y="88" width="36" height="20" rx="3"/><rect x="66" y="88" width="36" height="20" rx="3"/><rect x="110" y="88" width="36" height="20" rx="3"/><rect x="154" y="88" width="36" height="20" rx="3"/><rect x="198" y="88" width="26" height="20" rx="3"/><rect x="22" y="116" width="36" height="20" rx="3"/><rect x="66" y="116" width="36" height="20" rx="3"/><rect x="110" y="116" width="36" height="20" rx="3"/><rect x="154" y="116" width="36" height="20" rx="3"/><rect x="198" y="116" width="26" height="20" rx="3"/><rect x="22" y="144" width="36" height="20" rx="3"/><rect x="66" y="144" width="36" height="20" rx="3"/><rect x="110" y="144" width="36" height="20" rx="3"/><rect x="154" y="144" width="36" height="20" rx="3"/><rect x="198" y="144" width="26" height="20" rx="3"/></g>
+  <rect x="22" y="172" width="36" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="122" y="212" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">one block, about 0.4 GB, is next</text>
+  <text x="122" y="230" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">DDR3-1600, roughly 25 GB/s</text>
+  <path d="M246,132 L338,132" fill="none" stroke="#5ee0c0" marker-end="url(#e1)"/>
+  <text x="292" y="120" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">PCIe 3.0 x16</text>
+  <text x="292" y="150" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">about 12 GB/s</text>
+  <path d="M338,178 L246,178" fill="none" stroke="#6f7b8f" stroke-dasharray="4 4" marker-end="url(#e2)"/>
+  <text x="292" y="196" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">discarded after use</text>
+  <rect x="342" y="32" width="240" height="208" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="462" y="54" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">VRAM — 8 GB on one card</text>
+  <rect x="362" y="70" width="200" height="34" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="462" y="92" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="Inter,sans-serif">1 resident block — about 0.4 GB</text>
+  <rect x="362" y="112" width="200" height="70" rx="5" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="462" y="138" text-anchor="middle" fill="#eef3ff" font-size="10.5" font-family="Inter,sans-serif">activation scratch</text>
+  <text x="462" y="156" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">the sequence, the attention scores,</text>
+  <text x="462" y="172" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">the GEMM temporaries</text>
+  <rect x="362" y="190" width="200" height="30" rx="5" fill="#12161f" stroke="#232c3b"/>
+  <text x="462" y="210" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">CUDA context — about 1.2 GB</text>
+  <rect x="596" y="70" width="162" height="150" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="677" y="94" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">the tally</text>
+  <text x="677" y="120" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">50 blocks per step</text>
+  <text x="677" y="140" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">x 23 steps</text>
+  <text x="677" y="160" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">x 0.4 GB each</text>
+  <line x1="616" y1="172" x2="738" y2="172" stroke="#232c3b"/>
+  <text x="677" y="194" text-anchor="middle" fill="#5ee0c0" font-size="13" font-family="Inter,sans-serif">about 460 GB</text>
+  <text x="677" y="212" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">across the bus, per render</text>
+</svg>
+
+The structure is a workshop with one bench and a stockroom down the corridor. Only one tool can be on the bench at a time. Every tool is fetched, used, and returned before the next is fetched — and the corridor is walked once per tool, per job.
+
+Twenty billion parameters over fifty blocks is roughly **0.4 GB per block**. One step reads all fifty, which is the entire 20 GB model. A 23-step render therefore drags about **460 GB** across PCIe: the whole model, pulled from system memory twenty-three times over. The card never holds more than one block of it.
+
+<div class="callout truth"><span class="t">This is why the loop is measured in hours</span>
+<p>The ratio to keep is <b>20 GB of weights, 460 GB of traffic</b>. That is the price of the offload trick, and it is the reason a step at 1280×704 takes 143 seconds rather than the few seconds a resident model would need.</p>
+<p>It also explains why more VRAM is worth more than more cards on this build: a card that could hold the model would delete that 460 GB entirely (<a href="39-choosing-the-next-card.html">ch.39</a>).</p></div>
+
+### The memory that is not weights
+
+Profiling on the 8 GB card produced a result that reordered the whole optimisation effort. Peak VRAM turned out to be dominated not by resident weights but by **temporary buffers** — of the real-tensor peak, about **88%** was int8 GEMM working memory, and a single intermediate in `fast_int8_mm` was **2.24 GB** on its own.
+
+The fix was arithmetic, not engineering heroics. The int8 linear layer computes
+
+$$\mathbf{Y} = \text{dequant}\big(\mathbf{X}_8 W_8^{\top}\big)\cdot s$$
+
+and because each row carries its own scale, rows are independent. Blocking the multiplication over groups of rows — never materialising the full output at once — dropped peak memory from **5.9 GB to 3.9 GB** with `torch.equal` proving the result bit-identical.
+
+<div class="callout truth"><span class="t">Two gigabytes bought a resolution</span>
+<p>The freed memory went straight into pixels: native resolution rose from 576×320 to <b>768×448</b>, which is</p>
+$$\frac{768 \times 448}{576 \times 320} = \frac{344064}{184320} = 1.87\times$$
+<p>more pixels for the same card and the same quality settings. Nothing about the video was made smaller to achieve it. The lesson generalises: <b>measure which tensor is actually large before optimising anything</b> — the intuitive suspect, the weights, was not the problem.</p></div>
+
+### The quantization the streaming rests on
+
+Streaming 0.4 GB per block is only tolerable because the block is 0.4 GB. In bf16 the same transformer is about **66 GB** — over three times the traffic, and more than the card can even stage. Quantization is not a nicety on this build; it is what makes the pipeline exist.
+
+Which quantization, though, turned out to be a measurable question rather than a matter of taste. A head-to-head on one scene, same prompt, same seed, same 50-step pipeline:
+
+<div class="callout spec"><span class="t">int8 against Q4, measured on one scene</span>
+<table>
+<tr><th>Metric</th><th>int8 (patched)</th><th>Q4_K_M</th></tr>
+<tr><td>Render time</td><td>6,393 s (107 min)</td><td><b>3,122 s (52 min)</b></td></tr>
+<tr><td>Native resolution reached</td><td>576×320</td><td><b>704×384</b></td></tr>
+<tr><td>Peak VRAM</td><td>7.5 GB</td><td><b>7.06 GB</b></td></tr>
+<tr><td>Quality, by eye</td><td colspan="2">indistinguishable — a tie, not a win for either</td></tr>
+</table>
+<p><b>Why the speed gap exists.</b> The production int8 path dequantizes back to bf16 before the matrix multiply and therefore never engages the card's int8 tensor cores at all — and the row-blocking patch adds loop overhead on top. The Q4 path dequantizes to fp16 and runs one standard matmul, sidestepping the 2.24 GB temporary entirely, which is also why it fits more pixels at lower peak memory.</p>
+<p><b>The caveats, stated plainly.</b> One scene, one seed. The comparison is against <em>patched</em> int8, not raw int8. Quality was judged by eye, with no metric behind it, and the two clips ran at different native resolutions so it was never a clean quality A/B. Honest reading: Q4 is the better default; int8 remains the higher-fidelity reference, because it is bit-identical to the unpatched original.</p></div>
+
+## What one step costs, and why
+
+$T_{\text{forward}}$ — the time for one pass — is a function of the sequence length, and the sequence length is set by resolution multiplied by frame count. Laying the measured renders out in that order is more informative than any formula:
+
+<table>
+<tr><th>Render</th><th>Resolution × frames</th><th>Seconds per step</th></tr>
+<tr><td><code>cp15sd</code></td><td>512×288 × 345</td><td>81</td></tr>
+<tr><td><code>an1</code></td><td>1280×704 × 124</td><td>143</td></tr>
+<tr><td><code>e720hq</code></td><td>1280×704 × 124</td><td>152</td></tr>
+<tr><td><code>e1h-15s</code></td><td>832×480 × 345</td><td>193</td></tr>
+<tr><td><code>g4k</code></td><td>1280×704 × 345</td><td><b>6,600</b></td></tr>
+</table>
+
+The first four behave. They rise with sequence length, and frames cost more than pixels — 832×480 across 345 frames is slower per step than 1280×704 across 124, despite having fewer pixels per frame, because temporal length lengthens the sequence attention has to relate.
+
+The last row does not behave. Going from `e1h-15s` to `g4k` multiplies the token count by **2.26×**, which quadratic attention says should cost about five times as much. It cost **34×**: 193 seconds per step became 6,600.
+
+<div class="callout warn"><span class="t">Where a cost model stops describing a machine</span>
+<p>Nothing about attention explains a 34× jump. What changed is that the larger sequence stopped fitting the single-card path and had to be split across three cards — and that path carries roughly <b>7× overhead beyond the arithmetic</b>.</p>
+<p>That residual is not in any equation in this chapter. It lives in the interconnect, and it is the subject of <a href="24-pcie-nvlink-interconnect.html">ch.24</a>. The general lesson is worth more than the specific number: a cost model describes the computation, not the machine, and the gap between them is where the engineering is.</p></div>
+
+## Stage 5 · Guidance — how hard the model obeys the prompt
+
+When classifier-free guidance is on, each step is evaluated **twice**: once with the conditioning and once with an empty conditioning. The two answers are then pushed apart:
+
+$$\mathbf{v} \;=\; \mathbf{v}_\theta(\mathbf{x}_t,t,\varnothing)\;+\;s\big(\mathbf{v}_\theta(\mathbf{x}_t,t,c)-\mathbf{v}_\theta(\mathbf{x}_t,t,\varnothing)\big)$$
+
+**Plain meaning:** the difference between "what the model would do anyway" and "what the model does when it has read the prompt" *is* the prompt's influence. Guidance scale $s$ multiplies that influence. At $s=1$ nothing changes; at $s=0$ the prompt is ignored; typical values sit around 2.5 to 3.
+
+Too high and skin goes plastic and colours burn, because the exaggerated velocity overshoots on every step. Too low and the model drifts off the brief. And because it needs two evaluations, guidance is the reason a "step" can cost two full passes of a twenty-billion-parameter stack rather than one.
+
+## Stage 6 · Decode — numbers become pixels and sound
+
+The loop ends when the schedule runs out. What remains is a **clean latent** of exactly the shape it started with — nothing grew, nothing became an image. It is a compressed description of a video, and it needs a second network to expand it.
+
+<svg viewBox="0 0 760 236" width="100%" style="max-width:920px" role="img" aria-label="Decode: the clean latent is expanded by the video VAE in overlapping 256 by 256 tiles, producing finished pixel chunks; keeping those chunks on the GPU exhausted memory at clip 14, while moving each finished chunk to system RAM completes the decode.">
+  <defs>
+    <marker id="f1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="f2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">DECODE — THE SECOND MEMORY PEAK</text>
+  <rect x="2" y="60" width="150" height="76" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="77" y="86" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">clean latent</text>
+  <text x="77" y="106" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">24 channels</text>
+  <text x="77" y="122" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">still not a picture</text>
+  <line x1="154" y1="98" x2="178" y2="98" stroke="#5ee0c0" marker-end="url(#f1)"/>
+  <rect x="182" y="46" width="184" height="104" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="274" y="68" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">tiled decode</text>
+  <g fill="#1a2440" stroke="#7aa2ff" opacity="0.9"><rect x="212" y="80" width="52" height="40" rx="3"/><rect x="252" y="80" width="52" height="40" rx="3"/><rect x="292" y="80" width="52" height="40" rx="3"/></g>
+  <text x="274" y="138" text-anchor="middle" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">256 x 256 tiles, 64 px overlap</text>
+  <line x1="368" y1="98" x2="392" y2="98" stroke="#5ee0c0" marker-end="url(#f1)"/>
+  <rect x="396" y="46" width="150" height="60" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="471" y="70" text-anchor="middle" fill="#ffdede" font-size="10.5" font-family="Inter,sans-serif">chunks kept on the GPU</text>
+  <text x="471" y="90" text-anchor="middle" fill="#c98f8f" font-size="10" font-family="Inter,sans-serif">about 216 MB each</text>
+  <rect x="396" y="120" width="150" height="60" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="471" y="144" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="Inter,sans-serif">chunks moved to RAM</text>
+  <text x="471" y="164" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">on append</text>
+  <path d="M548,76 L588,76" fill="none" stroke="#ff6b6b" marker-end="url(#f2)"/>
+  <path d="M548,150 L588,150" fill="none" stroke="#5ee0c0" marker-end="url(#f1)"/>
+  <rect x="592" y="46" width="166" height="60" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="675" y="70" text-anchor="middle" fill="#ffdede" font-size="10.5" font-family="Inter,sans-serif">out of memory</text>
+  <text x="675" y="90" text-anchor="middle" fill="#c98f8f" font-size="10" font-family="Inter,sans-serif">at clip 14 — the g4k bug</text>
+  <rect x="592" y="120" width="166" height="60" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="675" y="144" text-anchor="middle" fill="#eafff8" font-size="10.5" font-family="Inter,sans-serif">a finished mp4</text>
+  <text x="675" y="164" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">and a wav alongside it</text>
+  <text x="2" y="216" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">the same decode, the same card — the only difference is where each finished chunk was put down</text>
+</svg>
+
+The video VAE runs **tiled by default**: 256×256 patches with a 64-pixel overlap, blended at the seams. Tiling is what keeps decode inside 8 GB at all, because a full-frame decode of 124 frames at 1280×704 would need the whole pixel array resident at once.
+
+The arithmetic at the very end is deliberately dumb. The decoder emits continuous floats in $[-1,1]$, and turning those into bytes is a rescale:
+
+$$\text{pixel} = \big\lfloor (x+1)\cdot 127.5 \big\rceil \in [0,255]$$
+$$\text{sample} = \big\lfloor a \cdot 32767 \big\rceil \in [-32768, 32767]$$
+
+**Plain meaning:** there is no probability distribution over colours, no sampling, no cleverness. The intelligence is entirely in producing the right float; the byte is arithmetic. A value of $-1$ is black, $+1$ is white, and the audio VAE's own 32-channel latent goes through the same treatment to become a 32 kHz stereo waveform.
+
+<div class="callout danger"><span class="t">Decode is a separate stage, and it has killed finished renders</span>
+<p>Two failures on this build, both in the last few lines of the pipeline, both after the expensive part had already succeeded.</p>
+<p><b>g4j</b> completed <b>6 hours 10 minutes</b> of denoise and then died on the first line of decode: <code>_execution_device</code> resolved to <code>cuda:0</code> while the sharded forward had returned latents on the CPU. Both decode paths carried the same bug, at <code>decoders.py:185</code> and <code>:245</code>.</p>
+<p><b>g4k</b> ran out of memory at <code>[vae] clip 14</code>. Not a capacity wall — an accumulation bug. <code>_decode</code> appended every finished pixel chunk to a list that stayed GPU-resident, roughly 216 MB per chunk at 1280×704. The fix was one line: move each finished chunk to system RAM on append.</p>
+<p>The lesson is structural. The loop and the decode are different code paths with different memory profiles, and verifying one proves nothing about the other. Any long render should decode a two-frame test at the same resolution first (<a href="46-the-first-15-seconds.html">ch.46</a>).</p></div>
+
+One more incompatibility belongs here: the generic `VAEDecodeTiled` helper does not work with H3, because H3's latent is a NestedTensor rather than a plain array. The tiling has to come from H3's own VAE configuration, which is why the 256×256 / 64 px numbers above are the ones that matter.
+
+## Traps along the pipeline
+
+Each of these was found by hitting it. They are placed here in pipeline order, because that is how they are encountered.
+
+<div class="callout danger"><span class="t">Six things that silently break a render</span>
+<ul>
+<li><b>SageAttention produces pure noise on H3.</b> A drop-in faster attention kernel, correct on other models, wrong on this one. It does not error — it returns a plausible-looking tensor that decodes into static. Keep it off.</li>
+<li><b>Offloading with <code>use_stream=True</code> kills the process.</b> It pins tens of gigabytes of host memory, and the kernel's out-of-memory killer takes the process with no traceback at all. A hand-rolled streamer needs a small fixed ring of pinned buffers, never the whole model. Keep the flag <code>False</code>.</li>
+<li><b>Two owners of weight movement will fight.</b> A custom streaming loop and a library's group-offload hooks both install pre-forward hooks that move weights. Exactly one component may own that job.</li>
+<li><b>The generic <code>VAEDecodeTiled</code> helper is incompatible</b> — H3's latent is a NestedTensor, not a plain array. Tiling must come from H3's own VAE configuration.</li>
+<li><b>A LoRA at 480p made the image softer,</b> not sharper. Detail adapters work in high spatial frequencies, and at low native resolution the latent barely carries those frequencies for the adapter to act on. The base model was the sharper of the two.</li>
+<li><b>Readable on-screen text is not achievable</b> by any current video diffusion model, this one included. Letters come out as plausible-looking marks. Design around it rather than prompting harder.</li>
+</ul></div>
+
+One more that is a property of the model rather than a bug: **identity drifts across chained clips**. Because the fifteen-second ceiling is a trained range and not a hardware limit, longer films are made by chaining clips — and nothing in a text-and-first-frame pipeline anchors a face between them. Photoreal humans visibly drift; stylised characters hold far better ([ch.33](33-long-video-small-card.html)).
+
+## The whole pipeline, mapped
+
+<table>
+<tr><th>Stage</th><th>Computes</th><th>Shape</th><th>Its cost on this build</th></tr>
+<tr><td>1 · Encoder</td><td>$c=\text{Encoder}(\text{tokens})$, tapped at layer 50</td><td>[L, d]</td><td>26 GB read, once, in its own process</td></tr>
+<tr><td>2 · Noise init</td><td>$\mathbf{x}_1\sim\mathcal{N}(0,I)$</td><td>(1, 24, 37, 30, 52) measured</td><td>free — it is random numbers</td></tr>
+<tr><td>3 · Loop × N</td><td>$\mathbf{x}_{t-\Delta t}= \mathbf{x}_t-\Delta t\,\mathbf{v}_\theta$</td><td>unchanged throughout</td><td><b>essentially the whole render</b> — 143 s per step at 1280×704</td></tr>
+<tr><td>4 · Each block</td><td>AdaLN, self-attn, cross-attn, FFN</td><td>tokens stay 5376 wide</td><td>0.4 GB streamed in; attention grows as $\mathcal{O}(N^2)$</td></tr>
+<tr><td>5 · Guidance</td><td>$\mathbf{v}=\mathbf{v}_\varnothing+s(\mathbf{v}_c-\mathbf{v}_\varnothing)$</td><td>unchanged</td><td>two evaluations per step when enabled</td></tr>
+<tr><td>6 · Decode</td><td>tiled VAE, then a rescale to bytes</td><td>[F, H, W, 3] plus a waveform</td><td>the second memory peak, and a real failure point</td></tr>
+</table>
+
+<div class="callout truth"><span class="t">The one-breath version</span>
+<p>Words become a meaning-tensor $c$. A tiny latent is filled with noise. Twenty-three times, a twenty-billion-parameter stack — streamed block by block from system RAM because it does not fit — predicts a velocity $\mathbf{v}_\theta$, and the latent takes one small step $\mathbf{x}_{t-\Delta t}=\mathbf{x}_t-\Delta t\,\mathbf{v}_\theta$ in that direction. Attention inside every block relates every patch to every other, in space and in time, which is why the cost grows with the square of the sequence. Two decoders then expand the clean latent into pixels and sound. Every measurement in this guide is a statement about <em>where</em> in that sentence the data got heavy.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">tensor / shape</span><span class="badge">conditioning</span><span class="badge">token</span><span class="badge">embedding</span><span class="badge">layer-50 tap</span><span class="badge">latent</span><span class="badge">patch size</span><span class="badge">sequence length</span><span class="badge">flow matching</span><span class="badge">velocity field</span><span class="badge">Euler step</span><span class="badge">schedule / sigma-shift</span><span class="badge">AdaLN</span><span class="badge">self-attention</span><span class="badge">cross-attention</span><span class="badge">FFN</span><span class="badge">residual</span><span class="badge">weight streaming</span><span class="badge">GEMM temporary</span><span class="badge">CFG / guidance scale</span><span class="badge">tiled decode</span></p>
+<p>If those feel solid, the equations behind them will read like sentences rather than symbols.</p></div>
+
+Next: every one of those symbols taken apart and said out loud, with the calculus behind $d\mathbf{x}/dt$ built from zero and each formula worked through with real numbers.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

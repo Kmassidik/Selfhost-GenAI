@@ -33,3 +33,6 @@ logs/             # run logs
 *.log             # stray run logs
 _archive/         # superseded material
 h3-lab/embeds/    # phase-A embeddings - regenerate with h3_encode_local.py
+
+# operational handover — names where credentials live, stays local
+handover/

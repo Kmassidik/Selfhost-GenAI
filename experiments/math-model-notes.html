@@ -1,0 +1,200 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MiniMax-H3 — Math Model (Prompt → Video)</title>
+<link rel="stylesheet" href="../knowledge-base/assets/style.css">
+<link rel="stylesheet" href="../knowledge-base/assets/katex.min.css">
+</head><body>
+<script type="text/markdown" id="md">
+# MiniMax-H3 — Math Model (Prompt → Video)
+
+The full transformation as formulas. Notation: $d$ = hidden dim, $N$ = sequence length, bold = tensors.
+
+---
+
+## 0. Symbols
+
+$$
+\text{prompt } P \;\longrightarrow\; \text{tokens } \mathbf{t} \;\longrightarrow\; \text{condition } \mathbf{c} \;\longrightarrow\; \text{latent } \mathbf{z} \;\longrightarrow\; \text{video } \mathbf{V},\ \text{audio } \mathbf{A}
+$$
+
+---
+
+## 1. Text → tokens → embedding
+
+Tokenizer maps the string to integer tokens, then an embedding table $E$ looks each one up:
+
+$$
+\mathbf{t} = \text{tok}(P) \in \mathbb{N}^{L}, \qquad
+\mathbf{x}^{(0)} = E[\mathbf{t}] \in \mathbb{R}^{L \times d}
+$$
+
+---
+
+## 2. Encoder (Qwen3-VL-32B) → conditioning
+
+A stack of transformer layers $f_\ell$. H3 taps the hidden state at layer 50:
+
+$$
+\mathbf{x}^{(\ell)} = f_\ell\!\left(\mathbf{x}^{(\ell-1)}\right), \quad \ell = 1 \dots 50
+\qquad\Longrightarrow\qquad
+\mathbf{c} = \mathbf{x}^{(50)} \in \mathbb{R}^{L \times d}
+$$
+
+Each layer is attention + feed-forward with residuals:
+
+$$
+f_\ell(\mathbf{x}) = \mathbf{x} + \mathrm{FFN}\big(\mathbf{x} + \mathrm{Attn}(\mathbf{x})\big)
+$$
+
+**Attention** (the core op):
+
+$$
+\mathrm{Attn}(\mathbf{x}) = \mathrm{softmax}\!\left(\frac{\mathbf{Q}\mathbf{K}^\top}{\sqrt{d_k}}\right)\mathbf{V},
+\qquad
+\mathbf{Q}=\mathbf{x}W_Q,\ \mathbf{K}=\mathbf{x}W_K,\ \mathbf{V}=\mathbf{x}W_V
+$$
+
+The score matrix $\mathbf{Q}\mathbf{K}^\top \in \mathbb{R}^{N\times N}$ is why cost scales as $\mathcal{O}(N^2)$.
+
+**FFN** (token-wise, the memory culprit — see §7):
+
+$$
+\mathrm{FFN}(\mathbf{x}) = \sigma\!\left(\mathbf{x}W_1 + b_1\right)W_2 + b_2,
+\qquad W_1 \in \mathbb{R}^{d \times 4d}
+$$
+
+---
+
+## 3. Noise initialization (latent space)
+
+The video+audio is generated in a compressed latent, not pixels. Start from pure Gaussian noise:
+
+$$
+\mathbf{z}_1 \sim \mathcal{N}(\mathbf{0}, \mathbf{I}), \qquad
+\mathbf{z}_1 \in \mathbb{R}^{F' \times H' \times W' \times C}
+$$
+
+where the VAE compression gives $H' = H/16,\ W' = W/16,\ F' = F/4$ (space 16×, time 4×).
+
+---
+
+## 4. Flow matching — the generator is an ODE
+
+H3 (`FLOW_AV`) learns a **velocity field** $v_\theta$. Generation = integrating an ODE from noise ($t{=}1$) to data ($t{=}0$), steered by $\mathbf{c}$:
+
+$$
+\boxed{\;\frac{d\mathbf{z}_t}{dt} = v_\theta(\mathbf{z}_t,\ t,\ \mathbf{c})\;}
+\qquad \mathbf{z}_1 = \text{noise} \ \longrightarrow\ \mathbf{z}_0 = \text{clean latent}
+$$
+
+Training target (why it's *regression*, not classification): along the straight path $\mathbf{z}_t = t\,\mathbf{z}_1 + (1-t)\,\mathbf{z}_0$, the model regresses the constant velocity $\mathbf{z}_1 - \mathbf{z}_0$:
+
+$$
+\mathcal{L} = \mathbb{E}_{t,\mathbf{z}_0,\mathbf{z}_1}\Big\|\, v_\theta(\mathbf{z}_t, t, \mathbf{c}) - (\mathbf{z}_1 - \mathbf{z}_0)\,\Big\|^2
+$$
+
+$v_\theta$ is the 33B DiT (a transformer over the packed video+audio latent sequence).
+
+---
+
+## 5. Sampling = discretizing the ODE (Euler)
+
+Split $t\in[0,1]$ into $S$ steps. Each step is one full DiT forward pass:
+
+$$
+\mathbf{z}_{t-\Delta t} = \mathbf{z}_t - \Delta t \cdot v_\theta(\mathbf{z}_t, t, \mathbf{c}),
+\qquad \Delta t = \tfrac{1}{S}
+$$
+
+- **Base model:** $S = 20$ (error $\sim \mathcal{O}(\Delta t)$, needs many steps).
+- **Turbo-LoRA:** distills $v_\theta \to v_\theta'$ so the trajectory is straight enough for $S = 4$–$6$.
+
+**Number of function evaluations** (the cost driver):
+
+$$
+\text{NFE} = S \times (\text{solver order})
+$$
+
+---
+
+## 6. Latent → pixels & sound (VAE decode)
+
+Two decoders expand $\mathbf{z}_0$. Output is **continuous** (regression), then rescaled to bytes:
+
+$$
+\mathbf{V} = \underbrace{\left\lfloor \big(\tanh(\mathrm{Dec}_{\text{vid}}(\mathbf{z}_0)) + 1\big)\cdot 127.5 \right\rceil}_{\in\,[0,255]}, 
+\qquad
+\mathbf{A} = \underbrace{\left\lfloor \mathrm{Dec}_{\text{aud}}(\mathbf{z}_0)\cdot 32767 \right\rceil}_{\in\,[-32768,\,32767]}
+$$
+
+The "0–255" is a **rescale of a continuous value**, not a probability over pixels. No softmax over colors.
+
+---
+
+## 7. Cost model (why 8 GB is the fight)
+
+**Time:**
+
+$$
+T_{\text{total}} = \underbrace{\text{NFE}\cdot T_{\text{fwd}}(\text{res}\times\text{frames})}_{\text{sampling}} \;+\; \underbrace{T_{\text{enc}} + T_{\text{dec}} + T_{\text{up}}}_{\text{fixed}}
+$$
+
+**Speedup is bounded (Amdahl), $p$ = sampling fraction, $s$ = Turbo factor:**
+
+$$
+\text{speedup} = \frac{1}{(1-p) + \dfrac{p}{s}}
+$$
+
+**Peak memory (measured decomposition):**
+
+$$
+M_{\text{peak}} = \underbrace{M_{\text{fixed}}}_{\approx\,6.5\text{ GB}} + M_{\text{frames}}(F)
+$$
+
+Of the real-tensor part, ~88% was the **int8 GEMM temporary**:
+
+$$
+M_{\text{int8mm}} = \underbrace{M \times N}_{\text{output } [M,N]} \times \underbrace{4\text{ bytes}}_{\text{int32}} \;\approx\; 2.24\text{ GB (one shot)}
+$$
+
+---
+
+## 8. The exact optimization (bit-identical)
+
+The int8 linear does $\mathbf{Y} = \mathrm{dequant}(\mathbf{X}_8 W_8^\top)\cdot s$. Because rows are independent (per-row scale $s_i$), block it over rows $R_i$ — never materialize the full $[M,N]$:
+
+$$
+\mathbf{Y}[R_i,:] = \big(\mathbf{X}_8[R_i,:]\; W_8^\top\big) \cdot (s_{R_i}\, s_w),
+\qquad \bigcup_i R_i = \{1..M\}
+$$
+
+$$
+\Rightarrow\quad M_{\text{peak}}: 5.9\text{ GB} \to 3.9\text{ GB}, \qquad \Delta Q = 0 \ (\text{proven } \texttt{torch.equal})
+$$
+
+---
+
+## 9. What the freed memory buys (resolution)
+
+$$
+\frac{\text{pixels}_{\text{after}}}{\text{pixels}_{\text{before}}}
+= \frac{768 \times 448}{576 \times 320}
+= \frac{344064}{184320}
+= \boxed{1.87\times}
+$$
+
+---
+
+## The chain, one line
+
+$$
+P \xrightarrow{\text{tok},E} \mathbf{x}^{(0)} \xrightarrow{f_{1:50}} \mathbf{c};\quad
+\mathbf{z}_1\!\sim\!\mathcal{N} \xrightarrow[\text{Euler }S\text{ steps}]{\;\dot{\mathbf{z}}=v_\theta(\mathbf{z},t,\mathbf{c})\;} \mathbf{z}_0 \xrightarrow{\text{VAE}} (\mathbf{V},\mathbf{A})
+$$
+
+</script>
+<script src="../knowledge-base/assets/marked.min.js"></script>
+<script src="../knowledge-base/assets/katex.min.js"></script>
+<script src="../knowledge-base/assets/mermaid.min.js"></script>
+<script src="app.js"></script>
+</body></html>

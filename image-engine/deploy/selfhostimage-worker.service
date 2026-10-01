@@ -1,0 +1,28 @@
+[Unit]
+Description=selfhostimageai — GPU worker (resident Qwen-Image 2.1 int8, diffusers, GPU 1)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/Desktop/selfhostimageai
+Environment=IMAGEAI_ROOT=/root/Desktop/selfhostimageai
+Environment=IMAGEAI_OUT=/root/Desktop/selfhostimageai/outputs
+# GPU 1 only — GPU 0 is the audio service and must never be visible to this worker.
+Environment=CUDA_VISIBLE_DEVICES=1
+Environment=HF_HOME=/root/.cache/huggingface
+# reduce CUDA fragmentation OOM on the 8 GB card (the VAE decode spike)
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# int8 weight-only (torchao) — ~bf16 quality, fewer bytes crossing PCIe per step
+Environment=QWEN_INT8=1
+# reuse the causal-conditioning K/V across denoising steps (2.1's KV cache)
+Environment=QWEN_KV_CACHE=1
+# dedicated venv (diffusers git-main with QwenImage21Pipeline) — isolated from the H3 video engine
+ExecStart=/root/Desktop/selfhostimageai/.venv-qwen21/bin/python /root/Desktop/selfhostimageai/app/worker_qwen.py
+# finish the render in hand before stopping, rather than throw away a half-made image
+KillMode=mixed
+TimeoutStopSec=600
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>29 · Where the Numbers Live</title>
+<meta name="description" content="A model is a list of numbers with four addresses — disk, RAM, VRAM, registers. How one number becomes one byte, and the arithmetic that turns billions of parameters into gigabytes.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 29 · The physical bottom — bits, bytes and the size math</span>
+
+# Where the Numbers Live
+
+<p class="lede">The numbers live at four addresses at once — a file on disk, a copy of that file in system RAM, a 0.4 GB slice of it on a graphics card, and, for a few nanoseconds, a handful of registers inside the chip. Everything else in this guide is that trip, repeated until a video exists.</p>
+
+Here is the fact that makes the trip worth studying. The transformer file on this box is **20 GB**. A 23-step render moves about **460 GB** across the PCIe bus. Nothing is downloaded, nothing grows: the same 20 GB is dragged from RAM onto a card, used, thrown away, and dragged again — twenty-three times over, once per step. The model does not travel far. It travels *often*.
+
+To understand why, it helps to stop treating "the model" as a thing and start treating it as what it physically is: a long run of bytes, with an address.
+
+## A model file is a list, and nothing else
+
+A `.safetensors` file has two parts. A small JSON header at the front says what tensors exist, what shape each one is, what type its numbers are, and at which byte offset it starts. After the header, there is one uninterrupted run of raw bytes — the numbers themselves, written end to end.
+
+There is no code in the file. No graph, no logic, no instructions. Loading a model means reading that byte run into memory and pointing an array at it.
+
+<div class="callout truth"><span class="t">What "owning a model" actually means</span>
+<p>Owning a model is owning that list of numbers on a drive. Everything else — the architecture, the loop, the sampler — is ordinary Python and CUDA that anyone can rewrite (<a href="35-is-it-really-ours.html">ch.35</a>). The irreplaceable part is the list.</p>
+<p><b>Quantizing</b> is therefore not a transformation of behaviour. It is a rewrite of the list, so that each number occupies fewer bytes, and the file that comes out the other side is a different length.</p></div>
+
+### The four addresses
+
+Once the list is understood, the geography follows. These are the real components of this build, with the real distances between them.
+
+<svg viewBox="0 0 760 248" width="100%" style="max-width:920px" role="img" aria-label="The four places a model number can be: an 879 GB disk holds the file at rest, 125 GB of system RAM holds the whole model, 8 GB of VRAM holds one block at a time, and the chip's registers hold a handful of numbers for a few nanoseconds. Bandwidth rises and capacity falls at every step.">
+  <defs>
+    <marker id="w1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="w2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">BIG AND SLOW  →  SMALL AND FAST  ·  EVERY STEP DOWN IS A COPY, NOT A MOVE</text>
+  <rect x="2" y="34" width="166" height="118" rx="10" fill="#12161f" stroke="#3a4a63"/>
+  <text x="85" y="58" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">Disk</text>
+  <text x="85" y="78" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">879 GB · 585 GB free</text>
+  <text x="85" y="98" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the file at rest</text>
+  <text x="85" y="118" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">read once per run</text>
+  <text x="85" y="140" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="SF Mono,monospace">.safetensors</text>
+  <line x1="170" y1="92" x2="196" y2="92" stroke="#6f7b8f" marker-end="url(#w1)"/>
+  <rect x="200" y="34" width="166" height="118" rx="10" fill="#151b26" stroke="#7aa2ff"/>
+  <text x="283" y="58" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">System RAM</text>
+  <text x="283" y="78" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">125 GB DDR3-1600</text>
+  <text x="283" y="98" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">holds the whole model</text>
+  <text x="283" y="118" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">≈ 25 GB/s to read</text>
+  <text x="283" y="140" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the staging area</text>
+  <line x1="368" y1="92" x2="394" y2="92" stroke="#5ee0c0" marker-end="url(#w2)"/>
+  <text x="381" y="80" text-anchor="middle" fill="#5ee0c0" font-size="9.5" font-family="Inter,sans-serif">PCIe</text>
+  <text x="381" y="112" text-anchor="middle" fill="#5ee0c0" font-size="9.5" font-family="Inter,sans-serif">~12 GB/s</text>
+  <rect x="398" y="34" width="166" height="118" rx="10" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="481" y="58" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">VRAM</text>
+  <text x="481" y="78" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">8 GB per card × 3</text>
+  <text x="481" y="98" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">one block at a time</text>
+  <text x="481" y="118" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">448 GB/s to the chip</text>
+  <text x="481" y="140" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the workbench</text>
+  <line x1="566" y1="92" x2="592" y2="92" stroke="#5ee0c0" marker-end="url(#w2)"/>
+  <rect x="596" y="34" width="162" height="118" rx="10" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="677" y="58" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">Registers</text>
+  <text x="677" y="78" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">kilobytes</text>
+  <text x="677" y="98" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">a handful of numbers</text>
+  <text x="677" y="118" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">nanoseconds</text>
+  <text x="677" y="140" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">where the multiply happens</text>
+  <rect x="2" y="172" width="756" height="72" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="18" y="194" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">Capacity falls by roughly a factor of ten at every step. Bandwidth rises by about the same.</text>
+  <text x="18" y="214" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">That trade is the whole reason a 20 GB model runs on an 8 GB card: keep the list where it fits, and rent the card by the slice.</text>
+  <text x="18" y="234" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Nothing is ever moved down the chain. It is copied, used, and the copy is discarded.</text>
+</svg>
+
+The last line of that diagram is the one people skip. A weight that is "on the GPU" is also still in RAM, and still on disk. Three copies of the same number exist, and two of them are idle. Memory pressure on this hardware is never about where the truth lives — it is about how much of the truth has to be *near the chip at once*.
+
+## One number, and how many bytes it costs
+
+A **bit** is one switch, `0` or `1`. Eight bits make a **byte**. With $b$ bits there are $2^{b}$ distinct patterns available, so $b$ bits can name exactly $2^{b}$ different values:
+
+$$\text{1 byte} = 8\ \text{bits} = 2^{8} = 256\ \text{possible values}$$
+
+That is the whole mechanism of precision. More bytes per number means more available patterns, which means a **finer grid** for the number to land on. Nothing about a format makes it "smarter"; formats differ only in how many landing spots they offer and how those spots are spaced.
+
+### The same weight, stored three ways
+
+Take one real weight, $x = 0.0273$, and watch it survive three storage decisions.
+
+Integer quantization stores a whole number $q$ plus one **scale** $s$ shared across a group of weights. Three lines of arithmetic define it completely:
+
+$$s = \frac{\max|w|}{2^{\,b-1}-1}, \qquad q = \text{round}\!\left(\frac{x}{s}\right), \qquad \hat{x} = q \cdot s$$
+
+Suppose the largest magnitude in this weight's group is $\max|w| = 0.05$.
+
+<div class="callout spec"><span class="t">bf16 — 16 bits (2 bytes)</span>
+<p>A floating-point layout: <b>1 sign + 8 exponent + 7 mantissa</b> bits.</p>
+<pre>
+ 0   01111001   0110000
+sign  exponent   mantissa      → decodes to ≈ 0.0273
+</pre>
+<p>$2^{16} = 65{,}536$ patterns, spread across a vast range by the exponent, so the spacing is fine near zero and coarse far from it. This is "native" precision for this model family.</p></div>
+
+<div class="callout spec"><span class="t">int8 — 8 bits (1 byte)</span>
+<p>Scale $s = \dfrac{0.05}{2^{7}-1} = \dfrac{0.05}{127} = 0.000394$.</p>
+$$q=\text{round}\!\left(\frac{0.0273}{0.000394}\right)=\text{round}(69.3)=69 \;\rightarrow\; \texttt{01000101}$$
+<p>Recover: $\hat{x} = 69 \times 0.000394 = 0.0272$. Only $2^{8}=256$ evenly spaced steps across the group's range — a coarser grid, and the value lands one notch off.</p></div>
+
+<div class="callout spec"><span class="t">int4 — 4 bits (½ byte)</span>
+<p>Scale $s = \dfrac{0.05}{2^{3}-1} = \dfrac{0.05}{7} = 0.00714$.</p>
+$$q=\text{round}\!\left(\frac{0.0273}{0.00714}\right)=\text{round}(3.8)=4 \;\rightarrow\; \texttt{0100}$$
+<p>Recover: $\hat{x} = 4 \times 0.00714 = 0.0286$. Sixteen steps for the whole group, so the nearest legal value is a visible distance away. <b>Two int4 numbers pack into one byte.</b></p></div>
+
+The picture below is the same three formats drawn as rulers, zoomed into the neighbourhood of the value. It is worth a moment, because it makes the trade physical rather than verbal.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Three rulers over the same narrow range of values. In bf16 the available values are closer together than a hairline, so 0.0273 lands on itself. In int8 the legal values are spaced 0.000394 apart and 0.0273 snaps to 0.0272. In int4 the spacing is 0.00714 and the nearest legal value is 0.0286, visibly to the right.">
+  <defs>
+    <marker id="w3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME VALUE, THREE GRIDS  ·  WINDOW: 0.0240 → 0.0300</text>
+  <line x1="414" y1="30" x2="414" y2="238" stroke="#ffb454" stroke-dasharray="3 4"/>
+  <text x="414" y="256" text-anchor="middle" fill="#ffb454" font-size="11" font-family="SF Mono,monospace">x = 0.0273 (the true weight)</text>
+  <text x="40" y="52" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">bf16 · 2 bytes · 65,536 patterns</text>
+  <rect x="40" y="60" width="680" height="6" rx="3" fill="#1f2a3a"/>
+  <circle cx="414" cy="63" r="5" fill="#5ee0c0"/>
+  <text x="424" y="82" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">the legal values here are closer together than this line is thick — it lands on itself</text>
+  <text x="40" y="120" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">int8 · 1 byte · 256 steps of 0.000394</text>
+  <line x1="40" y1="132" x2="720" y2="132" stroke="#2b3f5e"/>
+  <line x1="44" y1="126" x2="44" y2="138" stroke="#3a4a63"/>
+  <line x1="88" y1="126" x2="88" y2="138" stroke="#3a4a63"/>
+  <line x1="132" y1="126" x2="132" y2="138" stroke="#3a4a63"/>
+  <line x1="178" y1="126" x2="178" y2="138" stroke="#3a4a63"/>
+  <line x1="222" y1="126" x2="222" y2="138" stroke="#3a4a63"/>
+  <line x1="266" y1="126" x2="266" y2="138" stroke="#3a4a63"/>
+  <line x1="312" y1="126" x2="312" y2="138" stroke="#3a4a63"/>
+  <line x1="356" y1="126" x2="356" y2="138" stroke="#3a4a63"/>
+  <line x1="400" y1="124" x2="400" y2="140" stroke="#5ee0c0" stroke-width="2"/>
+  <line x1="446" y1="126" x2="446" y2="138" stroke="#3a4a63"/>
+  <line x1="490" y1="126" x2="490" y2="138" stroke="#3a4a63"/>
+  <line x1="534" y1="126" x2="534" y2="138" stroke="#3a4a63"/>
+  <line x1="580" y1="126" x2="580" y2="138" stroke="#3a4a63"/>
+  <line x1="624" y1="126" x2="624" y2="138" stroke="#3a4a63"/>
+  <line x1="668" y1="126" x2="668" y2="138" stroke="#3a4a63"/>
+  <line x1="714" y1="126" x2="714" y2="138" stroke="#3a4a63"/>
+  <circle cx="400" cy="132" r="5" fill="#5ee0c0"/>
+  <path d="M412,146 L402,138" fill="none" stroke="#ffb454" marker-end="url(#w3)"/>
+  <text x="416" y="156" fill="#ffd9a0" font-size="11" font-family="SF Mono,monospace">q = 69 → 0.0272</text>
+  <text x="40" y="192" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">int4 · ½ byte · 16 steps of 0.00714</text>
+  <line x1="40" y1="204" x2="720" y2="204" stroke="#2b3f5e"/>
+  <line x1="562" y1="196" x2="562" y2="212" stroke="#5ee0c0" stroke-width="2"/>
+  <circle cx="562" cy="204" r="5" fill="#5ee0c0"/>
+  <path d="M420,214 L556,208" fill="none" stroke="#ffb454" marker-end="url(#w3)"/>
+  <text x="440" y="230" fill="#ffd9a0" font-size="11" font-family="SF Mono,monospace">q = 4 → 0.0286 — the nearest legal value is a long way off</text>
+  <text x="40" y="230" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">no tick here</text>
+</svg>
+
+<div class="callout truth"><span class="t">The pattern — this is the entire quality-versus-fit trade</span>
+<table>
+<tr><th>Format</th><th>Bits</th><th>Possible values</th><th>$x=0.0273$ becomes</th></tr>
+<tr><td>bf16</td><td>16</td><td>65,536</td><td>≈ 0.0273 (spot on)</td></tr>
+<tr><td>int8</td><td>8</td><td>256</td><td>0.0272 (very close)</td></tr>
+<tr><td>int4</td><td>4</td><td>16</td><td>0.0286 (a bit off)</td></tr>
+</table>
+<p>Smaller storage, slightly less exact. There is nothing more mysterious in it than that — and the reason quality does not simply collapse is that the error is small, roughly unbiased, and averaged over hundreds of millions of multiply-adds per block.</p></div>
+
+### Why the scale is shared, and what that costs
+
+The scale $s$ is not stored per weight — if it were, an int8 weight would cost one byte for $q$ plus two more for $s$, and the file would grow instead of shrinking. It is stored **once per group** of weights, so the storage cost of the scale is amortised almost to zero.
+
+That sharing has one sharp consequence. The group's scale is set by its **largest** magnitude, $\max|w|$. One unusually large weight in a group stretches $s$ for everyone, and every small weight in that group lands on a coarser grid than it needed. This is the "outlier" problem, and it is the reason 4-bit quantization of a large transformer is genuinely hard rather than merely lossy — the fix is to peel the outliers out into a separate low-rank branch before quantizing the rest (<a href="26-serving-h3-real-world.html">ch.26</a>, and the theory behind it in <a href="32-thinking-like-a-circuit.html">ch.32</a>).
+
+## The multiplication that turns parameters into gigabytes
+
+File size is one product, and it has no hidden terms:
+
+$$\text{bytes} = N_{\text{params}} \times (\text{bytes per param})$$
+
+H3 as a whole system is roughly **65 billion** numbers — about 32 billion in the vision-language encoder and about 33 billion in the generator. Run the product for each format:
+
+$$
+\begin{aligned}
+\text{bf16:}\quad & 65{,}000{,}000{,}000 \times 2\ \text{B} = 130\ \text{GB}\\
+\text{int8:}\quad & 65{,}000{,}000{,}000 \times 1\ \text{B} = 65\ \text{GB}\\
+\text{int4:}\quad & 65{,}000{,}000{,}000 \times 0.5\ \text{B} = 32.5\ \text{GB}
+\end{aligned}
+$$
+
+<div class="callout spec"><span class="t">GB versus GiB — the reason 130 sometimes reads as 124</span>
+<p>Disks count in powers of ten (1 GB = $10^{9}$ bytes); memory counts in powers of two (1 GiB = $2^{30} = 1{,}073{,}741{,}824$ bytes). So $130\times10^{9}$ bytes is 130 GB and about 121 GiB. Same pile, two rulers. Whenever two sources disagree by about 7%, this is usually why.</p></div>
+
+### What is actually on this disk
+
+The arithmetic above predicts 65 GB for a straight int8 conversion. The files on this box add up to less, and the gap is informative.
+
+<table>
+<tr><th>File</th><th>Size on disk</th><th>Why that number</th></tr>
+<tr><td>Encoder — Qwen3-VL-32B, tapped at layer 50</td><td><b>26 GB</b></td><td>int8, and only what is needed up to the tap</td></tr>
+<tr><td>Omni-Transformer (DiT) — int8, <b>pruned</b></td><td><b>20 GB</b></td><td>~20 billion parameters × 1 byte</td></tr>
+<tr><td>Visual VAE</td><td>4.9 GB</td><td>runs once, at the end</td></tr>
+<tr><td>Audio VAE</td><td>0.6 GB</td><td>runs once, at the end</td></tr>
+<tr><td>The same transformer in bf16, unpruned</td><td>~66 GB</td><td>33 billion × 2 bytes — what we did not download</td></tr>
+</table>
+
+The transformer is the clean case, and it closes exactly. From `transformer/config.json`: 50 layers, hidden size 5376, 56 heads of dimension 128, feed-forward width 14336. Counted per block — attention projections $4 \times 5376 \times 7168 \approx 154$ M, feed-forward $2 \times 5376 \times 14336 \approx 154$ M, adaptive-norm modulation $2688 \times 6 \times 5376 \approx 87$ M — that is about **395 M parameters per block**, and
+
+$$395\ \text{M} \times 50 \;\approx\; 20\ \text{billion} \;\xrightarrow{\ \times\ 1\ \text{byte}\ }\; 20\ \text{GB}$$
+
+which is the size of the file. The counting and the directory listing agree, which is the only real way to know a size claim is not folklore.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="Bar chart of model file sizes against the 8 GB capacity of one card. The bf16 transformer at 66 GB and the 26 GB encoder tower over the 8 GB line; the pruned int8 transformer is 20 GB; the visual VAE is 4.9 GB; and one transformer block, the unit actually copied to the card, is only 0.4 GB.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">FILE SIZES AGAINST ONE CARD  ·  1 GB = 10 PIXELS</text>
+  <line x1="60" y1="28" x2="60" y2="268" stroke="#232c3b"/>
+  <rect x="60" y="34" width="660" height="22" rx="3" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="66" y="50" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">transformer, bf16, unpruned — 66 GB</text>
+  <rect x="60" y="70" width="260" height="22" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="66" y="86" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">encoder, int8 — 26 GB</text>
+  <rect x="60" y="106" width="200" height="22" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="66" y="122" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">transformer, int8 + pruned — 20 GB</text>
+  <rect x="60" y="142" width="50" height="22" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <text x="118" y="158" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">visual VAE — 4.9 GB</text>
+  <rect x="60" y="178" width="6" height="22" rx="2" fill="#151b26" stroke="#232c3b"/>
+  <text x="74" y="194" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">audio VAE — 0.6 GB</text>
+  <rect x="60" y="214" width="4" height="22" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="74" y="230" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">one transformer block — 0.4 GB — the only piece the card ever holds</text>
+  <line x1="140" y1="28" x2="140" y2="252" stroke="#ffb454" stroke-dasharray="4 3"/>
+  <text x="146" y="266" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">8 GB — the whole capacity of one card</text>
+</svg>
+
+That last bar is the point of the whole chapter. **The unit that has to fit is not the model. It is one block.** Twenty billion parameters spread over fifty blocks is roughly 0.4 GB each, and 0.4 GB fits on an 8 GB card with room to spare — which is why a 20 GB model runs at all (<a href="02-your-hardware.html">ch.02</a>).
+
+<div class="callout truth"><span class="t">The traffic bill</span>
+<p>One step reads every block once, so one step pulls the whole 20 GB across PCIe. A <b>23-step render therefore moves about 460 GB</b> — the entire model, fetched from system memory twenty-three times over. The card never holds more than one block of it.</p>
+<p>That ratio — 20 GB of weights, 460 GB of traffic — is the price of the offload trick, and the reason renders here are measured in hours (<a href="30-the-render-live.html">ch.30</a>).</p></div>
+
+### A number this project got wrong first, and the history worth keeping
+
+The design study written before the three-card engine existed budgeted **0.65 GB per int8 block** and **1.29 GB per bf16 block**, against a full 33-billion-parameter transformer of about 33 GB. Those numbers are correct for that model. The file this box actually runs is the *pruned* int8 build — 20 GB, about 0.4 GB per block.
+
+Both figures appear in this project's documents and neither is a mistake. They describe two different files, a month apart. The lesson is the one that keeps recurring here: a size is only meaningful with its subject attached.
+
+## The numbers that are not weights
+
+A quiet assumption runs through most memory advice: that what fills a graphics card is the model. On this build, measured rather than assumed, that is false.
+
+During a denoise forward pass, a memory snapshot was taken and the live allocations grouped by the line of code that made them. Of the roughly **5.9 GB** of real tensors alive at the peak, about **88% were the working buffers of the int8 matmul path** — not resident weights, not attention scores, not the feed-forward intermediate.
+
+<svg viewBox="0 0 760 286" width="100%" style="max-width:920px" role="img" aria-label="A breakdown of the 5.9 GB of live tensors at the sampling peak. A single fast_int8_mm temporary accounts for 2240 MB, two int8_linear sites for 1119 MB each, the rest of the convrot int8 path for about 600 MB and the model forward for about 500 MB. After chunking the matmul over rows, the peak falls to 3887 MB with bit-identical output.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT ACTUALLY HELD THE 5.9 GB — MEASURED BY ALLOCATION SITE</text>
+  <rect x="2" y="30" width="756" height="82" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <rect x="14" y="46" width="288" height="34" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="158" y="68" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">fast_int8_mm — 2240 MB</text>
+  <rect x="306" y="46" width="144" height="34" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="378" y="68" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">int8_linear 1119</text>
+  <rect x="454" y="46" width="144" height="34" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="526" y="68" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">int8_linear 1119</text>
+  <rect x="602" y="46" width="78" height="34" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="641" y="68" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">~600</text>
+  <rect x="684" y="46" width="62" height="34" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="715" y="68" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">~500</text>
+  <text x="14" y="100" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">quantization temporaries — about 88% of the peak</text>
+  <text x="746" y="100" text-anchor="end" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the actual forward pass</text>
+  <text x="2" y="140" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE ONE TEMPORARY, EXPLAINED</text>
+  <rect x="2" y="152" width="368" height="120" rx="8" fill="#151b26" stroke="#ff6b6b"/>
+  <text x="20" y="176" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">before: build the whole [M × N] result</text>
+  <text x="20" y="196" fill="#c98f8f" font-size="11.5" font-family="SF Mono,monospace">M × N × 4 bytes (int32) ≈ 2.24 GB</text>
+  <rect x="20" y="208" width="330" height="48" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="185" y="236" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">one allocation, all rows at once</text>
+  <rect x="390" y="152" width="368" height="120" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="408" y="176" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">after: one row-block at a time</text>
+  <text x="408" y="196" fill="#8fd8c4" font-size="11.5" font-family="SF Mono,monospace">rows are independent → same answer</text>
+  <rect x="408" y="208" width="60" height="48" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="474" y="208" width="60" height="48" rx="4" fill="#12161f" stroke="#2f6b5c"/>
+  <rect x="540" y="208" width="60" height="48" rx="4" fill="#12161f" stroke="#2f6b5c"/>
+  <rect x="606" y="208" width="60" height="48" rx="4" fill="#12161f" stroke="#2f6b5c"/>
+  <rect x="672" y="208" width="66" height="48" rx="4" fill="#12161f" stroke="#2f6b5c"/>
+  <text x="573" y="236" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">only one live at a time</text>
+</svg>
+
+The largest single allocation was one temporary inside the int8 matmul, and its size is not mysterious either — it is the full integer result of the multiplication, held before the scales are applied:
+
+$$M_{\text{int8mm}} = \underbrace{M \times N}_{\text{output shape}} \times \underbrace{4\ \text{bytes}}_{\text{int32}} \;\approx\; 2.24\ \text{GB}$$
+
+Because each output **row** depends only on its own input row, that product can be computed one block of rows at a time and written into a pre-allocated output, and the answer does not change. Not "approximately does not change" — `torch.equal` on the two results returned `True`, maximum absolute difference 0.0.
+
+<div class="callout truth"><span class="t">What that bought, measured</span>
+<table>
+<tr><th></th><th>Before</th><th>After</th></tr>
+<tr><td>Sampling allocated peak</td><td>5925 MB</td><td><b>3887 MB</b> (−2038 MB, −34%)</td></tr>
+<tr><td>Native 15 s ceiling</td><td>576×320</td><td><b>768×448</b> — 1.87× the pixels</td></tr>
+<tr><td>Quality change</td><td colspan="2"><b>Exactly zero</b> — bit-identical output</td></tr>
+</table>
+<p>Two gigabytes of a graphics card were recovered by changing the <em>order</em> in which numbers were produced, not by changing any number. Where a value is computed matters as much as how many bytes it occupies.</p></div>
+
+There is a second, blunter reading of that snapshot. The remaining overhead — the gap between what the allocator reports and what `nvidia-smi` reports — decomposes into roughly 0.5–0.7 GB of allocator slack and **1.2–1.4 GB of CUDA context and driver**, which is fixed. Calling `empty_cache()` between phases recovered nothing measurable (7568 MB versus 7578 MB, which is noise). About 1.3 GB of every 8 GB card on this box is gone before a single weight arrives, and no arrangement gets it back.
+
+## Where the video's numbers live
+
+Weights are only half the residents. The other half is the thing being generated, and it obeys different rules.
+
+The latent recovered from a crashed 832×480 render had shape `(1, 24, 37, 30, 52)`: one clip, **24 channels**, 37 latent frames, 30 tall, 52 wide. The 24 is `in_channels` from the config; audio rides alongside with its own 32 channels through the same 50 blocks.
+
+<div class="callout warn"><span class="t">Latents cannot be streamed the way weights can</span>
+<p>A block's weights are read, used, and discarded — the copy on the card is disposable because the original is still in RAM. The latent is not disposable. It is <em>the state of the render</em>, it changes at every block, and it must stay resident for the whole step.</p>
+<p>This is why resolution and length cost so much more than model size does. A bigger model means more trips across the bus; a bigger latent means a bigger permanent resident on a card that already has only 8 GB. It is also why the lever that finally unlocked native 720p was splitting the <em>sequence</em> across three cards rather than splitting the <em>weights</em> (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>).</p></div>
+
+## Reading a quantization claim properly
+
+With all of the above, a sentence like *"quantize H3 to Q4"* decodes into something entirely concrete:
+
+> Take every one of the roughly 65 billion numbers, and rewrite each from a 16-bit float onto a **16-value grid stored in 4 bits**, keeping one shared scale per group so the decimal can be recovered. The file shrinks about 4×, every value lands on a coarser grid, and — measured on one scene on this box — the output was **indistinguishable** from int8 by eye, rendered **2.05× faster** (3122 s versus 6393 s) at *higher* native resolution and *lower* peak VRAM (7.06 GB versus 7.5 GB).
+
+That result is not the tidy story one would predict from bit-widths alone, and the reason is not in this chapter — it is in what the silicon does with those bytes once they arrive (<a href="31-what-the-gpu-does.html">ch.31</a>, measured head-to-head in <a href="13-int8-vs-q4.html">ch.13</a>).
+
+<div class="callout truth"><span class="t">Five things that are now concrete</span>
+<ol>
+<li><b>A model is a list of numbers with an address</b> — header, then one run of raw bytes, copied disk → RAM → VRAM → registers, never moved.</li>
+<li><b>$b$ bits name $2^{b}$ values.</b> One byte is 256 landing spots; the scale is shared across a group, and the group's largest weight sets the spacing for everyone.</li>
+<li><b>Size is one product:</b> parameters × bytes per parameter. 395 M per block × 50 blocks × 1 byte = the 20 GB file, exactly.</li>
+<li><b>The unit that must fit is a block, not a model</b> — 0.4 GB at a time, 50 times per step, ~460 GB of traffic per 23-step render.</li>
+<li><b>The biggest thing on the card is often not a weight.</b> 88% of a measured 5.9 GB peak was int8 GEMM scratch; chunking one temporary returned 2 GB bit-identically and raised the 15 s ceiling by 1.87× in pixels.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">safetensors</span><span class="badge">bit</span><span class="badge">byte</span><span class="badge">bf16</span><span class="badge">int8</span><span class="badge">int4</span><span class="badge">quantization scale</span><span class="badge">group-wise quantization</span><span class="badge">outlier</span><span class="badge">GB vs GiB</span><span class="badge">pruning</span><span class="badge">per-block size</span><span class="badge">PCIe traffic</span><span class="badge">allocation site</span><span class="badge">allocator slack</span><span class="badge">CUDA context</span><span class="badge">latent shape</span><span class="badge">bit-identical</span></p>
+<p>If those feel solid, the moving picture will make sense — because every number now has a place to be.</p></div>
+
+Next: those same bytes in motion — who does what during a live render, phase by phase, and where forty-four hours actually go.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

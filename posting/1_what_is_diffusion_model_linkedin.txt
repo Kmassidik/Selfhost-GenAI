@@ -1,0 +1,50 @@
+Most people picture text-to-video as: prompt → image → animate the image.
+
+There is no image step. Not anywhere in the pipeline.
+
+I spent a month running MiniMax-H3 (33B parameters) on three RTX 3060 Ti's — 8 GB of VRAM each. Here is what actually happens between a sentence and a video.
+
+
+1/ The prompt is read by a model BIGGER than the one that draws.
+
+Encoder: 26 GB. Generator: 20 GB.
+
+And it doesn't use the encoder's output. It taps hidden states at layer 50, mid-stack. A language model's final layer is specialised for predicting the next word; its middle layers hold general meaning. The generator steals the encoder's understanding, not its conclusion.
+
+
+2/ What gets created is not a picture. It's a latent.
+
+Real shape, read off my own render: (1, 24, 37, 30, 52)
+
+24 channels — not red, green, blue. 1.4 million numbers, where the finished pixels are 149 million. About 100× compression. Those channels mean nothing to a human eye. Only the decoder knows what they are.
+
+
+3/ Each "step" predicts noise, not image.
+
+The latent passes through 50 transformer blocks. What comes out is a grid the same shape as the input, saying "this much of what you gave me is static." The scheduler then removes a FRACTION of it — a partial move is more reliable than a full jump.
+
+23 steps × 50 blocks = 1,150 block executions, moving ~460 GB across the PCIe bus.
+
+
+4/ Sound is generated in the same pass.
+
+32 audio channels ride the same 50 blocks as the 24 video channels, denoised together every step. Lip-sync isn't aligned in post. It's born aligned.
+
+
+5/ Pixels exist only in the final 85 minutes.
+
+Of a 43-hour render, decode — latent to pixels, in 256×256 tiles — is the last stage. Everything before it is arithmetic on a compressed grid.
+
+Which is exactly why a bug in that cheap final stage once destroyed six hours of completed denoising for me.
+
+
+Once you see the shape of it, the behaviour stops being mysterious:
+
+→ Same prompt, different result — the starting noise is random
+→ Nothing is "retrieved" — the model learned a direction, not images
+→ On-screen text is gibberish — letters are fine detail in a space compressed 100×
+→ Too few steps gives mud, not blur — composition is set in the early steps
+
+Output: 1280 × 704, 345 frames, 14.375 seconds. Every number above measured on my own hardware, not estimated.
+
+Code and full write-up: github.com/Kmassidik/Selfhost-GenAI

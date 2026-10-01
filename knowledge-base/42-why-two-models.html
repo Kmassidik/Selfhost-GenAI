@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>42 · Why Two Models? Sharing the Recipe</title>
+<meta name="description" content="H3 is two large models that must never share memory, and a multi-GPU render is one model that ends up loaded several times — the two-phase split, the OS law that causes the duplication, and the mmap fix that worked at load and collapsed in the forward pass.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 42 · Two models that must never meet, and one model that keeps arriving twice</span>
+
+# Why Two Models? Sharing the Recipe
+
+<p class="lede"><b>H3 is two large models — a 26 GB encoder that reads the sentence and a 20 GB transformer that draws the video — and on hardware this size that separation is not a complication, it is the thing that makes a render possible at all.</b> Two models can be run one after the other, each loaded only while it is needed. One 46 GB model could not have been.</p>
+
+That is the good kind of two. There is a second kind, and it is the wall this project is currently standing at: when a render is split across three graphics cards, the *same* transformer gets loaded into memory three separate times — byte-for-byte identical copies that no amount of cleverness has yet persuaded the operating system to merge. The first half of this chapter is why two models are a gift. The second half is why two copies are a curse, and the two halves turn out to be the same problem approached from opposite ends.
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p>H3's two models never coexist because <b>the pipeline is deliberately cut in half</b>: the encoder runs first in its own process, writes its output to a file, and exits before the transformer is loaded. The duplicated copies exist because <b>multi-GPU work runs as separate processes</b>, and an operating system gives every process private memory that no other process may touch. Getting to <b>one copy, three cards</b> is the single biggest lever this build has left.</p></div>
+
+## 1 · Four parts, two of them enormous
+
+Downloading MiniMax-H3 does not produce a model. It produces four files, and none of them makes video alone ([ch.03](03-how-h3-works.html)).
+
+| Part | Job | Size |
+|---|---|---|
+| **Text/Vision Encoder** (Qwen3-VL-32B, tapped at layer 50) | reads the prompt and any reference images, and turns them into a representation of *meaning* | **26 GB** |
+| **Omni-Transformer** (the DiT), int8, pruned | the generator — denoises the joint video+audio latent, 50 blocks per step | **20 GB** |
+| **Visual VAE** | translates between pixels and the latent grid, 16× smaller in space | 4.9 GB |
+| **Audio VAE** | the same for 32 kHz stereo | 0.6 GB |
+
+The first surprise is that the reader is bigger than the painter. The second, and the one this chapter is about, is that the two big ones add to **46 GB of weights** — and that number is what the whole engine architecture is bent around.
+
+For context on how tight that was: the box this project began on had **60 GB of RAM**. Loading both large models at once would have consumed most of it before a single tensor of working memory existed. The current box has **125 GB**, which sounds like room to breathe until section 5, where a three-card run climbed past 118 GB and was killed.
+
+## 2 · Why they never have to be in memory at once
+
+The reason the split works is not a memory trick. It is a property of the *relationship* between the two models.
+
+The encoder's entire contribution to a render is a block of numbers — the prompt embeddings, plus a few small tensors describing the shape of the job. Once those exist, **the transformer never asks the encoder anything again.** All fifty blocks, all twenty-three steps, read the same fixed conditioning. Nothing flows backward.
+
+That is a much stronger property than "they run in order". Consider the alternative: if the transformer had to consult the encoder at each denoise step — re-reading the prompt against the partially-formed image, say — both models would have to be resident for the whole render, and 46 GB of weights would be a hard floor before any activations existed at all.
+
+<div class="callout truth"><span class="t">The rule underneath</span>
+<p>The structural picture is a translator and a painter working for a client who speaks a language the painter does not. The translator meets the client, understands the brief, and writes a specification. Then the translator <b>goes home</b> — because the painter works from the specification, not from the conversation.</p>
+<p>The general form: <b>a pipeline stage can be evicted from memory exactly when its output is a value rather than a conversation.</b> Value in, value out, no back-channel. Every stage of this pipeline that satisfies that test can be given its own process, its own lifetime, and its own memory budget. Every stage that does not must stay resident. That single test decides the shape of the entire engine.</p></div>
+
+## 3 · The two-phase pipeline, and the technique that made it slicable
+
+Knowing the split is legal is not the same as being able to perform it. The obstacle was that asking a pipeline for only its text embeddings **still runs the whole graph, transformer included** — a lesson the project's own source notes record as learned the expensive way: `output=` chooses what to *return*, not what to *execute*.
+
+The fix comes from `diffusers`' modular pipelines: assemble a partial pipeline containing only the blocks actually needed.
+
+```python
+base = ModularPipeline.from_pretrained(ROOT)
+sub  = {k: v for k, v in base.blocks.sub_blocks.items() if k in ["denoise", "decode"]}
+pipe = SequentialPipelineBlocks.from_blocks_dict(sub).init_pipeline(ROOT)
+```
+
+Once the graph can be sliced, the render can be split across **separate processes** — and that is what buys the memory ([ch.48](48-the-pipeline-without-comfyui.html)).
+
+<div class="callout spec"><span class="t">The split, concretely</span>
+<p><b>Phase A</b> starts, builds a partial pipeline of <code>before_encode + text_encoder</code> with the int8 encoder, walks every scene, writes <code>embeds/&lt;scene&gt;.pt</code> — prompt embeddings, token tags, height, width, frame count — and <b>exits</b>.</p>
+<p><b>Phase B</b> starts as a <em>fresh process</em>, loads only the transformer, reads that file, denoises and decodes. The 26 GB encoder never enters phase B's memory; the source says so in as many words.</p></div>
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="A timeline of host memory occupancy across a render: phase A holds the 26 gigabyte encoder, writes an embeddings file and exits, memory returns to nothing, and then phase B starts as a fresh process holding only the 20 gigabyte transformer, so the two never overlap.">
+  <defs>
+    <marker id="w1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">HOST MEMORY THROUGH ONE RENDER — TIME RUNS LEFT TO RIGHT</text>
+  <line x1="2" y1="222" x2="758" y2="222" stroke="#232c3b"/>
+  <line x1="2" y1="52" x2="758" y2="52" stroke="#ff6b6b" stroke-dasharray="5 4"/>
+  <text x="758" y="44" text-anchor="end" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">what 26 + 20 GB resident together would cost</text>
+  <rect x="20" y="118" width="220" height="104" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="130" y="152" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">phase A — encoder</text>
+  <text x="130" y="174" text-anchor="middle" fill="#9fb6e8" font-size="12" font-family="Inter,sans-serif">26 GB resident</text>
+  <text x="130" y="196" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">its own process</text>
+  <line x1="244" y1="170" x2="286" y2="170" stroke="#5ee0c0" marker-end="url(#w1)"/>
+  <rect x="290" y="146" width="150" height="52" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="365" y="168" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">embeds/scene.pt</text>
+  <text x="365" y="186" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">a value, not a conversation</text>
+  <text x="365" y="126" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">phase A exits here — memory returns to the OS</text>
+  <line x1="444" y1="170" x2="486" y2="170" stroke="#5ee0c0" marker-end="url(#w1)"/>
+  <rect x="490" y="130" width="248" height="92" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="614" y="162" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">phase B — transformer</text>
+  <text x="614" y="184" text-anchor="middle" fill="#9fb6e8" font-size="12" font-family="Inter,sans-serif">20 GB resident</text>
+  <text x="614" y="204" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">a fresh process — the encoder is not in it</text>
+  <text x="20" y="246" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">The peak is the taller of the two, never the sum. Nothing about the model changed — only when each part is allowed to exist.</text>
+  <text x="20" y="262" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">The dashed line is the budget that was never spent.</text>
+</svg>
+
+### The payoff nobody predicted
+
+The split was built for memory. In daily use its larger benefit turned out to be something else: **encode once, render many.**
+
+A scene's embeddings are fixed. Steps, resolution, engine, seed and driver are not. So phase A's output is a cache — more than forty `.pt` files sit in `h3-lab/embeds/` and get re-rendered constantly without the 26 GB encoder ever being loaded again. Given that step count is a property of the *scene* — 4 for a tight close-up, 23 for a character mid-shot, 49 for a wide vista with a small distant subject — and that finding the right one means re-rendering, this matters. An architectural decision made for one reason paid off mostly for another. That happens more often than clean write-ups admit.
+
+## 4 · The other two: the same model, twice
+
+Now the second sense of "two models", where the same virtue becomes a wall.
+
+Splitting one render across several cards is done here with **context parallelism**: the weights stay whole and the *video* is split. The packed token sequence — every frame, every audio slice, the text — is cut into equal pieces, one per card, and each card runs the entire fifty-block model on its own piece ([ch.36](36-splitting-the-video-cp.html)).
+
+The title's metaphor is exact and worth keeping. Picture the 50 transformer blocks as a **recipe book** and a fifteen-second clip as a very large dish:
+
+- Cut the **dish** into thirds. Each chef cooks one third.
+- But **every step in the book applies to every third.** So each chef needs the *whole* book.
+
+Three chefs, three thirds of one dish, three complete copies of the recipe. The win is that each card holds only a third of the activations, which is how a clip that overflows one card fits across three. The cost is the duplicated recipe.
+
+<svg viewBox="0 0 760 244" width="100%" style="max-width:920px" role="img" aria-label="Context parallelism shown as three cards, each holding one third of the token sequence but a complete copy of the fifty-block model, so activations divide by three while the weights multiply by three.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">CONTEXT PARALLELISM — WHAT DIVIDES AND WHAT MULTIPLIES</text>
+  <rect x="2" y="28" width="246" height="150" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="125" y="52" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">GPU 0</text>
+  <rect x="24" y="64" width="202" height="38" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="125" y="88" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">⅓ of the tokens — 5,022</text>
+  <rect x="24" y="110" width="202" height="50" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="125" y="132" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">ALL 50 blocks</text>
+  <text x="125" y="150" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">a complete private copy</text>
+  <rect x="256" y="28" width="248" height="150" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="380" y="52" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">GPU 1</text>
+  <rect x="278" y="64" width="204" height="38" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="380" y="88" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">⅓ of the tokens — 5,022</text>
+  <rect x="278" y="110" width="204" height="50" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="380" y="132" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">ALL 50 blocks</text>
+  <text x="380" y="150" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">a complete private copy</text>
+  <rect x="512" y="28" width="246" height="150" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="635" y="52" text-anchor="middle" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">GPU 2</text>
+  <rect x="534" y="64" width="202" height="38" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="635" y="88" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">⅓ of the tokens — 5,023</text>
+  <rect x="534" y="110" width="202" height="50" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="635" y="132" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">ALL 50 blocks</text>
+  <text x="635" y="150" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">a complete private copy</text>
+  <rect x="2" y="192" width="368" height="46" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="186" y="212" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">activations ÷ 3 — about 5.2 GB per card</text>
+  <text x="186" y="230" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">this is the win, and it worked first try</text>
+  <rect x="390" y="192" width="368" height="46" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="574" y="212" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">weights × 3 in host RAM</text>
+  <text x="574" y="230" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">this is the cost, and it is what killed the run</text>
+</svg>
+
+### Why the copies cannot simply be merged
+
+The copies are identical. Not similar — identical, the same file read three times. So why does the machine keep three of them?
+
+Because `torchrun --nproc_per_node=3` does not start one program that uses three GPUs. It starts **three complete, separate processes**, as if the same application had been launched three times from three terminals ([ch.41](41-python-is-the-glue.html)). And an operating system enforces one iron law about processes.
+
+<div class="callout spec"><span class="t">The OS law of memory isolation</span>
+<p><b>Every process gets its own private address space and cannot, by design, see any other process's memory.</b> This is not an oversight to be worked around — it is <em>protection</em>. It is the reason one crashing application cannot corrupt another, and the reason a malicious program cannot read a password out of a browser's memory.</p>
+<p>So when process 0 loads the weights into "its" RAM and process 1 loads the same bytes into "its" RAM, the kernel places them in <b>two separate physical locations</b>. Identical contents are irrelevant; they are different programs, and the kernel will not let either peek at the other. <b>That is the real reason there are multiple copies</b> — not a bug in the framework, but the security model of the machine working exactly as intended.</p></div>
+
+Back in the kitchen: two chefs in **two separate locked kitchens**. Neither is allowed through the other's door, so each buys their own book. The duplication is not waste through carelessness. It is the price of a wall that exists for good reasons.
+
+## 5 · The measured wall
+
+The three-card run is worth reporting precisely, because what failed and what succeeded were not the same thing at all.
+
+**What worked.** Context parallelism initialised on H3 with a hand-authored plan, the collective library came up green on all three ranks, and the sequence genuinely split: **5,022 tokens per GPU**, down from about **15,067** on a single card. Per-card VRAM sat at roughly **5.2 GB** — comfortably inside 8 GB. The attention mathematics, the ring, the online softmax, the composition with block-streaming offload: all correct ([ch.34](34-open-use-close-flashattention.html)).
+
+**What failed.** Host RAM. Through the forward pass, per-process memory climbed:
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Measured host RAM through the three-GPU forward pass climbing from 9 to 45 to 85 to 92 to 118 gigabytes and then being killed against the 125 gigabyte installed limit, contrasted with the two-GPU run which completed end to end.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">MEASURED HOST RAM DURING THE THREE-CARD FORWARD PASS</text>
+  <line x1="60" y1="46" x2="758" y2="46" stroke="#ff6b6b" stroke-dasharray="5 4"/>
+  <text x="66" y="40" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">125 GB installed</text>
+  <line x1="60" y1="212" x2="758" y2="212" stroke="#232c3b"/>
+  <line x1="60" y1="46" x2="60" y2="212" stroke="#232c3b"/>
+  <rect x="88" y="200" width="52" height="12" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="114" y="230" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">9 GB</text>
+  <rect x="176" y="152" width="52" height="60" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="202" y="230" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">45 GB</text>
+  <rect x="264" y="99" width="52" height="113" rx="2" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="290" y="230" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">85 GB</text>
+  <rect x="352" y="90" width="52" height="122" rx="2" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="378" y="230" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">92 GB</text>
+  <rect x="440" y="56" width="52" height="156" rx="2" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="466" y="230" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">118 GB</text>
+  <text x="466" y="248" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">SIGKILL</text>
+  <text x="114" y="188" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">load</text>
+  <rect x="540" y="96" width="216" height="116" rx="7" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="648" y="122" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">two cards instead of three</text>
+  <text x="648" y="146" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">7,533 tokens per GPU</text>
+  <text x="648" y="166" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">~5.9 GB per card</text>
+  <text x="648" y="192" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">ran end to end, no OOM</text>
+  <text x="60" y="264" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">The GPUs were never in trouble. Every one of them sat near 5.2 GB of its 8 GB while the host ran out of room underneath them.</text>
+</svg>
+
+<div class="callout danger"><span class="t">It is not the file size — and that is the important part</span>
+<p>The transformer on disk is <b>20 GB</b>. Three private copies of 20 GB is 60 GB, which fits inside 125 GB with room to spare. The run died anyway, at <b>118 GB</b>.</p>
+<p>Earlier planning arithmetic in this project budgeted <b>33 GB</b> per copy and predicted 99 GB for three ranks — the figure that was current when the multi-GPU design was written. Both numbers point at the same conclusion from different directions: <b>what runs out is not the weights, it is what the offloading machinery does to the weights, per process, during the forward pass.</b> Group offload does not hand a block to the GPU; it <em>copies</em> one, and it keeps a per-process CPU-side copy to copy back to.</p>
+<p>The framework's own documentation is candid about the size of this effect: a transformer that should need about <b>20 GB</b> can sit at about <b>50 GB</b> under group offload. Multiply that by three processes and 125 GB was never going to be enough.</p></div>
+
+## 6 · The escape hatch: `mmap`, or the public library
+
+The operating system does offer one legitimate way for two processes to share memory, and it is not a loophole — it is how every program on the machine already works.
+
+**Memory-mapping.** If two processes map the *same file* read-only, the kernel loads its pages into physical RAM **once** and points both address spaces at those same pages. This is entirely ordinary: the C library, `libc`, is loaded once and shared by every running program on the box. Nobody thinks of that as a trick.
+
+In the kitchen, it is the **public library**. Both chefs read the *same* book. Neither buys a copy, and the library does not mind how many readers a book has.
+
+<div class="callout truth"><span class="t">And it worked</span>
+<p>A custom shared loader (<code>h3_shared_load_test.py</code>) did exactly this on the box: memory-map the int8 weights, <b>638 tensors</b>, and point every rank at the same pages. It came up in about <b>4 seconds</b> from the page cache — one copy, all ranks reading it. <b>At load time, the problem was solved.</b></p></div>
+
+## 7 · Why it collapses: the photocopy problem
+
+A library book can be read. It cannot be written in.
+
+The weights on disk are a pristine reference. To *use* them, the framework has to make **working copies** — dequantizing, reshaping, and above all **streaming each block onto the GPU** during the forward pass and staging it back afterwards. The moment a chef needs working notes, they **photocopy** the page and scribble on the copy — and that photocopy is private, back in their own kitchen, counted against their own memory.
+
+<svg viewBox="0 0 760 294" width="100%" style="max-width:920px" role="img" aria-label="Above, memory-mapping gives three processes pointers into one shared set of pages in the page cache. Below, group offload's per-block copy defeats it: each process makes its own private copy of every block on the way to the GPU, so the sharing that existed at load is gone by the first denoise step.">
+  <defs>
+    <marker id="w2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="w3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">AT LOAD — MMAP: ONE COPY, THREE READERS</text>
+  <rect x="2" y="26" width="146" height="44" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="75" y="53" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">process 0</text>
+  <rect x="158" y="26" width="146" height="44" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="231" y="53" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">process 1</text>
+  <rect x="314" y="26" width="146" height="44" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="387" y="53" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">process 2</text>
+  <line x1="75" y1="72" x2="200" y2="104" stroke="#5ee0c0" marker-end="url(#w2)"/>
+  <line x1="231" y1="72" x2="231" y2="104" stroke="#5ee0c0" marker-end="url(#w2)"/>
+  <line x1="387" y1="72" x2="262" y2="104" stroke="#5ee0c0" marker-end="url(#w2)"/>
+  <rect x="118" y="108" width="228" height="52" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="232" y="130" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">one set of pages in the page cache</text>
+  <text x="232" y="148" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">638 tensors · ready in ~4 s</text>
+  <text x="482" y="120" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">exactly how libc is shared by</text>
+  <text x="482" y="138" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">every program on the machine</text>
+  <line x1="2" y1="182" x2="758" y2="182" stroke="#232c3b"/>
+  <text x="2" y="206" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">FIRST DENOISE STEP — GROUP OFFLOAD COPIES INSTEAD OF POINTING</text>
+  <rect x="2" y="218" width="146" height="62" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="75" y="242" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">process 0</text>
+  <text x="75" y="262" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">its own block copy</text>
+  <rect x="158" y="218" width="146" height="62" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="231" y="242" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">process 1</text>
+  <text x="231" y="262" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">its own block copy</text>
+  <rect x="314" y="218" width="146" height="62" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="387" y="242" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">process 2</text>
+  <text x="387" y="262" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">its own block copy</text>
+  <line x1="470" y1="248" x2="506" y2="248" stroke="#ff6b6b" marker-end="url(#w3)"/>
+  <text x="516" y="238" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">the sharing is gone before</text>
+  <text x="516" y="256" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">the first block finishes</text>
+</svg>
+
+<div class="callout warn"><span class="t">The exact bug, verified on hardware</span>
+<p>Group offload <b>re-copies each block per process</b> as it onloads it to the GPU, so the sharing that existed at load collapses the moment denoising starts. This is a known, tracked incompatibility — <b>diffusers #12533, "Hooks conflicts: Context Parallelism and CPU Offload"</b> — and it is the same mechanism behind group offload's high host-RAM use in general. Copies, not shares.</p>
+<p>The measurement matched the diagnosis exactly: the loader shared one copy in four seconds, and then per-process RAM climbed through the forward pass to 118 GB and the kernel killed it. Nothing about the sharing was wrong. It was simply undone, block by block, by the layer above it.</p></div>
+
+## 8 · The two doors
+
+Both are real engineering, and both are open.
+
+<div class="callout spec"><span class="t">Door 1 — read-only all the way down</span>
+<p>Make the <em>entire</em> forward path read straight from the shared mapped pages and never photocopy: a <b>custom offload hook</b> that streams each block from the mapping directly to the GPU and, when the block is finished, simply <b>drops the GPU copy</b> — never writing it back to a per-process CPU buffer, which is the exact step that killed the run.</p>
+<p>The difficulty is that the existing offload machinery was built to copy; the copy-back is not incidental to it. Upstream is moving in this direction (<a href="https://github.com/huggingface/diffusers/pull/11106">diffusers PR #11106</a> reduces CPU RAM in group offload), but the version needed here is narrower and has to be owned locally.</p></div>
+
+<div class="callout spec"><span class="t">Door 2 — one kitchen, three stoves</span>
+<p>Run a <b>single process</b> that drives all three GPUs itself. One process is one address space, so the model loads <b>once</b> and is shared by construction — the operating-system law of section 4 simply never applies, because there is only one program. Each card is handed its slice of the sequence directly.</p>
+<p>The costs are explicit. The parallelism has to be hand-authored — no <code>torchrun</code> doing it. And Python's Global Interpreter Lock means one interpreter cannot run Python bytecode for three cards simultaneously (<a href="41-python-is-the-glue.html">ch.41</a>) — though the GPU kernels themselves are launched asynchronously, so in a workload this GPU-bound it is often not the constraint it sounds like.</p></div>
+
+<div class="callout truth"><span class="t">And the blunt third option, stated because it is honest</span>
+<p>Buy more RAM. Three copies plus the offload machinery's overhead wants somewhere around <b>150 GB</b> to be comfortable against the <b>125 GB</b> installed — roughly one more DDR3 stick, no code at all. It is worth naming plainly: a substantial engineering project and a cheap piece of hardware are solving the identical problem, and only one of them is interesting.</p></div>
+
+## 9 · Why this is the endgame rather than a footnote
+
+Two cards work today. Three cards would change what is possible.
+
+<div class="callout truth"><span class="t">What one shared copy unlocks</span>
+<p>Three cards split the sequence <b>÷3</b> instead of ÷2, and per-card activations shrink accordingly — enough to hold a full <b>15-second take at native 832×480 across all three cards</b>. Long <em>and</em> sharp, in one coherent render with no seams and no chaining (<a href="33-long-video-small-card.html">ch.33</a>).</p>
+<p>And the fix pays twice: with one shared copy the two-card configuration halves its own host RAM for free, which buys back headroom that is currently spent on a duplicate nobody wanted.</p></div>
+
+There is a symmetry here worth naming, because it is the reason both halves of this chapter belong in one place.
+
+**Section 3 solved this problem already, for a different pair of models.** The encoder and the transformer never coexist because the pipeline was cut at a point where one stage's output is a value rather than a conversation — and each stage was given its own process and its own lifetime. That worked because the cut was *between* two forward passes.
+
+The remaining problem is the same trick applied *inside* one forward pass. The three ranks are not sequential stages; they run simultaneously and must exchange key/value shards at every attention layer. There is no point to cut, so the memory cannot be reclaimed by scheduling. It has to be reclaimed by **sharing**, which is a harder guarantee than sequencing — and that is precisely why it is still open while the two-phase split has been working for weeks.
+
+<div class="callout spec"><span class="t">The chapter in six lines</span>
+<ol>
+<li><b>H3 is two large models</b> — a 26 GB encoder and a 20 GB transformer — and they never coexist, because phase A writes a file and exits before phase B loads anything.</li>
+<li><b>The split is legal because the coupling is a value, not a conversation.</b> That test decides which pipeline stages can be evicted and which must stay resident.</li>
+<li><b>Context parallelism splits the video, replicates the model</b> — each card cooks a third of the dish but needs the whole recipe book.</li>
+<li><b>The copies exist because the ranks are separate processes,</b> and an OS gives every process private memory by law. That is protection, not waste.</li>
+<li><b><code>mmap</code> is the escape hatch and it worked at load</b> — 638 tensors, ~4 s, one shared copy — but group offload re-copies each block per process and the sharing is gone by the first step (diffusers #12533). Measured: RAM climbed to 118 GB against 125 GB installed, and the kernel killed it. The GPUs were fine at ~5.2 GB each.</li>
+<li><b>Two doors, one shortcut:</b> a custom read-only offload hook, a single process driving all three cards, or about 32 GB more RAM. Crack it and 15 seconds at native 832×480 across three cards becomes reachable.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">two-phase pipeline</span><span class="badge">partial / modular pipeline</span><span class="badge">prompt embeddings</span><span class="badge">encode once, render many</span><span class="badge">process</span><span class="badge">address space</span><span class="badge">memory isolation</span><span class="badge">context parallelism</span><span class="badge">weight replication</span><span class="badge">mmap / page cache</span><span class="badge">group offload</span><span class="badge">onload / offload hook</span><span class="badge">host RAM vs VRAM</span><span class="badge">SIGKILL / OOM-killer</span></p>
+<p>If those feel solid, the difference between "it does not fit on the card" and "it does not fit in the box" is now two separate diagnoses with two separate cures.</p></div>
+
+<p class="small">The context-parallel split this rides on is <a href="36-splitting-the-video-cp.html">ch.36</a> and <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; why the model streams from RAM at all is <a href="02-your-hardware.html">ch.02</a> and <a href="29-where-numbers-live.html">ch.29</a>; the four parts of H3 are <a href="03-how-h3-works.html">ch.03</a>; the two-phase pipeline in full is <a href="48-the-pipeline-without-comfyui.html">ch.48</a>; the interpreter-level reason the ranks are separate processes is <a href="41-python-is-the-glue.html">ch.41</a>. Sources: <a href="https://github.com/huggingface/diffusers/issues/12533">diffusers #12533 — context parallelism × CPU offload hook conflict</a>; <a href="https://github.com/huggingface/diffusers/blob/main/docs/source/en/optimization/memory.md">diffusers memory documentation</a>; <a href="https://github.com/huggingface/diffusers/pull/11106">diffusers PR #11106</a>.</p>
+
+Next: the engine built to walk through door 2 — one process, one shared model, three cards.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

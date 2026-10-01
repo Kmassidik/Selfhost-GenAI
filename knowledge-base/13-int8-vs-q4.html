@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>13 · int8 vs Q4 on This Box</title>
+<meta name="description" content="Three ways to store the same 33-billion-parameter model — int8, 4-bit Q4_K_M and full bf16 — measured on the same scenes, and the plateau the comparison revealed.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 13 · Measured on our hardware</span>
+
+# int8 vs Q4 vs fp16 — Three Ways to Store the Same Model
+
+<p class="lede">The same MiniMax-H3 can be stored at three different precisions — native <b>int8</b>, a 4-bit <b>Q4_K_M</b> GGUF, and full-precision <b>bf16/fp16</b> with no quantization at all — and on identical scenes all three produce a picture the eye cannot tell apart. What separates them is not quality. It is speed, memory, and how many pixels each one leaves room for.</p>
+
+That finding was not the one this experiment set out to confirm. It set out to answer "how much does 4-bit cost in image quality?" The answer turned out to be *nothing measurable*, and the interesting question underneath it turned out to be about matrix multiplication, not about bits.
+
+<div class="callout truth"><span class="t">The three contenders in one line</span>
+<p><b>bf16</b> = 2 bytes per weight, the precision the model shipped in, ~66 GB for the transformer. <b>int8</b> = 1 byte per weight, the reference build this project ships on, 20 GB after pruning — plus a chunk-patch of ours that freed VRAM. <b>Q4_K_M</b> = half a byte per weight, ~11 GB, an off-the-shelf GGUF that, surprisingly, loads on H3 at all. One model, three levels of squeeze.</p></div>
+
+## What a quantized weight actually is
+
+Before any benchmark makes sense, it helps to know what is physically different in the file.
+
+A weight in the original model is a bf16 number — sixteen bits of floating point, capable of representing a very wide range of magnitudes with a few significant digits. Quantization throws that away and replaces it with a small integer plus a shared **scale**. Instead of storing a number, the file stores an *index into a ladder*, and one scale value per group of weights that says how far apart the rungs are.
+
+<svg viewBox="0 0 760 282" width="100%" style="max-width:920px" role="img" aria-label="Diagram showing that bf16 weights are effectively continuous, int8 quantizes them onto 256 evenly spaced rungs, and 4-bit quantization onto only 16 rungs, with each group of weights keeping its own scale factor.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME WEIGHT, STORED THREE WAYS — LADDERS OF DIFFERENT COARSENESS</text>
+  <text x="2" y="56" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">bf16</text>
+  <text x="2" y="72" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">2 bytes</text>
+  <rect x="110" y="34" width="520" height="38" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="370" y="58" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">effectively continuous — no visible rungs at this scale</text>
+  <text x="646" y="58" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">~66 GB</text>
+  <text x="2" y="126" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">int8</text>
+  <text x="2" y="142" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">1 byte</text>
+  <rect x="110" y="104" width="520" height="38" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <line x1="130" y1="104" x2="130" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="150" y1="104" x2="150" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="170" y1="104" x2="170" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="190" y1="104" x2="190" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="210" y1="104" x2="210" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="230" y1="104" x2="230" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="250" y1="104" x2="250" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="270" y1="104" x2="270" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="290" y1="104" x2="290" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="310" y1="104" x2="310" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="330" y1="104" x2="330" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="350" y1="104" x2="350" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="370" y1="104" x2="370" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="390" y1="104" x2="390" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="410" y1="104" x2="410" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="430" y1="104" x2="430" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="450" y1="104" x2="450" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="470" y1="104" x2="470" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="490" y1="104" x2="490" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="510" y1="104" x2="510" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="530" y1="104" x2="530" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="550" y1="104" x2="550" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="570" y1="104" x2="570" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="590" y1="104" x2="590" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <line x1="610" y1="104" x2="610" y2="142" stroke="#5ee0c0" opacity="0.55"/>
+  <text x="646" y="122" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">20 GB</text>
+  <text x="646" y="138" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">256 rungs</text>
+  <text x="2" y="196" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Q4_K_M</text>
+  <text x="2" y="212" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">½ byte</text>
+  <rect x="110" y="174" width="520" height="38" rx="6" fill="#241a1a" stroke="#ffb454"/>
+  <line x1="170" y1="174" x2="170" y2="212" stroke="#ffb454"/>
+  <line x1="262" y1="174" x2="262" y2="212" stroke="#ffb454"/>
+  <line x1="354" y1="174" x2="354" y2="212" stroke="#ffb454"/>
+  <line x1="446" y1="174" x2="446" y2="212" stroke="#ffb454"/>
+  <line x1="538" y1="174" x2="538" y2="212" stroke="#ffb454"/>
+  <text x="646" y="192" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">~11 GB</text>
+  <text x="646" y="208" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">16 rungs</text>
+  <text x="2" y="248" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">Each group of weights carries its own scale s, so the stored integer q is only an index: the real weight is recovered as w ≈ s × q.</text>
+  <text x="2" y="270" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Fewer rungs is not automatically worse — what matters is whether the rounding error survives fifty blocks and dozens of denoise steps.</text>
+</svg>
+
+The "K_M" in `Q4_K_M` refers to a k-quant scheme: rather than one scale for a whole tensor, the weights are cut into small blocks that each keep their own scale, and the layers known to matter most are given slightly more bits than the rest. That mixed allocation is why a 4-bit file holds up far better than a naive uniform 4-bit round would.
+
+The key intuition is that a weight's absolute precision does not matter. What matters is whether the *rounding error* it introduces survives fifty transformer blocks and dozens of denoise steps, or gets averaged away. Hold that thought — it is the whole conclusion of this chapter.
+
+## What was measured
+
+Scene 3: a street musician singing, 10 s, 720p target, identical pipeline, same seed.
+
+<table>
+<tr><th>Metric</th><th>int8 + our patch</th><th>Q4_K_M GGUF</th><th>Result</th></tr>
+<tr><td><b>Render time</b></td><td>107 min</td><td><b>52 min</b></td><td>Q4 — 2.05× faster ✅</td></tr>
+<tr><td><b>Native resolution</b></td><td>576×320</td><td><b>704×384</b></td><td>Q4 — +47% pixels ✅</td></tr>
+<tr><td><b>Peak VRAM</b></td><td>7.5 GB</td><td><b>7.06 GB</b></td><td>Q4 — lower ✅</td></tr>
+<tr><td><b>Quality (eyeball)</b></td><td>~85</td><td>~85</td><td><b>TIE</b> — within noise</td></tr>
+</table>
+
+Every column except the last one leans the same way, and it is the wrong way round from what the names suggest. The *smaller*, *coarser* model rendered *more* pixels in *half* the time using *less* memory.
+
+## The surprise: the smaller model is the faster one
+
+The expectation is that fewer bits means either slower (more unpacking work) or worse (less information). Neither happened. Understanding why is the single most useful thing this experiment produced, and it has nothing to do with quantization theory and everything to do with which kernel actually runs.
+
+<svg viewBox="0 0 760 344" width="100%" style="max-width:920px" role="img" aria-label="Side by side comparison of the int8 and Q4 execution paths, showing that both dequantize back to a 16-bit float before multiplying, that the int8 path additionally pays for row-blocking and a 2.24 gigabyte int32 temporary, and that neither path uses the card's int8 tensor cores.">
+  <defs>
+    <marker id="q1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">TWO PATHS THROUGH THE SAME LINEAR LAYER</text>
+  <text x="2" y="34" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">int8 + chunk patch</text>
+  <text x="390" y="34" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Q4_K_M</text>
+  <rect x="2" y="44" width="368" height="46" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="72" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">stored: 1 byte per weight</text>
+  <rect x="390" y="44" width="368" height="46" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="408" y="72" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">stored: ½ byte per weight</text>
+  <line x1="186" y1="92" x2="186" y2="102" stroke="#6f7b8f" marker-end="url(#q1)"/>
+  <line x1="574" y1="92" x2="574" y2="102" stroke="#6f7b8f" marker-end="url(#q1)"/>
+  <rect x="2" y="106" width="368" height="46" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="20" y="134" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">dequantize back to bf16</text>
+  <rect x="390" y="106" width="368" height="46" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="408" y="134" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">dequantize to fp16</text>
+  <line x1="186" y1="154" x2="186" y2="164" stroke="#6f7b8f" marker-end="url(#q1)"/>
+  <line x1="574" y1="154" x2="574" y2="164" stroke="#6f7b8f" marker-end="url(#q1)"/>
+  <rect x="2" y="168" width="368" height="46" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="20" y="190" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">bf16 matmul, split into row blocks</text>
+  <text x="20" y="207" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">loop overhead on every linear layer</text>
+  <rect x="390" y="168" width="368" height="46" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="408" y="190" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">one standard fp16 matmul</text>
+  <text x="408" y="207" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">the heavily optimised path</text>
+  <line x1="186" y1="216" x2="186" y2="226" stroke="#6f7b8f" marker-end="url(#q1)"/>
+  <line x1="574" y1="216" x2="574" y2="226" stroke="#6f7b8f" marker-end="url(#q1)"/>
+  <rect x="2" y="230" width="368" height="46" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="20" y="258" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">+ 2.24 GB int32 accumulation buffer</text>
+  <rect x="390" y="230" width="368" height="46" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="408" y="258" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">no int8 working buffer at all</text>
+  <rect x="2" y="288" width="368" height="40" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="186" y="313" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">107 min · 576×320 · 7.5 GB</text>
+  <rect x="390" y="288" width="368" height="40" rx="6" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="574" y="313" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">52 min · 704×384 · 7.06 GB</text>
+  <text x="2" y="342" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">The card has native int8 tensor cores. Neither column uses them.</text>
+</svg>
+
+<div class="callout warn"><span class="t">Why "int8" is secretly slow on a consumer GPU</span>
+<p>The int8 path <b>dequantizes the 8-bit weights back to bf16 and runs a bf16 matrix multiply</b> — it never actually reaches the card's fast INT8 tensor cores. So "int8" pays the shrink cost <em>without</em> collecting the speed reward. On top of that, the memory-saving chunk-patch splits the matmul into row-blocks, adding loop overhead on every linear layer in every one of fifty blocks. <b>Q4-GGUF instead dequantizes to fp16 and runs one standard matmul</b> — the well-trodden, heavily optimised path — so it is roughly 2× faster and also skips the 2.24 GB int8 working buffer, which is why it fits a <em>higher</em> resolution at <em>lower</em> VRAM.</p>
+<p>This is not a local quirk: it reproduces a 2026 arXiv result, <em>Native INT8 Compute for Diffusion Transformers on Consumer GPUs</em>, on this machine.</p></div>
+
+There is a real irony here worth naming, because it connects straight back to [ch.04](04-software-stack.html). Ampere — the generation these cards belong to — has genuine int8 tensor-core hardware. It is one of the few things the silicon does exceptionally well. And the "int8" software path never calls it. The format name on the file describes how the weights are *stored*, not how they are *multiplied*, and those are two independent decisions. A format only pays off when the kernel that consumes it is written for the hardware in the machine.
+
+## File size is a bandwidth number, not just a capacity number
+
+There is a second reason the smaller model is faster, and it is easy to miss because it lives outside the GPU.
+
+None of these models fit in 8 GB of VRAM. They are streamed: one transformer block is copied in, used, and evicted, fifty times per denoise step ([ch.07](07-optimization-720p.html)). So the size of the file on disk is also the amount of data crossing the bus *every step*.
+
+<svg viewBox="0 0 760 240" width="100%" style="max-width:920px" role="img" aria-label="Bar chart of the weight traffic moved per denoise step for each precision: 66 gigabytes for bf16, 33 for unpruned int8, 20 for the pruned int8 build and about 11 for Q4.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WEIGHT TRAFFIC MOVED ACROSS THE BUS — PER DENOISE STEP</text>
+  <text x="140" y="60" text-anchor="end" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">bf16</text>
+  <rect x="150" y="40" width="560" height="28" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="722" y="60" fill="#7aa2ff" font-size="12" font-family="Inter,sans-serif">66 GB</text>
+  <text x="140" y="104" text-anchor="end" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">int8</text>
+  <rect x="150" y="84" width="280" height="28" rx="4" fill="#151b26" stroke="#aab4c5"/>
+  <text x="442" y="104" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">33 GB — unpruned</text>
+  <text x="140" y="148" text-anchor="end" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">int8, pruned</text>
+  <rect x="150" y="128" width="170" height="28" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="332" y="148" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">20 GB — what this build ships</text>
+  <text x="140" y="192" text-anchor="end" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q4_K_M</text>
+  <rect x="150" y="172" width="94" height="28" rx="4" fill="#241a1a" stroke="#ffb454"/>
+  <text x="256" y="192" fill="#ffb454" font-size="12" font-family="Inter,sans-serif">~11 GB</text>
+  <text x="2" y="226" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">At 20 GB per step, a 23-step render moves roughly 460 GB in and out of VRAM. Halving the file halves that trip.</text>
+</svg>
+
+Fifty blocks at about 0.4 GB each is 20 GB per step. A 23-step render therefore drags roughly **460 GB** across the bus. That is not a rounding error in the wall-clock; on a machine whose model does not fit, the file size *is* a running cost, paid once per step, forever.
+
+This reframes the whole comparison. Q4 was not faster because 4-bit arithmetic is fast — the arithmetic happens in fp16 either way. Q4 was faster because there was less of it to carry, and because what did arrive went through a better-optimised kernel.
+
+## Adding the third contender: fp16, the top of the ladder
+
+The int8-versus-Q4 test left one question hanging: what does the model look like with *no* quantization at all? Later an `H3_F16` toggle was wired in — plain bf16 weights, zero quant — and the same kind of shot was run. This is the highest precision the model ships in. If precision were a quality dial, this is where it maxes out.
+
+<div class="callout truth"><span class="t">fp16 measured: same picture, heavier and slower</span>
+<p>The bf16 render came out <b>indistinguishable from int8</b> — same face, same detail, nothing the eye could find. What it cost was entirely real: each transformer block is <b>~1.29 GB in bf16 against ~0.65 GB in int8</b>, and the whole transformer is <b>~66 GB against ~33 GB</b> — so it offloads twice as much from RAM on every step and renders <em>slower</em>, for <b>zero visible gain</b>. The best-precision option was, in practice, the worst choice available.</p></div>
+
+That result is what turns two data points into a shape. int8 versus Q4 alone could be read as "4-bit happens to be good enough." Adding bf16 at the other end shows something stronger: quality did not improve going *up* either.
+
+## The plateau
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="Chart of output quality against weight precision, showing a flat plateau from bf16 through int8 to 4-bit and then a sharp cliff at int3 and int2.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">QUALITY AGAINST PRECISION — A PLATEAU, THEN A CLIFF</text>
+  <rect x="100" y="34" width="330" height="214" fill="#14342c" opacity="0.45"/>
+  <rect x="470" y="34" width="220" height="214" fill="#241a1a" opacity="0.55"/>
+  <line x1="80" y1="34" x2="80" y2="248" stroke="#232c3b"/>
+  <line x1="80" y1="248" x2="726" y2="248" stroke="#232c3b"/>
+  <text x="72" y="64" text-anchor="end" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">100%</text>
+  <text x="72" y="228" text-anchor="end" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">broken</text>
+  <path d="M120,60 L260,60 L400,66 L520,142 L640,222" fill="none" stroke="#5ee0c0" stroke-width="2"/>
+  <circle cx="120" cy="60" r="5" fill="#5ee0c0"/>
+  <circle cx="260" cy="60" r="5" fill="#5ee0c0"/>
+  <circle cx="400" cy="66" r="5" fill="#5ee0c0"/>
+  <circle cx="520" cy="142" r="5" fill="#ff6b6b"/>
+  <circle cx="640" cy="222" r="5" fill="#ff6b6b"/>
+  <text x="120" y="46" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">tie</text>
+  <text x="260" y="46" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">tie</text>
+  <text x="400" y="52" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">tie</text>
+  <text x="120" y="268" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">fp16 · 2 B</text>
+  <text x="260" y="268" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">int8 · 1 B</text>
+  <text x="400" y="268" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">Q4 · 0.5 B</text>
+  <text x="520" y="268" text-anchor="middle" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">int3 · 0.37 B</text>
+  <text x="640" y="268" text-anchor="middle" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">int2 · 0.25 B</text>
+  <text x="265" y="292" text-anchor="middle" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif" letter-spacing="1.2">FLAT PLATEAU — ALL A TIE</text>
+  <text x="580" y="292" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif" letter-spacing="1.2">CLIFF — QUALITY GONE</text>
+  <text x="736" y="252" text-anchor="end" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">VRAM and speed improve left → right the whole way</text>
+</svg>
+
+The two ends of that curve are measured on this machine; the int3 and int2 points are the known shape of the cliff rather than runs of ours. What the measurements establish is the flat part, and the flat part is the surprising part.
+
+<div class="callout warn"><span class="t">Why more bits do not buy quality</span>
+<p>Two reasons, and both are properties of <em>diffusion</em> rather than of quantization.</p>
+<p><b>Diffusion self-corrects.</b> The image is refined over dozens of denoise steps, each one asking the same question again of a slightly cleaner input. A tiny rounding error in one step's weights nudges the trajectory a little; the next step, looking at where the latent actually is, corrects toward the same destination. Errors that are small and roughly unbiased get averaged out rather than accumulated. This is exactly why a language model — which commits to a token and can never revisit it — is far more sensitive to quantization than a diffusion model is.</p>
+<p><b>The output is far coarser than the weights.</b> The fourth decimal place of a bf16 weight has to survive fifty blocks and then be squeezed through a VAE that compresses space 16-fold, before landing in an 8-bit pixel. It does not arrive. Precision above int8 is memory spent on detail that has nowhere to go.</p></div>
+
+## Where the first verdict was too generous
+
+The first version of this chapter reported a quality score of "84 vs 87" and called it a Q4 win. That was wrong, and the way it was wrong is instructive.
+
+<div class="callout spec"><span class="t">Read each axis separately — this is the honest part</span>
+<p><b>Speed:</b> Q4 wins, decisively and for real. It was faster <em>despite</em> rendering 47% more pixels.<br/>
+<b>VRAM and resolution:</b> Q4 wins — more native pixels at lower peak memory.<br/>
+<b>Quality:</b> a <b>TIE</b>, not a Q4 win. A three-point gap on an eyeball scale is inside the noise, and it was <em>confounded</em>: the two clips ran at different native resolutions and are different generated images. If anything, <b>int8 is the higher-fidelity reference</b> — it is bit-identical to raw int8 — and Q4 <em>matches</em> it rather than beating it.</p></div>
+
+The failure was not the measurement. It was comparing two runs that differed in more than one variable and then attributing the difference to the variable under study. The resolution advantage that made Q4 interesting is the same resolution advantage that made its quality number unreadable.
+
+<div class="callout warn"><span class="t">Do not over-read any of this</span>
+<p><b>n = 1 scene, one seed.</b> A strong signal, not a proven verdict across crowds, fast motion, or other subjects. The "2× faster" is against the <em>patched</em> int8 specifically — raw int8 would be quicker but hungrier for VRAM. And "quality" here is a human eyeball, not PSNR or LPIPS. Everything above is worth acting on and not worth defending as a law.</p></div>
+
+## So which one gets used
+
+<table>
+<tr><th>Goal</th><th>Pick</th><th>Why</th></tr>
+<tr><td>A no-quant reference to compare against</td><td><b>fp16 / bf16</b></td><td>The top of the ladder — but double the VRAM and double the offload traffic for a quality <em>tie</em>. Rarely worth it outside a controlled comparison.</td></tr>
+<tr><td>Everyday rendering, batches, the films</td><td><b>Q4_K_M</b></td><td>Fastest, fits higher native resolution, quality indistinguishable.</td></tr>
+<tr><td>Balanced default — the production line</td><td><b>int8</b></td><td>A hair more fidelity headroom than Q4, still fits, and it is what the films actually shipped on.</td></tr>
+<tr><td>Understanding the machine</td><td><b>all three</b></td><td>The int8 patch <em>found</em> the bottleneck, Q4 was the better path it revealed, and fp16 proved precision was never the lever.</td></tr>
+</table>
+
+int8 remained the production default despite losing on speed, and that is a deliberate choice rather than an oversight. It is the format the model officially ships in, it is bit-identical to the reference, and the rest of the pipeline — the sharding, the offloading, the decode fixes — was built and debugged against it. Swapping the weight format underneath a stack that has been tuned around it is the kind of change that trades a known cost for an unknown one.
+
+## The takeaway
+
+<div class="callout truth"><span class="t">Precision is a plateau, not a dial</span>
+<p><b>All three precisions look the same — so choose by speed and VRAM, never by "quality."</b> Q4 is the fastest and lightest, int8 the balanced middle the films shipped on, fp16 the heaviest with nothing to show for it. The fight picked early on — sweating Q4 against int8 as though fidelity hung on it — turned out to be a fight that did not matter. That is not wasted work; that <em>is</em> the finding, and it took three measured runs to earn it.</p>
+<p>The effort belongs elsewhere: in framing, resolution and the finishing line ([ch.17](17-what-actually-improves-quality.html)). And the VRAM belongs to capacity, not to bits — every gigabyte not spent on precision is a gigabyte available for pixels and frames, which are the things that <em>do</em> move quality ([ch.39](39-choosing-the-next-card.html)).</p></div>
+
+Two threads run out of this chapter. The number formats themselves — what bf16, fp8, int8 and fp4 actually encode, and which silicon implements which — are laid out in [ch.18](18-number-formats-precision.html). The 2.24 GB int32 buffer and the row-blocking that removed it are derived in full, with the proof that the result is bit-identical, in [ch.14](14-the-math-behind-it.html).
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">quantization</span><span class="badge">scale factor</span><span class="badge">k-quant / Q4_K_M</span><span class="badge">GGUF</span><span class="badge">dequantize</span><span class="badge">tensor cores</span><span class="badge">GEMM</span><span class="badge">int32 accumulation buffer</span><span class="badge">row blocking</span><span class="badge">bit-identical</span><span class="badge">weight traffic per step</span><span class="badge">precision plateau</span><span class="badge">confounded comparison</span></p>
+<p>If those feel solid, the difference between a file being small and a model being fast is no longer confusing.</p></div>
+
+Next: every number in this build, derived — the ODE that generation actually solves, why attention costs what it costs, and the algebra proving the chunk-patch changed nothing at all — [Chapter 14](14-the-math-behind-it.html).
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

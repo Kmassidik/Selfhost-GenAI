@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>08 · How a Prompt Becomes a Video</title>
+<meta name="description" content="The full path from one sentence to a finished clip: encoder, noise, the denoising loop, the two decoders — and why the final numbers are regressed, never sampled.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
@@ -12,120 +14,379 @@
 
 # How a Prompt Becomes a Video
 
-<p class="lede">Follow one sentence — "a woman singing" — as it turns from text into moving pictures with sound. No retrieval, no stitching of old clips. The video is <em>hallucinated</em> from static, and this is the exact path the data takes.</p>
+<p class="lede">A prompt becomes a video by being read once into a block of numbers, and then used — over and over, for every one of the render's steps — to steer the gradual removal of noise from a small grid of random static, which a pair of decoders finally expands into frames and sound. Nothing is retrieved. Every frame is invented on the spot.</p>
+
+Take one sentence — *"a woman singing"* — and follow it all the way through. It is worth doing slowly, because almost every cost this project measured is a consequence of *where* along this path the data becomes heavy.
 
 ## The one idea to hold onto
 
-The model is **not** a search engine. It never looks up a video of a woman singing. It starts from **pure random noise** and, guided by the meaning of your words, **removes the noise** until what's left happens to look like a woman singing. Every frame is invented. That's the whole magic — and every cost we measured comes from it.
+The model is **not** a search engine. It never looks up a video of a woman singing, and there is no library of clips inside it to look up. It starts from **pure random numbers** and, guided by the meaning of the sentence, **removes what it judges to be noise** until what remains happens to look like a woman singing.
 
-```mermaid
-flowchart LR
-    P["'a woman singing'"] --> ENC["① Encoder<br/>words → meaning"]
-    N["pure noise<br/>(random static)"] --> DIT
-    ENC --> DIT["③ DiT<br/>remove noise,<br/>guided by meaning<br/>(repeat N steps)"]
-    DIT --> LAT["clean latent<br/>(compressed dream)"]
-    LAT --> VV["④ Visual VAE<br/>latent → pixels"]
-    LAT --> AV["④ Audio VAE<br/>latent → sound"]
-    VV --> OUT[[frames + audio<br/>= video]]
-    AV --> OUT
-    style ENC fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style DIT fill:#14342c,stroke:#5ee0c0,color:#eafff8
-    style N fill:#241a1a,stroke:#ff6b6b,color:#ffdede
-    style OUT fill:#0d1017,stroke:#5ee0c0,color:#5ee0c0
-```
+That sounds like a technicality. It is the reason for everything else. A search engine's cost scales with the size of its index; a generator's cost scales with how much it has to invent. Fifteen seconds of video is three times as much invention as five seconds — and, because of how the invention works, far more than three times the cost.
+
+<svg viewBox="0 0 760 386" width="100%" style="max-width:920px" role="img" aria-label="The full pipeline: prompt and optional reference image or audio enter a 26 GB encoder which writes conditioning to disk and exits; a second process feeds random noise plus that conditioning into the 20 GB transformer, which loops 23 times to produce a clean latent, decoded by a visual VAE and an audio VAE and muxed into an mp4.">
+  <defs>
+    <marker id="j1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="j2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+    <marker id="j3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="j4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">READ ONCE  →  DENOISE 23×  →  DECODE ONCE</text>
+  <rect x="2" y="32" width="152" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="78" y="52" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">the prompt</text>
+  <text x="78" y="68" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">"a woman singing"</text>
+  <rect x="2" y="88" width="152" height="38" rx="8" fill="#151b26" stroke="#ffb454"/>
+  <text x="78" y="105" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">reference image</text>
+  <text x="78" y="119" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">optional</text>
+  <rect x="2" y="134" width="152" height="38" rx="8" fill="#151b26" stroke="#ffb454"/>
+  <text x="78" y="151" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">reference audio</text>
+  <text x="78" y="165" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">optional</text>
+  <rect x="200" y="60" width="210" height="76" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="305" y="84" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">① Encoder — Qwen3-VL 32B</text>
+  <text x="305" y="102" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">26 GB · tapped at layer 50</text>
+  <text x="305" y="120" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">words + pictures → meaning</text>
+  <path d="M156,55 L196,80" fill="none" stroke="#6f7b8f" marker-end="url(#j1)"/>
+  <path d="M156,107 L196,100" fill="none" stroke="#6f7b8f" marker-end="url(#j1)"/>
+  <path d="M156,153 L196,118" fill="none" stroke="#6f7b8f" marker-end="url(#j1)"/>
+  <rect x="456" y="74" width="200" height="48" rx="8" fill="#12161f" stroke="#7aa2ff"/>
+  <text x="556" y="94" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">conditioning</text>
+  <text x="556" y="110" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">saved to disk · encoder exits</text>
+  <line x1="414" y1="98" x2="452" y2="98" stroke="#7aa2ff" marker-end="url(#j2)"/>
+  <line x1="2" y1="158" x2="756" y2="158" stroke="#232c3b" stroke-dasharray="4 4"/>
+  <text x="756" y="152" text-anchor="end" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif" letter-spacing="1.2">PROCESS 1 ENDS  ·  PROCESS 2 BEGINS</text>
+  <rect x="2" y="186" width="152" height="54" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="78" y="208" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">② pure noise</text>
+  <text x="78" y="225" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">random static, set by seed</text>
+  <rect x="200" y="180" width="210" height="94" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="305" y="204" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">③ Omni-Transformer</text>
+  <text x="305" y="222" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">20 GB int8 · 50 blocks</text>
+  <text x="305" y="240" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">predicts what is noise</text>
+  <text x="305" y="258" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">video + audio together</text>
+  <path d="M156,213 L196,220" fill="none" stroke="#ff6b6b" marker-end="url(#j4)"/>
+  <path d="M556,124 C 556,166 442,152 414,194" fill="none" stroke="#7aa2ff" stroke-dasharray="3 3" marker-end="url(#j2)"/>
+  <path d="M412,196 C 452,190 452,266 414,260" fill="none" stroke="#5ee0c0" marker-end="url(#j3)"/>
+  <text x="462" y="222" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">× 23 steps</text>
+  <text x="462" y="242" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">each step reads all 50 blocks;</text>
+  <text x="462" y="257" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">~0.4 GB is streamed per block</text>
+  <rect x="2" y="306" width="200" height="52" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="102" y="326" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">clean latent</text>
+  <text x="102" y="343" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">(1, 24, 37, 30, 52)</text>
+  <path d="M240,276 C 200,292 142,296 106,302" fill="none" stroke="#5ee0c0" marker-end="url(#j3)"/>
+  <rect x="246" y="294" width="180" height="36" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="336" y="317" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">④ Visual VAE → frames</text>
+  <rect x="246" y="338" width="180" height="36" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="336" y="361" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">④ Audio VAE → 32 kHz</text>
+  <line x1="204" y1="320" x2="242" y2="314" stroke="#5ee0c0" marker-end="url(#j3)"/>
+  <line x1="204" y1="344" x2="242" y2="354" stroke="#5ee0c0" marker-end="url(#j3)"/>
+  <rect x="470" y="308" width="180" height="52" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="560" y="330" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">⑤ mux → .mp4</text>
+  <text x="560" y="347" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">picture and sound in step</text>
+  <line x1="428" y1="312" x2="466" y2="326" stroke="#5ee0c0" marker-end="url(#j3)"/>
+  <line x1="428" y1="356" x2="466" y2="342" stroke="#5ee0c0" marker-end="url(#j3)"/>
+</svg>
+
+Five stages. Only one of them takes hours, and it is not the one most people expect.
 
 ---
 
 ## ① The words become meaning (the Encoder)
 
-Your sentence is first chopped into **tokens** (roughly: pieces of words) and each token becomes a number. Those numbers flow through the **text/vision encoder** — for H3, that's **Qwen3-VL-32B**.
+The sentence is first chopped into **tokens** — roughly, pieces of words — and each token becomes an integer index. Those integers become vectors, and the vectors flow through the **text/vision encoder**. In H3 that encoder is **Qwen3-VL-32B**, a full 32-billion-parameter vision-language model, and at **26 GB** it is the largest single file in the whole system.
 
-The encoder's job isn't to store your words; it's to **understand** them. Layer by layer it builds a high-dimensional vector — think of it as a coordinate in a giant "meaning space" — that captures *person, female, singing, music, motion, a mouth that moves with sound.* This bundle of meaning is called the **conditioning**. It's the instruction sheet the generator will obey.
+Twenty-six gigabytes to read a four-word sentence looks absurd until you ask what the sentence has to carry. "Singing" has to imply a mouth that opens and closes in time with a sound that does not exist yet. "A woman" has to imply a coherent human body that stays the same body for the whole clip. None of that is *in* the words. It is in the understanding of the words, and understanding is what costs 26 GB.
 
-> **This is our fixed ~6.5 GB VRAM floor.** The encoder is huge, and it runs before a single frame exists. That's why the profiler saw the same peak whether the video was 5 frames or 181 — this step doesn't care how long the video is.
+The encoder's job is not to store the sentence; it is to turn it into a position in a very high-dimensional space of meaning. What comes out is a block of numbers called the **conditioning** — the instruction sheet the generator will consult on every single step of the render.
+
+<div class="callout spec"><span class="t">Two details that matter downstream</span>
+<p><b>The tap is at layer 50, not the end.</b> H3 does not take the encoder's final output. A language model's last layer is specialised for its own job — predicting the next word — while its middle layers hold a more general representation of meaning. H3 reaches in and takes the hidden states halfway up the stack (<a href="03-how-h3-works.html">ch.03</a>).</p>
+<p><b>The encoder runs in its own process and then exits.</b> 26 GB of encoder and 20 GB of generator do not comfortably coexist on 24 GB of total VRAM, so on this build they are never in memory at the same time. The encoder reads, writes its conditioning to disk, and dies. Only then does the generator load. That has a pleasant consequence: a prompt encoded once can be re-rendered at any resolution, any step count, any seed, without paying the 26 GB again.</p></div>
+
+<div class="callout spec"><span class="t">What about reference images? (the ref2va path)</span>
+<p>A reference image — a face, a character — is <b>not pasted into the video</b>. It rides through the <b>encoder</b> as extra conditioning, right beside the text, and steers the denoise loop toward <em>this specific face</em>. That is how identity stays locked across a whole scene or across a band's members (<b>ref2va</b>). Feeding the <em>last frame of one clip as the first frame of the next</em> (<b>fl2va</b>) is the same trick through a different door — it pins the starting pixels instead of the identity.</p>
+<p>Either way, references become <em>numbers that bias the noise removal</em>, never pixels that get copied. This is also why chained fl2va clips hold a scene together but let a photoreal face drift: nothing in that path is anchoring identity, only continuity (<a href="33-long-video-small-card.html">ch.33</a>).</p></div>
 
 ---
 
 ## ② The blank canvas is static (the Noise)
 
-The generator does **not** start from a black screen. It starts from a block of **pure random numbers** — TV static — but in a compressed form called **latent space**.
+The generator does **not** start from a black screen or an empty buffer. It starts from a block of pure random numbers drawn from a bell curve — television static — but in a compressed form called **latent space**.
 
-Instead of full pixels (1280×720×3 per frame × hundreds of frames = enormous), it works on a small coded grid: the video is squished **16× smaller in space and 4× in time**. A 15-second clip becomes a manageable little tensor of random noise. This compression is the only reason a 33B model can touch video at all.
+Working on real pixels would be hopeless. A single 1280×704 frame is about 2.7 million numbers, and a fifteen-second clip is 345 of them. So the video is squished: **16× smaller in each spatial dimension** and roughly **4× in time**. What the transformer actually sees is a small coded grid.
+
+That grid is not abstract. When one of our renders crashed mid-flight, the saved latent for an 832×480 clip of 124 frames had shape:
+
+```
+(1, 24, 37, 30, 52)
+ │   │   │   │   └── 52 wide   = 832 ÷ 16
+ │   │   │   └────── 30 tall   = 480 ÷ 16
+ │   │   └────────── 37 latent frames, from 124 real ones
+ │   └────────────── 24 latent channels (not red, green, blue)
+ └────────────────── one clip
+```
+
+That is about **1.4 million numbers**. Compare it to the finished pixels — 832 × 480 × 3 × 124 is roughly 149 million — and the compression is about a hundredfold. This is the only reason a model of this size can touch video at all.
+
+<div class="callout truth"><span class="t">A latent is not a small picture</span>
+<p>The temptation is to imagine the latent as a thumbnail. It is not. Those <b>24 channels</b> are not colours; they are whatever the VAE found convenient to encode during its own training, and a human looking at any one of them sees nothing recognisable. Only the decoder knows how to turn them back into light. Everything from here until the very last stage happens in this uninterpretable space.</p></div>
+
+<div class="callout warn"><span class="t">The 848-pixel trap</span>
+<p>Before entering the transformer, latent cells are grouped into patches of <code>[1, 2, 2]</code> — one frame by two by two. Four neighbouring cells become one token, cutting the sequence length by four. That means the latent grid must have <b>even</b> width and height.</p>
+<p>848 ÷ 16 = 53, which is odd, and patching fails with a shape error deep inside the model that never mentions resolution. 832 ÷ 16 = 52, which is even, and works. Choose widths and heights where the number after dividing by 16 is even. This cost real debugging time.</p></div>
 
 ---
 
 ## ③ The sculptor removes the noise (the DiT — the heart)
 
-Now the **Omni-Transformer** (the 33-billion-parameter DiT) goes to work. In a loop:
+Now the **Omni-Transformer** — the DiT, 20 GB of int8 weights across 50 blocks — goes to work. Its loop is short enough to state in four lines:
 
-1. It looks at the current noisy latent **and** the meaning-vector from ①.
-2. It predicts: *"to make this look more like 'a woman singing', nudge the numbers in **this** direction."* (Mathematically, a velocity field — see [Chapter — Sampling Math].)
-3. Apply the nudge. The static gets 1 notch less random, 1 notch more structured.
-4. Repeat — **4 steps** (with Turbo) to **20 steps** (base).
+1. Look at the current noisy latent, at *which* noise level it is at, and at the conditioning from ①.
+2. Push all of that through 50 transformer blocks in sequence.
+3. Out comes a **prediction of which part of the latent is noise** — a grid the same shape as the input.
+4. The scheduler subtracts a *fraction* of that prediction. Repeat.
 
-Picture fog slowly clearing into a figure. Step 1: vague blobs. Step 5: a person-shape. Step 20: a woman, mid-note, mouth open.
+Picture fog clearing into a figure. Early steps set composition — where things are, what is roughly happening. Late steps set detail — edges, texture, the light on a cheekbone.
 
-**Three things happen here that explain everything we measured:**
+<svg viewBox="0 0 760 322" width="100%" style="max-width:920px" role="img" aria-label="Anatomy of one denoising step: the noisy latent, the timestep and the conditioning enter a stack of fifty transformer blocks whose weights are streamed from system RAM about 0.4 GB at a time; the stack outputs a noise prediction, the scheduler subtracts a fraction of it, and the result feeds the next step.">
+  <defs>
+    <marker id="k1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="k2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="k3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE STEP — REPEATED 23 TIMES</text>
+  <rect x="2" y="34" width="170" height="50" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="87" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">noisy latent</text>
+  <text x="87" y="71" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">(1, 24, 37, 30, 52)</text>
+  <rect x="2" y="94" width="170" height="36" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="87" y="117" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">the noise level t</text>
+  <rect x="2" y="140" width="170" height="36" rx="8" fill="#12161f" stroke="#7aa2ff"/>
+  <text x="87" y="163" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">the conditioning</text>
+  <rect x="204" y="40" width="140" height="26" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="274" y="58" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">block 0</text>
+  <rect x="204" y="74" width="140" height="26" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="274" y="92" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">block 1</text>
+  <rect x="204" y="108" width="140" height="26" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="274" y="126" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">block 2</text>
+  <text x="274" y="164" text-anchor="middle" fill="#6f7b8f" font-size="16" font-family="Inter,sans-serif">⋮</text>
+  <rect x="204" y="182" width="140" height="26" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="274" y="200" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">block 48</text>
+  <rect x="204" y="216" width="140" height="26" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="274" y="234" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">block 49</text>
+  <text x="274" y="262" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">50 blocks, strictly in order</text>
+  <path d="M174,60 L200,54" fill="none" stroke="#6f7b8f" marker-end="url(#k1)"/>
+  <path d="M174,112 L200,60" fill="none" stroke="#6f7b8f" marker-end="url(#k1)"/>
+  <path d="M174,158 L200,66" fill="none" stroke="#7aa2ff" stroke-dasharray="3 3" marker-end="url(#k3)"/>
+  <rect x="392" y="30" width="184" height="52" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="484" y="50" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">system RAM · 125 GB</text>
+  <text x="484" y="67" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">holds all 20 GB of weights</text>
+  <path d="M400,74 C 372,86 358,86 348,88" fill="none" stroke="#6f7b8f" stroke-dasharray="3 3" marker-end="url(#k1)"/>
+  <path d="M406,82 C 380,140 366,180 348,194" fill="none" stroke="#6f7b8f" stroke-dasharray="3 3" marker-end="url(#k1)"/>
+  <text x="392" y="104" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">~0.4 GB copied per block,</text>
+  <text x="392" y="119" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">over PCIe, on every step</text>
+  <rect x="572" y="146" width="184" height="52" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="664" y="166" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">noise prediction</text>
+  <text x="664" y="183" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">same shape as the input</text>
+  <path d="M346,230 C 440,232 510,206 568,186" fill="none" stroke="#5ee0c0" marker-end="url(#k2)"/>
+  <rect x="572" y="212" width="184" height="34" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="664" y="234" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">scheduler subtracts part</text>
+  <line x1="664" y1="200" x2="664" y2="208" stroke="#5ee0c0" marker-end="url(#k2)"/>
+  <rect x="572" y="260" width="184" height="34" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="664" y="282" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">a little less random</text>
+  <line x1="664" y1="248" x2="664" y2="256" stroke="#5ee0c0" marker-end="url(#k2)"/>
+  <path d="M568,290 L92,290 L92,90" fill="none" stroke="#5ee0c0" stroke-dasharray="4 4" marker-end="url(#k2)"/>
+  <text x="330" y="284" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">the next step starts here</text>
+</svg>
 
-- **Video and audio are sculpted together.** H3 denoises the picture latent *and* the sound latent in **one shared sequence**. That's why the singing voice and the lip movements are born synchronized — they were never separate.
-- **Every patch looks at every other patch (attention).** To keep frame 2 consistent with frame 1, and the mouth matched to the sound, each little piece of each frame "attends to" all the others across space and time. This is the $\mathcal{O}(N^2)$ cost — the reason more frames × more resolution means more compute and memory.
-- **Each step = one full pass of the 33B model.** So 20 steps = 20 passes. **Turbo-LoRA** retrains the sculptor to get there in 4 confident strokes instead of 20 timid ones — same statue, 5× fewer passes.
+<div class="callout spec"><span class="t">What actually changed after one step</span>
+<p>The latent has exactly the same shape it started with — <code>(1, 24, 37, 30, 52)</code>, still about 1.4 million numbers. Nothing got bigger. Nothing became an image. The numbers are simply <b>slightly less random</b> and slightly more like a video that matches the conditioning. That is the entire operation, and it is all a step ever does.</p></div>
+
+### Three properties of this loop explain every measurement in this guide
+
+**Video and audio are sculpted together.** H3 denoises the picture latent *and* the sound latent as one shared sequence, through the same 50 blocks. The video contributes 24 latent channels, the audio contributes its own 32. That is what "omni-modal" means concretely: not two models glued together with a lip-sync pass on the end, but one stack carrying both. The singing voice and the mouth movements are born synchronised because they were never separate things to synchronise.
+
+**Every token looks at every other token.** This is attention, and it is where the money goes. To keep frame 40 consistent with frame 1, and the shape of the mouth matched to the sound at that instant, each patch of each frame must weigh its relationship to all the others across space *and* time.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Video patches and audio patches form one single attention sequence; one audio token is shown attending to video tokens spread across the whole clip, which is why lip sync emerges rather than being added afterwards.">
+  <defs>
+    <marker id="m1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE SEQUENCE — VIDEO AND AUDIO SIDE BY SIDE</text>
+  <text x="40" y="40" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">VIDEO TOKENS — each one a 1×2×2 patch of latent cells</text>
+  <text x="556" y="40" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">AUDIO TOKENS</text>
+  <rect x="40" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="68" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="96" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="124" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="152" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="180" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="208" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="236" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="264" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="292" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="320" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="348" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="376" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="404" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="432" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="460" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="488" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="516" y="52" width="24" height="24" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="556" y="52" width="24" height="24" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="584" y="52" width="24" height="24" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="612" y="52" width="24" height="24" rx="3" fill="#151b26" stroke="#5ee0c0" stroke-width="2"/>
+  <rect x="640" y="52" width="24" height="24" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="668" y="52" width="24" height="24" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="696" y="52" width="24" height="24" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="40" y="94" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">frame 1</text>
+  <text x="516" y="94" text-anchor="end" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">frame 124</text>
+  <path d="M624,78 C 624,150 200,150 52,80" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3" marker-end="url(#m1)"/>
+  <path d="M624,78 C 620,140 340,146 178,80" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3" marker-end="url(#m1)"/>
+  <path d="M624,78 C 616,132 460,140 332,80" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3" marker-end="url(#m1)"/>
+  <path d="M624,78 C 610,124 540,130 474,80" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3" marker-end="url(#m1)"/>
+  <text x="380" y="176" text-anchor="middle" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">one audio token weighs its relationship to every video token — and to every other audio token</text>
+  <rect x="2" y="198" width="368" height="62" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="222" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">The count, from the config</text>
+  <text x="20" y="240" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">30 ÷ 2 = 15 and 52 ÷ 2 = 26 → 390 patches per latent frame</text>
+  <text x="20" y="254" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">× 37 latent frames ≈ 14,400 video tokens in one sequence</text>
+  <rect x="390" y="198" width="366" height="62" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="408" y="222" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">The cost</text>
+  <text x="408" y="240" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">every pair is compared, so work grows with the square of N</text>
+  <text x="408" y="254" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">double the tokens → four times the pairs, not twice</text>
+</svg>
+
+Fourteen thousand video tokens is already a long sequence, and it is for a five-second clip at 832×480. Triple the length and raise the resolution and the pair count climbs quadratically — which is the wall the whole project keeps running into. Measured on this build, the same scene at native 1280×704 took **55 minutes at five seconds** and roughly **44 hours at fifteen**. Three times the length, nearly fifty times the cost, because on top of the quadratic maths the longer sequence also forced a slower way of splitting work across cards ([ch.45](45-three-gpu-sequence-parallelism.html)).
+
+**Each step is one full pass of the entire model.** Twenty billion parameters spread over 50 blocks is about **0.4 GB per block**, and on this build those blocks live in system RAM and are copied into VRAM one at a time. One step therefore reads the whole 20 GB. A 23-step render drags roughly **460 GB** across the PCIe bus — the entire model, pulled over from system memory twenty-three times ([ch.02](02-your-hardware.html)).
+
+### How many steps, and why the answer is not about the model
+
+The step count is the main quality dial in this guide, and the surprising thing we measured is that the right value is a property of the **scene**, not of H3.
+
+<div class="callout spec"><span class="t">Measured on this build</span>
+<table>
+<tr><th>Content</th><th>Steps needed</th></tr>
+<tr><td>Tight close-up</td><td><b>4</b></td></tr>
+<tr><td>Character, mid-shot</td><td><b>23</b></td></tr>
+<tr><td>Wide vista with a small distant subject</td><td><b>49</b></td></tr>
+</table>
+<p>A close-up is mostly one large, simple subject; composition settles almost immediately. A wide landscape has fine detail everywhere <em>and</em> a subject occupying a handful of latent cells, and it needs an order of magnitude more corrections to resolve.</p></div>
+
+<div class="callout danger"><span class="t">What too few steps actually produces</span>
+<p>Not a blurry version of the right picture — <b>mud</b>. A wide landscape rendered at 1280×704 for fourteen seconds with only <b>3 steps</b> ran for about five and a half hours and produced an unusable clip. Stopping early does not give an unfinished image; it gives one whose composition was never settled in the first place, because the early steps are exactly the ones that decide where things are.</p>
+<p>The same failure at the other end of the scale is instructive: 832×480 for fifteen seconds at <b>49 steps</b> took 66 minutes and came out beautiful. Resolution was not the deciding factor. Step count was.</p></div>
+
+<div class="callout warn"><span class="t">Two shortcuts that did not survive contact</span>
+<p><b>Step-reducing LoRAs.</b> At 480p, a LoRA visibly softened the image; the base model at full step count was sharper. Fewer steps is not free quality.</p>
+<p><b>SageAttention.</b> A faster attention kernel that works elsewhere produces <b>pure noise</b> on H3. It stays off.</p></div>
 
 ---
 
 ## ④ The dream is decoded into reality (the VAEs)
 
-After the last step we have a **clean latent** — but it's still the compressed code, not watchable. Two decoders expand it back to reality:
+After the last step there is a **clean latent** — meaning the model believes no noise is left to remove — and it is still 1.4 million uninterpretable numbers. Two decoders expand it into something a person can perceive:
 
-- **Visual VAE:** blows the latent grid back up into actual RGB frames (undoing the 16×/4× compression) → real pixels.
-- **Audio VAE:** turns the audio latent into a **32 kHz stereo waveform** → real sound.
+- **Visual VAE** (4.9 GB) blows the latent grid back up into RGB frames, undoing the 16× spatial and ~4× temporal compression.
+- **Audio VAE** (0.6 GB) turns the 32-channel audio latent into a **32 kHz stereo waveform**.
 
-> **This is the frame-count spike** the profiler caught at 362 frames — decoding hundreds of full-resolution frames at once is memory-heavy, and it scales with frame count. It's *after* the sculpting, a separate cost.
+This stage runs **once**, at the very end, and it is short compared to the loop. But it is not free, and it is not safe. Decoding hundreds of full-resolution frames means holding a lot of pixels at once, and the memory cost scales with frame count rather than with step count — a completely different curve from everything before it. The visual VAE therefore ships with **tiling on by default**, decoding in 256×256 patches with a 64-pixel overlap so that neighbouring tiles agree at their seams.
+
+<div class="callout danger"><span class="t">Two renders died here, after all the expensive work was done</span>
+<p>This stage is where the project lost the most time, and both failures are worth knowing because neither was a capacity wall.</p>
+<p><b>The device bug.</b> One render completed <b>6 hours 10 minutes</b> of denoise and then died on the <em>first line</em> of decode: the pipeline resolved its execution device to <code>cuda:0</code> while the sharded forward pass had returned latents on the CPU. Two lines of code, both in the decode path, and six hours of finished work with nowhere to go.</p>
+<p><b>The accumulation bug.</b> Another render reached <code>[vae] clip 14</code> and ran out of memory — not because the frames were too big, but because the decoder appended every <em>finished</em> pixel chunk to a list that lived on the GPU, roughly 216 MB at a time. The fix was to move each finished chunk to CPU on append. The card was never short of memory for the actual decode; it was short of memory for the pile of results nobody had put away.</p>
+<p>The general lesson: the loop and the decode are separate stages, and verifying one proves nothing about the other (<a href="46-the-first-15-seconds.html">ch.46</a>).</p></div>
 
 ---
 
-## ⑤ Our additions (mux + upscale)
+## ⑤ The last mile (mux, and the upscale decision)
 
-The frames and the waveform get **muxed** into an MP4. Then — because 8 GB forces us to generate small — we **AI-upscale** the frames to 720p/1080p and re-attach the original audio. (See Chapter 07.)
+The frames and the waveform get **muxed** into a single MP4 with the audio in step. That is the end of the model's involvement.
+
+What happens next is a choice, and it is one of the most consequential in the whole project. Native 720p at fifteen seconds *works* — it is proven, and it costs about 44 hours at 23 steps. The same fifteen seconds rendered at 832×480 with 49 steps takes about **2.6 hours** of denoise and can then be upscaled 1.54× to 720p. That is roughly **35× cheaper** for a difference most viewers cannot see.
+
+<div class="callout truth"><span class="t">A proven capability is not the same as a workflow</span>
+<p>Native 720p × 15 s is a real result and it belongs in the scorecard. It is not how films get made on this hardware. The production path is: render small with <em>enough steps</em>, then upscale. Step count buys structure; resolution mostly buys sharpness, and sharpness is the part an upscaler can add afterwards (<a href="07-optimization-720p.html">ch.07</a>).</p></div>
 
 ---
 
 ## The whole story, in one breath
 
-> Your words become a **coordinate in meaning-space** (encoder, the fixed floor). A block of **static** in compressed space (noise) is **repeatedly nudged** toward that meaning by a 33B sculptor that watches every patch attend to every other (the DiT, the loop — Turbo cuts the loop count). The result is a **clean compressed dream**, which two decoders **expand into pixels and sound** (the VAEs, the frame-count spike). We upscale and mux.
+> A sentence becomes a **coordinate in meaning-space** (the encoder, 26 GB, run once and then evicted). A block of **static** in compressed space is **repeatedly nudged** toward that meaning by a 20 GB transformer whose 50 blocks are streamed from RAM on every step, and inside which every video and audio token weighs every other. The result is a **clean compressed description of a video**, which two decoders **expand into pixels and sound**. Mux, and optionally upscale.
 
-Every number we chased — the 6.5 GB floor, the 362-frame ceiling, the 5× Turbo win, the "resolution is cheap but not free" — is just a consequence of *where* in this journey the data is heaviest. Understand the journey, and the whole cost profile stops being mysterious.
+Every number this project chased is a consequence of where in that journey the data is heaviest. The 26 GB encoder sets a fixed cost that does not care how long the clip is. The loop sets a cost that scales quadratically with tokens and linearly with steps. The decode sets a cost that scales with frame count and nothing else. Three different curves, three different failure modes — and once the shape of each is clear, the cost profile stops being mysterious.
 
 ---
 
 ## The pixel question: regression, not classification
 
-If you know how an **LLM** outputs text, you might expect an image model to work the same way. It does **not**, and this is the single most-missed idea.
+There is one idea left, and it is the most commonly missed. Anyone who knows how a language model produces text will assume an image model works the same way. It does not.
 
 <table>
-<tr><th></th><th>LLM (text)</th><th>Image/Video model</th></tr>
-<tr><td>Final act</td><td><b>Classification</b> — logits over a ~50k vocabulary → softmax → <b>sample one discrete token</b></td><td><b>Regression</b> — directly <b>compute continuous numbers</b> (floats), all at once</td></tr>
-<tr><td>Output type</td><td>discrete symbol (1 of 50,000)</td><td>continuous values, no vocabulary</td></tr>
-<tr><td>Randomness</td><td>every token is sampled from a distribution</td><td>only the <b>initial noise seed</b>; the rest is deterministic math</td></tr>
+<tr><th></th><th>LLM (text)</th><th>Image/video model</th></tr>
+<tr><td>Final act</td><td><b>Classification</b> — logits over a ~50k vocabulary → softmax → <b>sample one discrete token</b></td><td><b>Regression</b> — directly <b>compute continuous numbers</b>, all at once</td></tr>
+<tr><td>Output type</td><td>a discrete symbol, one of ~50,000</td><td>continuous values; there is no vocabulary</td></tr>
+<tr><td>Where randomness enters</td><td>every token is drawn from a distribution</td><td>only the <b>initial noise seed</b>; the rest is deterministic arithmetic</td></tr>
 </table>
 
-**There is no softmax over 0–255. The network never "picks" a pixel value from a distribution.** It regresses continuous numbers, and the 0–255 is a dumb rescale at the very end:
+**There is no softmax over 0–255. The network never picks a pixel value from a distribution.** It regresses continuous numbers, and the conversion to bytes at the end is a rescale that a pocket calculator could do.
 
-```
-DiT            → latent floats            (~ -4 … +4)
-Visual VAE     → RGB floats (via tanh)    ( -1 … +1 )
-final rounding → pixel = round((x+1) * 127.5)   → 0 … 255   ← the "bits"
-Audio VAE      → audio floats [-1,1] → × 32767  → int16     ← the audio "bits"
-```
+<svg viewBox="0 0 760 216" width="100%" style="max-width:920px" role="img" aria-label="The number ladder: the transformer outputs latent floats, the visual VAE outputs RGB floats between minus one and one which are rounded into bytes, and the audio VAE outputs floats scaled into sixteen-bit integers; no step involves a softmax.">
+  <defs>
+    <marker id="n1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">NO SOFTMAX ANYWHERE ON THIS LADDER</text>
+  <rect x="2" y="76" width="156" height="52" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="80" y="98" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">DiT output</text>
+  <text x="80" y="115" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">latent floats, ~ −4 … +4</text>
+  <rect x="200" y="34" width="176" height="52" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="288" y="56" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Visual VAE, via tanh</text>
+  <text x="288" y="73" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">RGB floats, −1 … +1</text>
+  <rect x="200" y="130" width="176" height="52" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="288" y="152" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Audio VAE</text>
+  <text x="288" y="169" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">audio floats, −1 … +1</text>
+  <rect x="418" y="34" width="176" height="52" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="506" y="56" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">round((x+1) × 127.5)</text>
+  <text x="506" y="73" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">plain arithmetic</text>
+  <rect x="418" y="130" width="176" height="52" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="506" y="152" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">x × 32767</text>
+  <text x="506" y="169" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">plain arithmetic</text>
+  <rect x="636" y="34" width="120" height="52" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="696" y="56" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">0 … 255</text>
+  <text x="696" y="73" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">the "bits"</text>
+  <rect x="636" y="130" width="120" height="52" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="696" y="152" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">int16</text>
+  <text x="696" y="169" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">audio samples</text>
+  <path d="M160,94 L196,68" fill="none" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <path d="M160,110 L196,150" fill="none" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <line x1="378" y1="60" x2="414" y2="60" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <line x1="378" y1="156" x2="414" y2="156" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <line x1="596" y1="60" x2="632" y2="60" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <line x1="596" y1="156" x2="632" y2="156" stroke="#6f7b8f" marker-end="url(#n1)"/>
+  <text x="2" y="206" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the intelligence is in producing the right floats — turning them into bytes is quantization for the file format</text>
+</svg>
 
-That last line is where "every bit is 0–255" comes from — plain arithmetic, **not learned, not sampled.** The intelligence is in producing the right *floats*; turning them into bytes is just quantization for the file format.
+**Why the difference is fundamental.** Words are discrete symbols: token 128 and token 129 are unrelated, so the only sensible operation is to *classify*. Pixels are a continuous signal: 128 and 129 are nearly the same shade, so the sensible operation is to *regress*. Diffusion trains the network to predict the continuous noise to remove, which is a mean-squared-error regression target — never a per-pixel classification over 256 categories.
 
-**Why the difference is fundamental:** words are discrete symbols (128 ≠ 129 are unrelated), so you *classify*. Pixels are a continuous signal (128 vs 129 is nearly identical), so you *regress* — and diffusion trains the network to **predict the continuous noise to remove**, an MSE regression target, never a per-pixel classification.
+<div class="callout warn"><span class="t">One word, two meanings</span>
+<p><b>"Sampling"</b> means different things on either side of this divide. In a language model it means drawing a token from a probability distribution, and it is the source of that model's randomness. In diffusion it means <em>the denoising loop itself</em> — integrating a trajectory — and it has nothing to do with per-pixel probability.</p>
+<p>Which is why the same seed and the same prompt give the same video, frame for frame. The only randomness in the entire render was the block of static it started from.</p></div>
 
-One more trap: the word **"sampling"** means two different things. In an LLM it's *drawing a token from a distribution*. In diffusion it's *the denoising loop* (integrating the ODE) — nothing to do with per-pixel probability. Same seed + same prompt = the same video, pixel for pixel.
+## What this journey does not include
+
+- **No retrieval.** Nothing is looked up, because there is nothing to look up.
+- **No notion of truth.** The objective is plausibility. A confident wrong output is the system working as designed.
+- **No reliable text.** Readable on-screen lettering is out of reach for any current video diffusion model; letters come out as plausible-looking marks.
+- **No guarantee of identity across clips.** A photoreal face rendered twice will drift; stylised characters hold far better.
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">token</span><span class="badge">conditioning</span><span class="badge">latent space</span><span class="badge">latent channels</span><span class="badge">patch</span><span class="badge">step</span><span class="badge">scheduler</span><span class="badge">noise prediction</span><span class="badge">attention</span><span class="badge">joint video+audio sequence</span><span class="badge">VAE / decode</span><span class="badge">tiling</span><span class="badge">mux</span><span class="badge">regression vs classification</span><span class="badge">seed</span></p>
+<p>If those feel solid, the whole cost profile of this project is now readable from first principles.</p></div>
+
+Next: a bridge for anyone who did computer vision before the field forked in 2017 — what actually changed, and the four ideas that close the gap.
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

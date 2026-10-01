@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>39 · Choosing the Next Card</title>
+<meta name="description" content="The honest answer changed: with native 720p at 15 seconds now rendering on three 8 GB cards, a bigger card buys time rather than capability — and the measured cost table says how much.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 39 · The buyer's guide — capacity, rate, and a conclusion that had to be rewritten</span>
+
+# Choosing the Next Card
+
+<p class="lede">A bigger card now buys <b>time, not capability</b> — and that is a change from what this chapter originally said. Native 720p at 15 seconds renders on the three 8 GB cards already in the box; it just costs about <b>44 hours</b>. So the buying question stopped being "what can this hardware not do" and became "what is worth waiting for."</p>
+
+That reframing is the whole chapter, and it is worth being precise about how much moved. Here is what renders on three RTX 3060 Ti cards today, every row a file that exists ([ch.47](47-the-scorecard.html)):
+
+| Resolution × frames | Duration | Steps | Denoise | Verdict |
+|---|---|---|---|---|
+| 512×288 × 345 | 15 s | 49 | 66 min | **beautiful** |
+| 832×480 × 124 | 5 s | 4–50 | minutes to 1 h | the workhorse |
+| **1280×704** × 124 | 5 s | 23 | 55 min | **beautiful** |
+| **1280×704** × 345 | **15 s** | 23 | **~44 h** | renders natively |
+
+Nothing in that table is out of reach. One row of it costs two days.
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p>Buying decisions on this workload split into two questions that are usually merged into one. <b>Capacity</b> — does the job fit — is now answered by three small cards and the engine that splits work across them. <b>Rate</b> — how long the job takes — is not. Every remaining reason to buy hardware is a rate reason, and rate is worth much less per dollar than capacity was.</p></div>
+
+The workshop version: a bigger bench and a faster machine tool solve different problems. For a year the bench was too small, so everything looked like a bench problem. Bolting three small benches together solved it. What is left to buy is spindle speed, and a faster spindle does not make anything *possible* — it makes work *finish sooner*.
+
+## 1 · What a card can no longer buy
+
+The original version of this chapter was written when native 720p was out of reach, and it recommended a 24 GB card partly on the grounds that some things simply needed one. That reasoning is now dead, and it is instructive to see exactly what killed it.
+
+It was not a purchase. It was three pieces of software:
+
+- **Tiling every per-token operation** put a full 15 seconds at 480p, and 5 seconds at native 720p, on a *single* 8 GB card ([ch.44](44-building-dalang.html)).
+- **Sequence parallelism** split one 93,000-token sequence across three cards, holding what no single card can ([ch.45](45-three-gpu-sequence-parallelism.html)).
+- **One line in the VAE decoder** — moving finished pixel chunks to CPU instead of letting them accumulate on the GPU — turned a decode that ran out of memory at 720p into one that finished, dropping residency from 7729 to 5639 MiB ([ch.46](46-the-first-15-seconds.html)).
+
+<div class="callout warn"><span class="t">A wall is a hypothesis, not a verdict</span>
+<p>That last one deserves attention from anyone about to spend money. "It runs out of memory at 720p" sounds exactly like a hardware ceiling, and it invites a purchase. It was <b>finished output loitering in the wrong memory</b> — an accumulation bug, not a capacity limit. Before concluding that a job does not fit, check whether something inside it is holding data it no longer needs. The cheapest upgrade measured in this whole project was a single line of Python.</p></div>
+
+## 2 · The thing everyone gets backwards: VRAM is not "a bigger quant"
+
+The tempting logic runs: *we run int8 now; more VRAM would let us run a bigger, better quant.* That is backwards in two separate ways.
+
+**First, more bits means more memory, not less.** Quantization *shrinks* a model. The arithmetic ladder, at bytes per parameter:
+
+| Precision | Bytes / param | For 20 billion parameters | Direction |
+|---|---|---|---|
+| **fp16 / bf16** — highest precision | 2 | ~40 GB | biggest |
+| **int8** — what this box runs | 1 | **20 GB** | middle |
+| **int4 / Q4** — most compressed | 0.5 | ~10 GB | smallest |
+
+The middle row is not arithmetic, it is the file. The shipped int8 transformer measures **20 GB** on disk, and the parameter count derived from its own config — about 395 M parameters per block across 50 blocks — comes to roughly **20 billion**, which at one byte each closes exactly ([ch.03](03-how-h3-works.html)). The original bf16 release of the transformer is about **66 GB**, larger than the ladder suggests because the shipped int8 build is also pruned.
+
+So int8 is a *middle* rung, not a ceiling. A "bigger" quant needs **more** VRAM. Small VRAM pushes a build *down* the ladder toward int4 — the opposite of being stuck at int8 and needing room to climb.
+
+**Second, the higher precision was already run, and it changed nothing.**
+
+<div class="callout truth"><span class="t">Precision is not the quality lever — measured</span>
+<p><b>int8, Q4 and fp16 are indistinguishable on this model.</b> In a head-to-head on the same scene, the higher-precision render was not visibly better; what moves quality is <b>framing, face size and step count</b> ([ch.17](17-what-actually-improves-quality.html)), not the number format. Buying VRAM in order to run a better quant buys the <em>exact quality already in hand.</em></p></div>
+
+## 3 · Does 24 GB make the model resident? Work it out
+
+This is where the original chapter's arithmetic needs redoing with the measured file sizes rather than the estimated ones.
+
+The claim to test is that a 24 GB card holds the whole model with no offload, eliminating per-step streaming. The pieces: the int8 transformer is **20 GB**, and a render's activation working set was measured at about **5.7 GB** at roughly 25,000 tokens ([ch.36](36-splitting-the-video-cp.html)).
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Three bars against a 24 gigabyte card limit. Int8 weights at 20 gigabytes plus 5.7 gigabytes of activation comes to 25.7 gigabytes and overflows a 24 gigabyte card. A hypothetical Q4 build at about 10 gigabytes plus the same activation fits with room to spare. On an 8 gigabyte card only one streamed block, about 0.65 gigabytes, is resident at a time, and the activation is what fills the card.">
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WOULD 24 GB HOLD IT? WORK IT OUT WITH THE MEASURED SIZES</text>
+  <line x1="120" y1="34" x2="120" y2="238" stroke="#232c3b"/>
+  <line x1="624" y1="34" x2="624" y2="238" stroke="#ffb454" stroke-dasharray="6 4"/>
+  <text x="632" y="46" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">24 GB card</text>
+  <text x="4" y="76" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">int8, resident</text>
+  <rect x="120" y="58" width="420" height="40" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <rect x="540" y="58" width="120" height="40" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="330" y="83" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">weights 20 GB</text>
+  <text x="600" y="83" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">act. 5.7</text>
+  <text x="668" y="83" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">25.7 — over</text>
+  <text x="4" y="148" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Q4, resident</text>
+  <text x="4" y="166" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">arithmetic only</text>
+  <rect x="120" y="130" width="210" height="40" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="330" y="130" width="120" height="40" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="225" y="155" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">weights ~10 GB</text>
+  <text x="390" y="155" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">act. 5.7</text>
+  <text x="458" y="155" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">~16 — fits, with room</text>
+  <text x="4" y="220" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">int8, streamed</text>
+  <text x="4" y="238" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">what this box does</text>
+  <rect x="120" y="202" width="14" height="40" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="134" y="202" width="120" height="40" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="194" y="227" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">act. 5.7</text>
+  <text x="264" y="227" fill="#7aa2ff" font-size="11.5" font-family="Inter,sans-serif">one 0.65 GB block at a time — the activation is the wall</text>
+</svg>
+
+Read the top bar carefully, because it reverses the old advice: **20 + 5.7 = 25.7 GB does not fit a 24 GB card.** A single 24 GB card running int8 would *still* stream weights. The "zero offload" promise only holds for a Q4 build, where the arithmetic is roughly 10 GB of weights plus the same activation — and no Q4 build of this pruned transformer has been measured here, so that row is arithmetic, not a measurement.
+
+The bottom bar is the important one anyway. On an 8 GB card, weights are not what fills the card: **one streamed block is about 0.65 GB** ([ch.36](36-splitting-the-video-cp.html)), and roughly **88%** of the peak was activation and matmul working buffers, not resident weights ([ch.14](14-the-math-behind-it.html)). The whole "fit the model" framing was aimed at the smaller half of the problem all along.
+
+## 4 · The number that sets render speed — and the measurement that corrected it
+
+This chapter used to say, plainly, that denoise is memory-bound and therefore memory bandwidth sets render speed. Profiling on the box says otherwise, and the honest thing is to show both.
+
+<div class="callout warn"><span class="t">What was claimed, and what was measured</span>
+<p><b>The claim:</b> "denoising is memory-bound — the wall-clock is dominated by moving weights, not by doing maths — so a card with double the bandwidth renders each step roughly twice as fast."</p>
+<p><b>The measurement:</b> at the configuration profiled, the box ran at <b>SM 100%</b> with about <b>8 seconds per step</b>, and streaming the whole model from RAM accounted for roughly <b>1 to 1.5 seconds</b> of that. Eliminating <em>all</em> streaming would therefore cap the win at about <b>1.1–1.15×</b>. The shader cores are saturated; the transfer is largely hidden behind them.</p></div>
+
+<svg viewBox="0 0 760 208" width="100%" style="max-width:920px" role="img" aria-label="A bar showing one denoise step of about eight seconds, of which roughly one and a half seconds is weight streaming from RAM and the rest is saturated compute. Removing all streaming leaves a step of about six and a half to seven seconds, which is a speedup of only about one point one times.">
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHERE ONE DENOISE STEP GOES</text>
+  <text x="4" y="60" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">one step, as measured</text>
+  <rect x="180" y="42" width="450" height="40" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="630" y="42" width="106" height="40" rx="5" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="405" y="67" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">compute — SM at 100%</text>
+  <text x="683" y="67" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">streaming</text>
+  <text x="740" y="67" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">8 s</text>
+  <text x="4" y="128" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">with streaming abolished</text>
+  <rect x="180" y="110" width="450" height="40" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="630" y="110" width="106" height="40" rx="5" fill="#12161f" stroke="#232c3b" stroke-dasharray="4 3"/>
+  <text x="405" y="135" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">compute — unchanged</text>
+  <text x="683" y="135" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">gone</text>
+  <text x="4" y="186" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">Best case from killing offload entirely: about 1.1x. Not the 2x that "memory-bound" implied.</text>
+</svg>
+
+This does not make bandwidth irrelevant — a card with more bandwidth generally also has more shader cores, and the two arrive together. It does mean the *reason* to want a bigger card is not the one the old text gave. **Killing offload is not where the hours are.** The hours are in doing the arithmetic, fifty blocks at a time, once per step.
+
+## 5 · The speed-up that actually happened was software
+
+The one measured 2× on this box did not come from a card. It came from changing which kernel does the multiply.
+
+The same scene, the same pipeline, the same seed, int8 against a **Q4_K_M** build ([ch.13](13-int8-vs-q4.html)):
+
+| Metric | int8 (with our patch) | Q4_K_M | Result |
+|---|---|---|---|
+| Render time | 6393 s (**107 min**) | 3122 s (**52 min**) | **Q4, 2.05× faster** |
+| Native resolution | 576×320 | 704×384 | **Q4, 47% more pixels** |
+| Peak VRAM | 7.5 GB | 7.06 GB | **Q4, lower** |
+| Quality by eye | ~85 | ~85 | **tie, within noise** |
+
+Q4 was faster *while rendering at a higher resolution*, which makes the gap stronger than the headline. The mechanism is specific and worth knowing, because it is the kind of thing a spec sheet cannot tell anyone: the production int8 path **dequantizes back to bf16** and never engages the INT8 tensor cores at all, while the Q4 path dequantizes to fp16 and runs one ordinary matmul — and it sidesteps the 2.24 GB `fast_int8_mm` temporary entirely, which is also why it fits more pixels at lower VRAM ([ch.14](14-the-math-behind-it.html)).
+
+<svg viewBox="0 0 760 240" width="100%" style="max-width:920px" role="img" aria-label="Two kernel paths for the same linear layer. The int8 path unpacks weights, dequantizes back to bf16, allocates a 2.24 gigabyte int32 temporary, runs the matmul without engaging INT8 tensor cores, and rescales per row, taking 107 minutes. The Q4 path unpacks, dequantizes to fp16, and runs one standard matmul with no large temporary, taking 52 minutes at a higher resolution.">
+  <defs>
+    <marker id="nc1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SAME LINEAR LAYER, TWO KERNEL PATHS</text>
+  <text x="4" y="60" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">int8</text>
+  <rect x="60" y="40" width="122" height="40" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="121" y="65" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">unpack int8</text>
+  <line x1="184" y1="60" x2="204" y2="60" stroke="#6f7b8f" marker-end="url(#nc1)"/>
+  <rect x="208" y="40" width="150" height="40" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="283" y="65" text-anchor="middle" fill="#ffdede" font-size="11" font-family="Inter,sans-serif">dequantize to bf16</text>
+  <line x1="360" y1="60" x2="380" y2="60" stroke="#6f7b8f" marker-end="url(#nc1)"/>
+  <rect x="384" y="40" width="178" height="40" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="473" y="65" text-anchor="middle" fill="#ffdede" font-size="11" font-family="Inter,sans-serif">2.24 GB int32 temporary</text>
+  <line x1="564" y1="60" x2="584" y2="60" stroke="#6f7b8f" marker-end="url(#nc1)"/>
+  <rect x="588" y="40" width="168" height="40" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="672" y="65" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">matmul, then rescale</text>
+  <text x="60" y="104" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">INT8 tensor cores never engaged. 107 min, 576 x 320, 7.5 GB peak.</text>
+  <line x1="4" y1="126" x2="756" y2="126" stroke="#232c3b"/>
+  <text x="4" y="172" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">Q4</text>
+  <rect x="60" y="152" width="122" height="40" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="121" y="177" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">unpack Q4</text>
+  <line x1="184" y1="172" x2="204" y2="172" stroke="#6f7b8f" marker-end="url(#nc1)"/>
+  <rect x="208" y="152" width="150" height="40" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="283" y="177" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">dequantize to fp16</text>
+  <line x1="360" y1="172" x2="380" y2="172" stroke="#6f7b8f" marker-end="url(#nc1)"/>
+  <rect x="384" y="152" width="178" height="40" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="473" y="177" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">one standard matmul</text>
+  <text x="588" y="177" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">no large temporary</text>
+  <text x="60" y="216" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">52 min, 704 x 384, 7.06 GB peak — faster at a higher resolution, quality a tie.</text>
+</svg>
+
+<div class="callout warn"><span class="t">The caveats, so this is not over-read</span>
+<p><b>One scene, one seed.</b> A strong signal, not a verdict across crowds, fast motion or other subjects. <b>Part of the gap is self-inflicted:</b> our own row-blocking patch added per-row loop overhead to int8, so this is "Q4 versus <em>our patched</em> int8", not "Q4 versus raw int8". And <b>quality was judged by eye</b>, with no PSNR or LPIPS. Honest read: <b>indistinguishable</b>, with int8 the higher-fidelity reference that Q4 matches rather than beats.</p></div>
+
+The lesson for a buyer stands regardless of the caveats. A software change produced a **2.05×** on this workload. The measured ceiling from abolishing all weight streaming is about **1.15×**. It is worth being sure the software is finished before concluding the hardware is the problem.
+
+## 6 · So what does a bigger card actually buy?
+
+Time, at a knowable exchange rate. The measured cost of denoise, per step, on this box:
+
+| Configuration | s/step | 23 steps | 49 steps |
+|---|---|---|---|
+| 512×288 × 345 | 81 s | 0.5 h | 1.1 h |
+| 1280×704 × 124 | 143 s | 0.9 h | 1.9 h |
+| 832×480 × 345 | 193 s | 1.2 h | **2.6 h** |
+| 1280×704 × 345, three cards sharded | **6600 s** | **42 h** | **90 h** |
+
+A card that were genuinely twice as fast end to end would turn 44 hours into 22, and 2.6 hours into 1.3. That is the entire purchase, stated honestly: **the same films, sooner.**
+
+<div class="callout spec"><span class="t">Two cheaper levers hit the same number harder</span>
+<p>Look at the last row against the third. Going from 832×480×345 to 1280×704×345 is <b>2.26× the tokens</b>, and quadratic attention predicts about <b>5×</b> the time. Measured: <b>34×</b>. The three-card sharded path carries roughly <b>7× overhead beyond the mathematics</b> — hand-rolled ring attention in Python loops, plus a copy of every block to every card, every step ([ch.45](45-three-gpu-sequence-parallelism.html)). That overhead is <em>ours</em>, and optimising it is free.</p>
+<p>And the step count is a property of the <b>scene</b>, not the model: 4 steps for a tight close-up, 23 for a character mid-shot, 49 for a wide vista with a small distant subject ([ch.47](47-the-scorecard.html)). Cutting a habitual 49 to a justified 23 halves the bill on hardware already owned.</p></div>
+
+Against that, the route the measurements actually recommend costs nothing at all:
+
+| Route | Denoise | Output |
+|---|---|---|
+| **832×480 × 345 at 49 steps, then a 1.54× upscale** | **2.6 h** | 15 s, 720p-class, well-sampled |
+| Native 1280×704 × 345 at 49 steps | **90 h** | 15 s, true native |
+
+Roughly **35× cheaper** for a difference most viewers cannot see. Before spending money to make the 90-hour route into a 45-hour route, it is worth noticing that the 2.6-hour route already exists.
+
+## 7 · The three vendors, for this exact workload
+
+Everything above is vendor-neutral. The *software* is not — this whole stack is CUDA.
+
+| | **NVIDIA** (used 3090) | **AMD** (RX 7900 XTX) | **Intel** (Arc Pro B60) |
+|---|---|---|---|
+| VRAM | 24 GB | 24 GB | 24 GB |
+| Bandwidth | **936 GB/s** | ~960 GB/s | **456 GB/s** |
+| Price | ~$700 used | ~$900 | ~$600 new |
+| Software stack | **CUDA — this code runs unchanged** | ROCm; a port, and the 7900 XTX is the one supported consumer card | oneAPI / SYCL / IPEX, thinnest for diffusion video |
+| Runs H3 today | yes | with porting work | pioneer territory |
+| Best for | **running this pipeline** | learning ROCm, and capable | cheap LLM inference |
+
+For reference, the cards in the box run at about **448 GB/s** each — and so does an RTX 5060 Ti 16 GB. Newer silicon, identical bandwidth. Model year is not the number to read.
+
+<div class="callout danger"><span class="t">Two traps</span>
+<ol>
+<li><b>Cross-vendor cannot pool.</b> Two NVIDIA cards plus two AMD cards is <em>not</em> a four-GPU box. CUDA and ROCm are separate worlds — no shared memory, no cross-vendor collective, no ring. It is two independent rigs sharing a chassis, and everything in <a href="36-splitting-the-video-cp.html">ch.36</a> and <a href="45-three-gpu-sequence-parallelism.html">ch.45</a> assumes one world.</li>
+<li><b>A 24 GB card with slow memory is the wrong trade.</b> The Intel B60 holds 24 GB at 456 GB/s. Capacity without rate is precisely the axis that is no longer the constraint here.</li>
+</ol></div>
+
+## 8 · To learn a non-CUDA stack, spend nothing first
+
+If the goal is not "run this pipeline better" but "learn AMD or Intel as a skill," there is no reason to buy hardware to find out whether it is enjoyable. The **AMD AI Developer Program** provides **$100 of free AMD Developer Cloud credits** on **Instinct MI300X** GPUs — 192 GB of VRAM, ROCm and PyTorch pre-installed, no setup. Learn ROCm on properly supported hardware for free, then decide whether to buy a Radeon.
+
+The consumer AMD reality is worth knowing before committing: only the 7900 XTX is fully supported, and cards like the 6700 XT need the `HSA_OVERRIDE_GFX_VERSION=10.3.0` spoof and can segfault on newer ROCm. Cheap, and rough.
+
+## 9 · The recommendation, by goal
+
+<div class="callout truth"><span class="t">Buy for the actual goal</span>
+<ol>
+<li><b>"Finish the same work sooner."</b> A used <b>RTX 3090, 24 GB</b>, around $700. More bandwidth and more shader cores than a 3060 Ti, 24 GB of capacity, and this stack runs on it unchanged. Buy it for the clock, not for a capability — the capabilities already exist.</li>
+<li><b>"New, warranted, low power, same speed accepted."</b> An <b>RTX 5060 Ti 16 GB</b>. Double the VRAM of one 3060 Ti at the same 448 GB/s, so per-step speed is unchanged.</li>
+<li><b>"Learn a non-NVIDIA stack."</b> The <b>free AMD MI300X cloud</b> first, at zero cost. A 7900 XTX only if it becomes a habit.</li>
+<li><b>"Cheapest 24 GB for LLM inference."</b> The Intel B60 — but not for this video pipeline.</li>
+<li><b>"Spend nothing."</b> Genuinely competitive with all of the above, on the evidence in this chapter: fix the 7× overhead in the sharded path, budget steps by scene instead of by habit, and take the 832×480-plus-upscale route that is already about 35× cheaper.</li>
+</ol></div>
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>The conclusion changed.</b> Native 720p × 15 s renders on three 8 GB cards, at about 44 hours. A bigger card buys <b>time</b>, not capability.</li>
+<li><b>Capacity and rate are different purchases.</b> Capacity was solved in software — tiling, sequence parallelism, and one line in the VAE decoder. Rate was not.</li>
+<li><b>More VRAM is not a bigger quant.</b> More bits means more memory. int8 is a middle rung; small VRAM pushes downward toward int4, not upward.</li>
+<li><b>Precision is not the quality lever</b> — int8, Q4 and fp16 are indistinguishable here. Framing, face size and steps are what move quality.</li>
+<li><b>24 GB would not make the int8 model resident.</b> 20 GB of weights plus about 5.7 GB of activation is 25.7 GB. The old "zero offload" promise only holds for a Q4 build.</li>
+<li><b>"Memory-bound" was the wrong diagnosis.</b> Measured at SM 100% and about 8 s per step with roughly 1–1.5 s of streaming, abolishing all offload caps out near <b>1.1–1.15×</b>.</li>
+<li><b>The only measured 2× came from software</b> — a Q4 kernel path, 52 minutes against 107, at higher resolution and lower VRAM, quality a tie. With caveats: one scene, one seed, and a patched int8 baseline.</li>
+<li><b>CUDA is the moat.</b> This stack runs unchanged only on NVIDIA, and cross-vendor cards cannot pool into one job.</li>
+<li><b>The cheapest upgrade in this project was one line of Python.</b> Check the software before concluding the hardware is the problem.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">capacity vs rate</span><span class="badge">memory bandwidth</span><span class="badge">memory-bound vs compute-bound</span><span class="badge">SM occupancy</span><span class="badge">resident vs streamed weights</span><span class="badge">quantization ladder</span><span class="badge">Q4_K_M</span><span class="badge">tensor cores</span><span class="badge">ROCm</span><span class="badge">oneAPI</span><span class="badge">cross-vendor pooling</span><span class="badge">steps by scene</span></p>
+<p>If those feel solid, the next chapter goes back to changing the model itself rather than the machine under it.</p></div>
+
+Next: LoRA — how a frozen giant can be nudged by a tiny file, and why that nudge made the picture worse at 480p.
+
+<p class="small">The hardware and budget frontier this extends is <a href="27-hardware-budget-audit.html">ch.27</a>; the render relay and where its time goes is <a href="30-the-render-live.html">ch.30</a>; why precision does not move quality is <a href="17-what-actually-improves-quality.html">ch.17</a>; the int8 versus Q4 benchmark is <a href="13-int8-vs-q4.html">ch.13</a>; where the numbers physically live is <a href="29-where-numbers-live.html">ch.29</a>; the interconnect limits behind cross-vendor and multi-card work are <a href="16-multi-gpu-and-nvlink.html">ch.16</a> and <a href="24-pcie-nvlink-interconnect.html">ch.24</a>; the engine that removed the capability argument is <a href="44-building-dalang.html">ch.44</a> and <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; the full measured ledger is <a href="47-the-scorecard.html">ch.47</a>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

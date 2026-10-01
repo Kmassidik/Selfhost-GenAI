@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>41 · Python Is the Glue, CUDA Is the Engine</title>
+<meta name="description" content="Why a system that grinds for hours is written in a slow language: what happens between a line of Python and a CUDA kernel, why the render is GPU-bound, and the one place Python's design really does cost something.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 41 · Where the code is — and where Python isn't even running</span>
+
+# Python Is the Glue, CUDA Is the Engine
+
+<p class="lede"><b>Python does not compute anything in this system.</b> It decides which compiled kernel should run, hands that kernel a few pointers, and then waits — sometimes for minutes — while C++ and CUDA do the arithmetic on the graphics card. That is what "glue, not engine" means, and it is why the obvious objection to the whole stack ("isn't Python slow?") turns out to be answering a question nobody here is asking.</p>
+
+The objection is reasonable. A render of a five-second 720p clip at 23 steps took **3,295 seconds — fifty-five minutes** on this box. Watching a machine grind for that long, in a language famous for being one of the slowest in common use, invites the thought that a rewrite in something faster would help. It would not. Not by a second. This chapter is why, in enough detail that the claim is checkable rather than a slogan — and it ends with the one place where Python's design genuinely did cost this project something real, which was not its speed.
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p><b>Python is the switchboard operator, not the conversation.</b> When PyTorch runs a matrix multiply or an attention call, Python <em>dispatches</em>: it inspects the tensors, chooses a kernel written in C++/CUDA — cuBLAS, cuDNN, a FlashAttention backend — and launches it. Connecting the call takes microseconds. The call itself then lasts for a long time. Nobody measures a telephone network by how fast the operator plugs in the jack.</p></div>
+
+## 1 · What actually happens when a tensor is multiplied
+
+One innocent line of Python. Here is the journey it takes, almost none of it in Python.
+
+<svg viewBox="0 0 760 348" width="100%" style="max-width:920px" role="img" aria-label="The path of a single tensor operation: a line of Python crosses auto-generated C++ bindings into the ATen dispatcher, which reads the tensor's dispatch key set to learn its device and dtype and then selects either a CUDA kernel such as cuBLAS, cuDNN or FlashAttention, or a CPU kernel; the GPU then executes for far longer than everything above it took.">
+  <defs>
+    <marker id="p1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="p2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE LINE OF PYTHON, FOLLOWED ALL THE WAY DOWN</text>
+  <rect x="188" y="26" width="384" height="44" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="380" y="53" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">Python — a.matmul(b)</text>
+  <text x="580" y="53" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">microseconds</text>
+  <line x1="380" y1="72" x2="380" y2="90" stroke="#6f7b8f" marker-end="url(#p1)"/>
+  <rect x="188" y="94" width="384" height="44" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="121" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">auto-generated pybind11 C++ bindings</text>
+  <text x="580" y="121" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Python ends here</text>
+  <line x1="380" y1="140" x2="380" y2="158" stroke="#6f7b8f" marker-end="url(#p1)"/>
+  <rect x="188" y="162" width="384" height="64" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="186" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">ATen dispatcher — reads the DispatchKeySet</text>
+  <text x="380" y="208" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">which device? which dtype? which layout?</text>
+  <line x1="270" y1="228" x2="180" y2="256" stroke="#6f7b8f" marker-end="url(#p1)"/>
+  <line x1="490" y1="228" x2="580" y2="256" stroke="#5ee0c0" marker-end="url(#p2)"/>
+  <text x="196" y="248" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">device = CPU</text>
+  <text x="500" y="248" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">device = CUDA</text>
+  <rect x="2" y="260" width="222" height="52" rx="7" fill="#12161f" stroke="#3a4a63"/>
+  <text x="113" y="284" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">CPU kernel</text>
+  <text x="113" y="302" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">MKL / oneDNN</text>
+  <rect x="392" y="260" width="366" height="52" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="575" y="284" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">CUDA kernel — cuBLAS · cuDNN · FlashAttention</text>
+  <text x="575" y="302" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">hand-tuned C++/CUDA, compiled for sm_86</text>
+  <line x1="575" y1="314" x2="575" y2="330" stroke="#5ee0c0" marker-end="url(#p2)"/>
+  <text x="575" y="344" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">the GPU runs — this is where the fifty-five minutes go</text>
+</svg>
+
+Step by step:
+
+1. **Python** calls `a.matmul(b)` — and immediately leaves Python, through **auto-generated C++ bindings**. There is no Python interpreter loop around the arithmetic; there is a Python interpreter loop around the *decision*.
+2. **ATen**, PyTorch's C++ tensor library, receives the call. Every operator in PyTorch is declared in one central file, `native_functions.yaml`, with its dispatch rules per backend.
+3. **The dispatcher** inspects the tensors' `DispatchKeySet` — device, dtype, layout — and selects a kernel dynamically. This is the mechanism that lets the identical line of source run on a CPU tensor, a CUDA tensor, or an Apple-MPS tensor.
+4. For a CUDA tensor it calls a **hand-optimized CUDA kernel**: cuBLAS for matrix multiplies, cuDNN for convolutions, a FlashAttention backend for attention ([ch.34](34-open-use-close-flashattention.html)). These are C++ and CUDA, written by NVIDIA and by researchers, and compiled for a specific compute capability — sm_86 on this hardware ([ch.04](04-software-stack.html)).
+5. **The GPU** executes. Everything above it is already finished and waiting.
+
+<div class="callout spec"><span class="t">Where the layers in <a href="04-software-stack.html">ch.04</a> actually meet</span>
+<p>The stack diagram in the software chapter shows PyTorch sitting above CUDA above the driver. This chapter is the same picture at one instant in time: the dispatcher is the exact seam where a dynamically-typed scripting language stops and a statically-compiled numerical library begins, and the <code>DispatchKeySet</code> is the passport it checks.</p></div>
+
+## 2 · The proportion, made concrete
+
+Abstract claims about overhead are easy to make and easy to doubt. The shapes of this model settle it.
+
+A single denoise step pushes the latent through **50 transformer blocks**. A 23-step render therefore executes **1,150 blocks**, and each block issues on the order of a dozen tensor operations — the projections, the rotary application, attention, the feed-forward, the norms and residual adds ([ch.34](34-open-use-close-flashattention.html)). Call it somewhere in the low tens of thousands of dispatched operations for a whole render.
+
+Now the size of one of them. Take the first feed-forward matrix multiply in one block of a five-second 480p clip, using the model's own configuration — `hidden_size` 5,376, `ffn_dim` 14,336 — and the measured sequence length of **15,129 tokens**:
+
+$$15{,}129 \times 5{,}376 \times 14{,}336 \;\approx\; 1.17 \times 10^{12} \text{ multiply-accumulates}$$
+
+**Over a trillion multiply-accumulate operations, from one Python function call.** And that is one of two matrices in the feed-forward, of one block, of fifty, of one step, of twenty-three.
+
+<div class="callout truth"><span class="t">The ratio, and how it is confirmed rather than assumed</span>
+<p>Python's contribution — parsing the line, crossing the binding, reading the dispatch keys, launching the kernel — is measured in <b>microseconds</b>. The kernel it launched then runs for milliseconds to minutes. The interpreter spends essentially the whole render blocked, waiting for a card.</p>
+<p>This is not an estimate. Profiling on this box recorded the GPU's streaming multiprocessors at <b>100% utilisation</b> during denoise. A card pinned at 100% is a card that is never waiting for its next instruction. If Python were the constraint, the profile would show gaps — the GPU idling between kernels while the interpreter caught up. There are no gaps.</p></div>
+
+<svg viewBox="0 0 760 236" width="100%" style="max-width:920px" role="img" aria-label="A timeline of one transformer block: hairline slivers of Python dispatch separated by long bars of GPU kernel execution, with a note that the pattern repeats 1,150 times in a 23-step render and that the streaming multiprocessors were measured at 100 percent utilisation.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE BLOCK ON THE TIME AXIS — PYTHON IN BLUE, GPU IN GREEN</text>
+  <rect x="2" y="32" width="756" height="60" rx="7" fill="#12161f" stroke="#232c3b"/>
+  <rect x="14" y="46" width="4" height="32" fill="#7aa2ff"/>
+  <rect x="20" y="46" width="120" height="32" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="80" y="67" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">to_q / to_k / to_v</text>
+  <rect x="146" y="46" width="4" height="32" fill="#7aa2ff"/>
+  <rect x="152" y="46" width="96" height="32" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="200" y="67" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">rotary</text>
+  <rect x="254" y="46" width="4" height="32" fill="#7aa2ff"/>
+  <rect x="260" y="46" width="200" height="32" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="360" y="67" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">attention (SDPA)</text>
+  <rect x="466" y="46" width="4" height="32" fill="#7aa2ff"/>
+  <rect x="472" y="46" width="220" height="32" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="582" y="67" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">feed-forward — ~1.17 × 10¹² MACs</text>
+  <rect x="698" y="46" width="4" height="32" fill="#7aa2ff"/>
+  <rect x="704" y="46" width="42" height="32" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="14" y="112" fill="#7aa2ff" font-size="11.5" font-family="Inter,sans-serif">the thin blue slivers are every microsecond Python spends in this block</text>
+  <rect x="2" y="128" width="756" height="46" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="148" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">× 50 blocks per step × 23 steps = 1,150 block executions in one render</text>
+  <text x="20" y="166" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">a 23-step render also moves about 460 GB of weights across PCIe — DMA transfers, not interpreter work</text>
+  <rect x="2" y="184" width="756" height="46" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="20" y="204" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">Measured on the box: streaming multiprocessors at 100% during denoise.</text>
+  <text x="20" y="222" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">A saturated card is never waiting for Python. There is nothing to reclaim above the green.</text>
+</svg>
+
+### The second reason, which is not compute at all
+
+Even the green bars above understate how far the bottleneck is from the interpreter. The 20 GB transformer does not fit in 8 GB of VRAM, so its blocks are **streamed from system RAM** for every step: about **0.4 GB per block**, which over 50 blocks and 23 steps is roughly **460 GB moved across PCIe** in a single render ([ch.29](29-where-numbers-live.html)).
+
+That traffic is DMA — the memory controller and the PCIe link doing their work while the CPU is idle. There is no language in which those bytes travel faster. A rewrite would be optimizing the sign-writing while the lorries are the queue.
+
+<div class="callout warn"><span class="t">When Python <em>would</em> be the bottleneck — and why this workload isn't it</span>
+<p>The overhead is real; it is simply fixed per call. A workload made of <b>millions of tiny operations</b> — small batches, per-element loops written in Python, reinforcement-learning steps on toy tensors — genuinely is interpreter-bound, and that is where <code>torch.compile</code>, CUDA graphs and kernel fusion earn their keep by removing per-call cost.</p>
+<p>The deciding question is never "is the language fast?" but <b>"how much arithmetic happens per dispatch?"</b> Here the answer is a trillion multiply-accumulates. Fixed overhead divided by that is not a number worth writing down.</p></div>
+
+## 3 · Why Python won, specifically for this kind of work
+
+Python is the common language of machine learning not despite being slow but because its slowness is irrelevant to work shaped like this — and three of its properties are actively load-bearing here.
+
+**It is a front end to C++ by design.** PyTorch's architecture is "Python front end, C++ dispatcher, compiled backend kernels", with the seam drawn deliberately. That is what allows the library to be pleasant to use and fast at the same time, rather than trading one for the other.
+
+**The ecosystem is there.** The H3 model definition, `diffusers`, `torchao`, `accelerate`, the NCCL bindings — all authored in Python, all calling compiled kernels underneath. On this box that is a specific version list: Python 3.12.3, torch 2.11.0+cu128, diffusers 0.40.0.dev0, torchao 0.18.0, transformers 5.16.1, accelerate 1.14.0.
+
+**Dispatch makes it device-agnostic.** The same `a.matmul(b)` runs on a CPU tensor, a CUDA tensor or an Apple-MPS tensor because step 3 of section 1 decides at runtime. Code written once follows the hardware.
+
+### The property that this project actually depended on
+
+There is a fourth reason, and for a build like this one it outweighs the other three.
+
+**Python can be modified while it runs.** This engine's entire driver layer is built on that. Phase B is the renderer; each driver monkeypatches the transformer to change *how* the forward pass executes and then calls straight into the renderer's `main()` ([ch.48](48-the-pipeline-without-comfyui.html)):
+
+| Driver | What it changes about the forward pass |
+|---|---|
+| `05_render_ring.py` | ring / context parallelism across two cards ([ch.36](36-splitting-the-video-cp.html)) |
+| `08–10_render_tiled.py` | single-card tiling — 15 s at 480p, or 5 s at 720p ([ch.44](44-building-dalang.html)) |
+| `16_render_3gpu.py` | three-GPU sequence parallelism ([ch.45](45-three-gpu-sequence-parallelism.html)) |
+
+Every one of those is a live substitution into somebody else's library, made without forking it, without recompiling it, and without waiting for an upstream release.
+
+The same property fixed a bug that had already destroyed six hours of finished work. When a decode step resolved `_execution_device` to `cuda:0` while the sharded forward returned latents on the CPU, the repair was to copy the upstream function body and change one line ([ch.46](46-the-first-15-seconds.html)). In a compiled library that is a fork and a rebuild. Here it is a file.
+
+<div class="callout truth"><span class="t">The trade, stated honestly in both directions</span>
+<p>Runtime patchability is the reason a small operation can do kernel-adjacent surgery on a library it does not maintain. It is <em>also</em> the reason the software chapter warns about version drift: a patch that copies an upstream function body cannot be reverted by an upgrade, but it can be silently <b>outdated</b> by one (<a href="04-software-stack.html">ch.04</a>). The flexibility and the fragility are the same property seen from two sides.</p></div>
+
+## 4 · The one place Python's design really did cost something
+
+Everything above says Python's *speed* is free here. Its **concurrency model** was not.
+
+CPython has a **Global Interpreter Lock**: one interpreter executes Python bytecode on one thread at a time. GPU kernels launched from Python run asynchronously and are unaffected, so for a single card this is a non-issue. For three cards driven with genuinely independent Python control flow, it is a design constraint — and the standard answer to it is not threads but **separate processes**.
+
+That is exactly what `torchrun --nproc_per_node=3` does. It does not start one program using three GPUs. It starts **three complete, separate Python processes**, one per card.
+
+<svg viewBox="0 0 760 276" width="100%" style="max-width:920px" role="img" aria-label="Two arrangements: on the left one Python interpreter whose global interpreter lock serialises Python-level control flow across three cards; on the right torchrun's three separate processes, each with its own interpreter and its own private address space, which is what forces three separate copies of the model weights in host RAM.">
+  <defs>
+    <marker id="p3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE INTERPRETER</text>
+  <rect x="2" y="26" width="330" height="216" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <rect x="26" y="48" width="282" height="52" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="167" y="70" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">one Python process</text>
+  <text x="167" y="90" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">one GIL — one bytecode thread at a time</text>
+  <line x1="167" y1="102" x2="167" y2="122" stroke="#6f7b8f" marker-end="url(#p3)"/>
+  <rect x="26" y="126" width="86" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="69" y="153" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">GPU 0</text>
+  <rect x="124" y="126" width="86" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="167" y="153" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">GPU 1</text>
+  <rect x="222" y="126" width="86" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="265" y="153" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">GPU 2</text>
+  <rect x="26" y="184" width="282" height="42" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="167" y="203" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">one address space — the model loads once</text>
+  <text x="167" y="219" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">but the parallelism must be hand-authored</text>
+  <text x="392" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT TORCHRUN ACTUALLY STARTS</text>
+  <rect x="392" y="26" width="366" height="216" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <rect x="410" y="48" width="108" height="122" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="464" y="72" text-anchor="middle" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">process 0</text>
+  <text x="464" y="90" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">own GIL</text>
+  <rect x="424" y="102" width="80" height="52" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="464" y="124" text-anchor="middle" fill="#ffdede" font-size="10.5" font-family="Inter,sans-serif">its own copy</text>
+  <text x="464" y="140" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">of the weights</text>
+  <rect x="528" y="48" width="108" height="122" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="582" y="72" text-anchor="middle" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">process 1</text>
+  <text x="582" y="90" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">own GIL</text>
+  <rect x="542" y="102" width="80" height="52" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="582" y="124" text-anchor="middle" fill="#ffdede" font-size="10.5" font-family="Inter,sans-serif">its own copy</text>
+  <text x="582" y="140" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">of the weights</text>
+  <rect x="646" y="48" width="94" height="122" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="693" y="72" text-anchor="middle" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">process 2</text>
+  <text x="693" y="90" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">own GIL</text>
+  <rect x="656" y="102" width="74" height="52" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="693" y="124" text-anchor="middle" fill="#ffdede" font-size="10.5" font-family="Inter,sans-serif">its own copy</text>
+  <text x="693" y="140" text-anchor="middle" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">of the weights</text>
+  <rect x="410" y="184" width="330" height="42" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="575" y="203" text-anchor="middle" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">three private address spaces — nothing is shared</text>
+  <text x="575" y="219" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">host RAM, not VRAM, is what ran out</text>
+  <text x="2" y="266" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">A language-level decision about threads becomes, three layers down, a hundred gigabytes of duplicated weights in system RAM.</text>
+</svg>
+
+Three processes means three private address spaces, which means three independent loads of the same weights into host RAM. Under block-streaming offload, the resident cost per process climbed until the Linux OOM-killer stepped in and the three-card run died — **not** on VRAM, which was comfortable at about 5.2 GB per card, but on system RAM ([ch.42](42-why-two-models.html), [ch.36](36-splitting-the-video-cp.html)).
+
+<div class="callout danger"><span class="t">The honest accounting</span>
+<p><b>Python's execution speed cost this project nothing.</b> Python's <b>concurrency model</b> cost it a three-GPU render — by routing multi-card work through separate processes, which is the direct cause of the memory replication that killed ring-3. That is a real, expensive consequence of a language design decision, and it has nothing whatsoever to do with the interpreter being slow.</p>
+<p>It is also the reason one of the two escape routes in <a href="42-why-two-models.html">ch.42</a> is "run a single process that drives all three cards itself" — trading the GIL back for a shared address space.</p></div>
+
+## 5 · Where a lower-level language actually would pay
+
+There is a place where C++ and CUDA win decisively, and it is not orchestration. It is **writing new kernels** — and every deep lever this project keeps circling is kernel-level:
+
+- a **more memory-efficient int8 matrix multiply**. The `fast_int8_mm` output buffer alone was a **2.24 GB** single allocation, and about **88%** of the real-tensor peak on the 8 GB card was working buffers of that kind rather than weights ([ch.13](13-int8-vs-q4.html));
+- a **fused rotary embedding**, to stop `_apply_rotary_emb` allocating roughly four full-size temporaries per call, twice per block — the exact allocation the 345-frame render died on ([ch.34](34-open-use-close-flashattention.html));
+- **chunked attention and feed-forward** over the sequence, so peak memory becomes flat in token count;
+- a faster **ring-attention communication** path for a box with no NVLink ([ch.36](36-splitting-the-video-cp.html)).
+
+Those are C++/CUDA, and that is where the remaining gains live. The catch is that correct CUDA is far harder than correct orchestration and much easier to get subtly wrong — a kernel that produces *plausible* numbers instead of *correct* ones fails silently, and video output is a poor detector of small numerical error.
+
+<div class="callout spec"><span class="t">The order of operations this project follows</span>
+<p><b>Exhaust the Python-level levers first</b> — offloading, context parallelism, tiling, sequence sharding are all pure orchestration and all reachable from the glue. <b>Drop to CUDA only for the kernel-level wins, once the easy ground is taken</b> — and hold every kernel to the same test the int8 blocking passed: verified numerically identical to the version it replaces, not merely similar.</p></div>
+
+There is one more piece of evidence that the glue was never the problem, and it is sitting in the first two lines of every render log on this machine: torchao failing to load its Hopper and Blackwell kernels, then falling back to the ones Ampere implements ([ch.04](04-software-stack.html)). Even the *choice of which compiled kernel exists* is made below Python. The interpreter is not deciding much of consequence — which is precisely why its speed does not matter.
+
+<div class="callout truth"><span class="t">The chapter in five lines</span>
+<ol>
+<li><b>Python is glue, not engine.</b> It dispatches; it does not compute.</li>
+<li><b>The compute is already C++/CUDA</b> — cuBLAS, cuDNN, FlashAttention — reached through ATen's dispatcher on the basis of a tensor's device and dtype.</li>
+<li><b>This render is GPU-bound and transfer-bound</b> — one Python call launches ~1.17 × 10¹² multiply-accumulates, the card profiles at 100% SM utilisation, and a 23-step render moves ~460 GB across PCIe. Rewriting the orchestration in a faster language would save nothing.</li>
+<li><b>Python's speed is free here; its GIL was not.</b> Multi-card work goes through separate processes, and that replication is what killed the three-GPU render on host RAM.</li>
+<li><b>The one place a lower-level language wins is custom kernels</b> — the int8 buffer, the rotary fusion, the ring comms. Squeeze the orchestration levers first.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">glue vs engine</span><span class="badge">binding</span><span class="badge">ATen</span><span class="badge">dispatcher</span><span class="badge">DispatchKeySet</span><span class="badge">kernel</span><span class="badge">cuBLAS / cuDNN</span><span class="badge">kernel launch overhead</span><span class="badge">GPU-bound</span><span class="badge">SM utilisation</span><span class="badge">DMA</span><span class="badge">GIL</span><span class="badge">process vs thread</span><span class="badge">address space</span><span class="badge">monkeypatch</span></p>
+<p>If those feel solid, "the code is slow" and "the job is slow" are now two different claims with two different tests.</p></div>
+
+<p class="small">Why the render, not the code, is the wall is <a href="30-the-render-live.html">ch.30</a>; the layer diagram this chapter cuts through is <a href="04-software-stack.html">ch.04</a>; the int8 buffer a custom kernel would target is <a href="13-int8-vs-q4.html">ch.13</a>; the tiling and context-parallel levers that are still pure orchestration are <a href="36-splitting-the-video-cp.html">ch.36</a> and <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; the pipeline the drivers patch into is <a href="48-the-pipeline-without-comfyui.html">ch.48</a>. Sources: <a href="https://next.redhat.com/2026/03/27/pytorch-call-stack-deep-dive-tracing-tensor-operations-from-python-to-c-kernels/">Red Hat — PyTorch call-stack deep dive</a>; <a href="https://developers.redhat.com/articles/2026/02/19/understanding-aten-pytorchs-tensor-library">Red Hat — Understanding ATen</a>; <a href="https://github.com/pytorch/pytorch/wiki/PyTorch-dispatcher-walkthrough">PyTorch dispatcher walkthrough</a>.</p>
+
+Next: why H3 is two separate models rather than one — and why the same model sometimes ends up loaded twice.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

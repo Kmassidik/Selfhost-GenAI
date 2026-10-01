@@ -1,0 +1,295 @@
+<title>Rebuild It Blind</title>
+<meta name="description" content="A learning roadmap from following along to rebuilding the engine from scratch.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* ---- tokens: light (bare :root) ---- */
+  :root{
+    --bg:#f4efe4; --surface:#fffdf8; --surface-2:#ece3d1; --line:#ddd2bc;
+    --ink:#211d15; --muted:#6d6350; --faint:#948872;
+    --gold:#9c631a; --gold-2:#b98436; --gold-wash:#f5e9d2;
+    --jade:#3c7a55; --jade-wash:#e2efe4;
+    --shadow:0 1px 2px rgba(40,30,10,.05), 0 8px 24px rgba(40,30,10,.06);
+    --lamp:radial-gradient(120% 90% at 82% -10%, rgba(200,140,40,.16), transparent 60%);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --bg:#14110b; --surface:#1d1910; --surface-2:#262015; --line:#332b1d;
+      --ink:#ece4d4; --muted:#a99d86; --faint:#7b715d;
+      --gold:#e5ac54; --gold-2:#caa049; --gold-wash:#2a2213;
+      --jade:#74c295; --jade-wash:#17281d;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+      --lamp:radial-gradient(120% 90% at 82% -10%, rgba(229,172,84,.14), transparent 60%);
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#14110b; --surface:#1d1910; --surface-2:#262015; --line:#332b1d;
+    --ink:#ece4d4; --muted:#a99d86; --faint:#7b715d;
+    --gold:#e5ac54; --gold-2:#caa049; --gold-wash:#2a2213;
+    --jade:#74c295; --jade-wash:#17281d;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    --lamp:radial-gradient(120% 90% at 82% -10%, rgba(229,172,84,.14), transparent 60%);
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); background-image:var(--lamp); background-attachment:fixed;
+    color:var(--ink); font-family:"IBM Plex Sans",system-ui,sans-serif;
+    font-size:17px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:860px; margin:0 auto; padding:32px 22px 96px}
+  .mono{font-family:"IBM Plex Mono",ui-monospace,monospace}
+
+  /* ---- top bar ---- */
+  .top{display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:40px}
+  .brand{display:flex; align-items:center; gap:10px; font-family:"IBM Plex Mono",monospace;
+    font-size:12.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--faint)}
+  .brand .dot{width:8px; height:8px; border-radius:50%; background:var(--gold); box-shadow:0 0 10px var(--gold)}
+  .themebtn{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.08em;
+    color:var(--muted); background:var(--surface); border:1px solid var(--line); border-radius:999px;
+    padding:7px 14px; cursor:pointer; transition:border-color .2s, color .2s}
+  .themebtn:hover{color:var(--gold); border-color:var(--gold-2)}
+  .themebtn:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
+
+  /* ---- hero ---- */
+  .eyebrow{font-family:"IBM Plex Mono",monospace; font-size:12.5px; letter-spacing:.2em;
+    text-transform:uppercase; color:var(--gold); margin:0 0 14px}
+  h1{font-family:"Fraunces",Georgia,serif; font-weight:600; font-size:clamp(2.6rem,7vw,4.3rem);
+    line-height:.98; letter-spacing:-.015em; text-wrap:balance; margin:0 0 18px; color:var(--ink)}
+  h1 em{font-style:italic; color:var(--gold)}
+  .lede{font-size:1.16rem; color:var(--muted); max-width:60ch; margin:0 0 30px; text-wrap:pretty}
+  .lede b{color:var(--ink); font-weight:600}
+
+  /* ---- progress ---- */
+  .progress{background:var(--surface); border:1px solid var(--line); border-radius:16px;
+    padding:20px 22px; box-shadow:var(--shadow); margin-bottom:14px}
+  .progress .row{display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:12px}
+  .progress .count{font-family:"Fraunces",serif; font-weight:600; font-size:1.5rem; color:var(--ink);
+    font-variant-numeric:tabular-nums}
+  .progress .count b{color:var(--gold)}
+  .progress .hint{font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--faint); letter-spacing:.04em}
+  .bar{height:10px; border-radius:999px; background:var(--surface-2); overflow:hidden}
+  .bar>span{display:block; height:100%; width:0;
+    background:linear-gradient(90deg,var(--gold-2),var(--gold)); border-radius:999px;
+    transition:width .5s cubic-bezier(.2,.8,.2,1)}
+
+  /* ---- ratio strip ---- */
+  .ratio{display:flex; gap:2px; margin:0 0 44px; font-family:"IBM Plex Mono",monospace; font-size:11px}
+  .ratio div{padding:8px 10px; color:#fff; letter-spacing:.03em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .ratio .build{flex:60; background:var(--gold); border-radius:8px 0 0 8px}
+  .ratio .read{flex:20; background:var(--jade)}
+  .ratio .explain{flex:20; background:var(--gold-2); border-radius:0 8px 8px 0}
+
+  .sectlabel{font-family:"IBM Plex Mono",monospace; font-size:12px; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--faint); margin:0 0 4px}
+  .sectlabel + p{margin:0 0 26px; color:var(--muted); font-size:.98rem}
+
+  /* ---- timeline ---- */
+  .track{position:relative; display:flex; flex-direction:column; gap:14px}
+  details.stage{position:relative; background:var(--surface); border:1px solid var(--line);
+    border-radius:14px; box-shadow:var(--shadow); overflow:hidden; transition:border-color .25s}
+  details.stage[open]{border-color:var(--gold-2)}
+  details.stage.done{border-color:color-mix(in srgb,var(--jade) 55%, var(--line))}
+  summary{list-style:none; cursor:pointer; display:flex; align-items:center; gap:16px;
+    padding:16px 18px; user-select:none}
+  summary::-webkit-details-marker{display:none}
+  summary:focus-visible{outline:2px solid var(--gold); outline-offset:-2px; border-radius:12px}
+  .num{font-family:"IBM Plex Mono",monospace; font-weight:600; font-size:.95rem; color:var(--gold);
+    width:2.4ch; text-align:right; flex:none; font-variant-numeric:tabular-nums}
+  .st-main{flex:1; min-width:0}
+  .st-title{font-weight:600; color:var(--ink); line-height:1.3}
+  .st-one{font-size:.9rem; color:var(--faint); margin-top:2px}
+  .status{flex:none; width:22px; height:22px; border-radius:50%; border:2px solid var(--line);
+    display:grid; place-items:center; color:transparent; font-size:12px; transition:all .2s}
+  details.stage.done .status{background:var(--jade); border-color:var(--jade); color:#fff}
+  .youare{flex:none; font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--gold); border:1px solid var(--gold-2); border-radius:999px;
+    padding:3px 8px; display:none}
+  details.stage.here .youare{display:inline-block}
+  details.stage.here.done .youare{display:none}
+
+  .st-body{padding:2px 18px 20px calc(18px + 2.4ch + 16px)}
+  .block{margin:14px 0 0}
+  .block .tag{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.12em;
+    text-transform:uppercase; display:inline-block; padding:2px 8px; border-radius:6px; margin-bottom:7px}
+  .tag.read{color:var(--jade); background:var(--jade-wash)}
+  .tag.build{color:var(--gold); background:var(--gold-wash)}
+  .tag.check{color:var(--muted); background:var(--surface-2)}
+  .block p{margin:0; color:var(--muted); font-size:.97rem}
+  .block .kb{color:var(--ink); font-weight:500}
+  .block code{font-family:"IBM Plex Mono",monospace; font-size:.86em; background:var(--surface-2);
+    padding:1px 6px; border-radius:5px; color:var(--ink)}
+  .markbtn{margin-top:18px; font-family:"IBM Plex Mono",monospace; font-size:12.5px; letter-spacing:.04em;
+    background:transparent; color:var(--gold); border:1px solid var(--gold-2); border-radius:999px;
+    padding:8px 16px; cursor:pointer; transition:all .2s}
+  .markbtn:hover{background:var(--gold); color:var(--surface)}
+  .markbtn:focus-visible{outline:2px solid var(--gold); outline-offset:2px}
+  details.stage.done .markbtn{color:var(--jade); border-color:var(--jade)}
+  details.stage.done .markbtn:hover{background:var(--jade); color:#fff}
+
+  /* exam */
+  details.stage.exam{background:linear-gradient(180deg,var(--gold-wash),var(--surface))}
+  details.stage.exam .num,details.stage.exam .st-title{color:var(--gold)}
+  pre.recipe{font-family:"IBM Plex Mono",monospace; font-size:12.5px; line-height:1.7;
+    background:var(--surface-2); border:1px solid var(--line); border-radius:10px;
+    padding:14px 16px; margin:14px 0 0; overflow-x:auto; color:var(--ink)}
+  pre.recipe .g{color:var(--gold)}
+
+  .footnote{margin-top:40px; padding-top:24px; border-top:1px solid var(--line);
+    color:var(--faint); font-size:.9rem}
+  .footnote b{color:var(--muted)}
+  @media (max-width:560px){
+    .st-body{padding-left:18px}
+    body{font-size:16px}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <div class="top">
+    <div class="brand"><span class="dot"></span> Dalang · self-hosted H3</div>
+    <button class="themebtn" id="theme" aria-label="Toggle color theme">◐ theme</button>
+  </div>
+
+  <p class="eyebrow">The learning path</p>
+  <h1>Rebuild it <em>blind</em></h1>
+  <p class="lede">Everything we built, in the order that makes it stick — tied to our own knowledge base. The rule: <b>build first, read to fill the gaps, explain to lock it in.</b> The finish line isn't pages read. It's whether you can rewrite the engine from an empty file.</p>
+
+  <div class="progress">
+    <div class="row">
+      <span class="count"><b id="c-done">0</b> / <span id="c-total">11</span> stages</span>
+      <span class="hint" id="c-hint">tap a stage to open it</span>
+    </div>
+    <div class="bar"><span id="c-bar"></span></div>
+  </div>
+  <div class="ratio" aria-hidden="true">
+    <div class="build">BUILD · 60%</div>
+    <div class="read">READ · 20</div>
+    <div class="explain">EXPLAIN · 20</div>
+  </div>
+
+  <p class="sectlabel">The stages</p>
+  <p>Zero to ten. Each opens to what to <b>read</b> (our chapters), what to <b>build</b> (you write it), and one <b>checkpoint</b> question — if you can answer it out loud, you own that stage.</p>
+
+  <div class="track" id="track"></div>
+
+  <p class="footnote">Not a shelf of books — about <b>5 papers + ~1.5 books of chapters</b>, and the part that counts: <b>rewriting the engine 2–3 times</b>. You're likely 60–70% of the way to "rebuild it blind" right now, because you built each wall with your own hands. 🐢🔥 <br><span class="mono" style="font-size:12px">Progress saves in this browser only.</span></p>
+</div>
+
+<script>
+const STAGES = [
+  {n:"00", t:"Orientation — what we built & why", one:"the mission + the wall, before any code",
+   read:"<span class='kb'>01-what-is-genai · 05-our-build-story · 20-how-far-we-can-go · 43-the-dalang-engine</span>",
+   build:"No code yet — draw the pipeline on paper: prompt → encode → denoise → VAE → mp4.",
+   check:"In 3 sentences: WHAT we self-host, on what hardware, and WHY it 'shouldn't' fit."},
+  {n:"01", t:"The math floor — vectors, matrices, matmul", one:"matmul is the whole game",
+   read:"<span class='kb'>15-vectors-matrices-signals · 23-math-from-scratch · 14-the-math-behind-it</span>",
+   build:"Multiply two 3×3 matrices on <b>paper</b>; reproduce in numpy, diff against <code>np.matmul</code>.",
+   check:"Why is a linear layer 'just' a matmul, and what do its two shapes (in, out) mean?"},
+  {n:"02", t:"What a model IS — weights, layers, parameters", one:"it's just numbers in a shape",
+   read:"<span class='kb'>19-what-a-model-is · 28-anatomy-of-h3 · 29-where-numbers-live</span>",
+   build:"Load H3's transformer, loop <code>named_modules()</code>, print shapes. Find the 50 blocks + the FFN width.",
+   check:"Explain '33B params, 50 blocks, hidden 5376' — where does the memory of ONE copy come from?"},
+  {n:"03", t:"Attention — the one idea the model rests on", one:"the one mechanism everything wraps",
+   read:"<span class='kb'>34-open-use-close-flashattention (pt 1) · 03-how-h3-works</span> · <b>paper:</b> Attention Is All You Need (2017) + nanoGPT attention",
+   build:"Write <code>softmax(QKᵀ/√d)·V</code> in ~40 lines of torch; diff against torch SDPA on random tensors.",
+   check:"Why the √d? And why is attention the ONLY step that mixes tokens together?"},
+  {n:"04", t:"FlashAttention & online softmax", one:"why attention fits in memory — and tiles",
+   read:"<span class='kb'>34-open-use-close-flashattention (full) · 33-long-video-small-card</span> · <b>paper:</b> FlashAttention (Dao 2022)",
+   build:"Re-type our <code>02_online_softmax.py</code>; make it match full attention in fp32, exactly.",
+   check:"Explain the running max/denominator (m, l, O) trick — and why you accumulate in fp32."},
+  {n:"05", t:"Diffusion / flow-matching — the denoise loop", one:"noise → video in a few steps",
+   read:"<span class='kb'>08-how-a-prompt-becomes-video · 22-pipeline-in-detail · 30-the-render-live</span> · <b>ext:</b> DDPM + a flow-matching explainer",
+   build:"Add a print inside the denoise loop; watch the latent shape + timestep change over steps.",
+   check:"Why can H3 make a decent frame in only ~4 steps? What is the scheduler doing?"},
+  {n:"06", t:"Precision & quantization — int8", one:"precision ≠ quality, but it IS memory",
+   read:"<span class='kb'>13-int8-vs-q4 · 18-number-formats-precision · 17-what-actually-improves-quality</span> · <b>ext:</b> an int8 weight-only / GPTQ explainer",
+   build:"Quantize one linear's weights to int8 by hand; dequantize; measure the error vs fp16.",
+   check:"Why did int8 ≈ Q4 ≈ fp16 in QUALITY, yet int8 saved memory? What has no scratch buffer?"},
+  {n:"07", t:"The GPU & its memory — the 8GB wall", one:"what actually sits in VRAM",
+   read:"<span class='kb'>31-what-the-gpu-does · 32-thinking-like-a-circuit · 16-multi-gpu-and-nvlink · 33-long-video-small-card</span> · <b>ext:</b> PyTorch CUDA memory notes",
+   build:"Run a forward with <code>torch.cuda.max_memory_allocated()</code>; split peak into weights vs activations vs context.",
+   check:"Name the 3 things resident during denoise, and why activations (not weights) scale with frames."},
+  {n:"08", t:"Multi-GPU — context parallelism & the ring", one:"two cards, one attention, one process",
+   read:"<span class='kb'>36-splitting-the-video-cp · 35-is-it-really-ours</span> · <b>paper:</b> Ring Attention (Liu, Zaharia, Abbeel 2023)",
+   build:"Re-type our <code>03_ring_2gpu.py</code>; split seq across cuda:0/1, rotate K/V, match single-GPU.",
+   check:"Why does the ring give speed but NOT more frames? What still runs full-sequence on GPU 0?"},
+  {n:"09", t:"Python as glue vs native", one:"where the real cost lives",
+   read:"<span class='kb'>41-python-is-the-glue · 25-inference-engine-landscape</span>",
+   build:"Time a pure-python loop vs the same as one torch op; feel the 100×.",
+   check:"Which parts of our engine are 'just glue', and which are the real compute — and where do they run?"},
+  {n:"10", t:"THE EXAM — rebuild the engine from a blank file", one:"the boss wall", exam:true,
+   read:"<span class='kb'>43-the-dalang-engine · 44-building-dalang</span> — the whole Phase E story + the recipe",
+   build:"No peeking. Rebuild the single-card engine:",
+   recipe:"<span class='g'>int8</span> weight-only + block-offload (1 block/group)\n  + FFN chunked as a <span class='g'>unit</span>\n  + rotary chunked\n  + attention-linears chunked\n  + ALL <span class='g'>preallocating</span> outputs (never torch.cat)\n  + anti-frag allocator\n  + VAE <span class='g'>deferred</span> onto cuda at decode time\n→ every per-token op chunk-sized; attention stays full/flash",
+   check:"Your rewrite renders a clip on one 8GB card. If it OOMs, you'll know EXACTLY which wall — because you built each one."}
+];
+
+const KEY="dalang-roadmap-v1";
+let done=new Set();
+try{const s=localStorage.getItem(KEY); if(s) done=new Set(JSON.parse(s));}catch(e){}
+
+const track=document.getElementById("track");
+STAGES.forEach((s,i)=>{
+  const d=document.createElement("details");
+  d.className="stage"+(s.exam?" exam":"");
+  d.dataset.i=i;
+  if(i===0) d.open=true;
+  let body=`<div class="st-body">
+      <div class="block"><span class="tag read">Read</span><p>${s.read}</p></div>
+      <div class="block"><span class="tag build">Build</span><p>${s.build}</p>${s.recipe?`<pre class="recipe">${s.recipe}</pre>`:""}</div>
+      <div class="block"><span class="tag check">Checkpoint</span><p>${s.check}</p></div>
+      <button class="markbtn" type="button">mark complete</button>
+    </div>`;
+  d.innerHTML=`<summary>
+      <span class="num">${s.n}</span>
+      <span class="st-main"><span class="st-title">${s.t}</span><span class="st-one">${s.one}</span></span>
+      <span class="youare">you are here</span>
+      <span class="status" aria-hidden="true">✓</span>
+    </summary>${body}`;
+  track.appendChild(d);
+  d.querySelector(".markbtn").addEventListener("click",e=>{
+    e.preventDefault();
+    if(done.has(i)) done.delete(i); else done.add(i);
+    save(); render();
+  });
+});
+
+function save(){try{localStorage.setItem(KEY,JSON.stringify([...done]));}catch(e){}}
+function render(){
+  const total=STAGES.length;
+  let firstUndone=-1;
+  document.querySelectorAll("details.stage").forEach(d=>{
+    const i=+d.dataset.i;
+    d.classList.toggle("done",done.has(i));
+    d.querySelector(".markbtn").textContent=done.has(i)?"completed ✓":"mark complete";
+    if(firstUndone<0 && !done.has(i)) firstUndone=i;
+    d.classList.remove("here");
+  });
+  document.querySelectorAll("details.stage").forEach(d=>{
+    if(+d.dataset.i===firstUndone) d.classList.add("here");
+  });
+  const nd=done.size, pct=Math.round(nd/total*100);
+  document.getElementById("c-done").textContent=nd;
+  document.getElementById("c-total").textContent=total;
+  document.getElementById("c-bar").style.width=pct+"%";
+  const hint=document.getElementById("c-hint");
+  hint.textContent = nd===0 ? "tap a stage to open it"
+    : nd===total ? "you can rebuild it blind — respect 🐢🔥"
+    : "next: stage "+STAGES[firstUndone].n;
+}
+render();
+
+// theme toggle (respects the 3-state model; only stamps on explicit choice)
+const tb=document.getElementById("theme"), TKEY="dalang-roadmap-theme";
+try{const t=localStorage.getItem(TKEY); if(t) document.documentElement.dataset.theme=t;}catch(e){}
+tb.addEventListener("click",()=>{
+  const cur=document.documentElement.dataset.theme;
+  const dark=cur? cur==="dark" : matchMedia("(prefers-color-scheme:dark)").matches;
+  const next=dark?"light":"dark";
+  document.documentElement.dataset.theme=next;
+  try{localStorage.setItem(TKEY,next);}catch(e){}
+});
+</script>

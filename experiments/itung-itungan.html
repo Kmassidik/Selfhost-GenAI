@@ -1,0 +1,59 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Itung-itungan Simpel</title>
+<link rel="stylesheet" href="../knowledge-base/assets/style.css">
+<link rel="stylesheet" href="../knowledge-base/assets/katex.min.css">
+</head><body>
+<script type="text/markdown" id="md">
+# Itung-itungan Simpel
+
+Model AI-nya butuh tempat **46 GB**. Kartu grafis kita cuma **8 GB**.
+Kayak mindahin lemari 46 kg lewat pintu yang muat 8 kg. 🚪
+
+---
+
+**Triknya:** barangnya nggak masuk semua sekaligus.
+Disimpan di RAM (60 GB), terus dikirim ke GPU **sepotong-sepotong**. Jadi muat. ✅
+
+---
+
+**Masalahnya:** pas dicek, yang bikin penuh itu **satu proses hitung** yang makan **2,24 GB** sekaligus.
+
+Kita potong-potong proses itu → hemat **2 GB**.
+Hasilnya **sama persis**, kualitas nggak turun. 🎯
+
+---
+
+**2 GB itu dipakai buat apa?** Naikin resolusi:
+
+```
+Sebelum : 576 × 320
+Sesudah : 768 × 448   →  hampir 2× lebih tajam
+```
+
+Video jadi lebih bagus, di kartu yang sama. 🔥
+
+---
+
+**Bonus (Turbo):** biasanya butuh 20 putaran buat 1 video. Pakai Turbo cukup **4-6 putaran** → **5× lebih cepat**. ⚡
+
+---
+
+## Intinya
+
+| | |
+|---|---|
+| Model | 46 GB |
+| Kartu | 8 GB |
+| Hemat dari akalin | 2 GB |
+| Resolusi naik | ~2× |
+| Kecepatan | 5× |
+
+**Rahasianya:** jangan kecilin videonya. **Akalin cara kerjanya.** Ukur dulu apa yang bikin berat, baru betulin yang itu doang.
+
+</script>
+<script src="../knowledge-base/assets/marked.min.js"></script>
+<script src="../knowledge-base/assets/katex.min.js"></script>
+<script src="../knowledge-base/assets/mermaid.min.js"></script>
+<script src="app.js"></script>
+</body></html>

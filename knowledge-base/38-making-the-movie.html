@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>38 · Making the Movie</title>
+<meta name="description" content="One prompt file, sixteen shots, three 8 GB cards: how a batch of five-second renders becomes a graded, cut and scored short film — with the measured cost of every stage.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 38 · The capstone — one prompt file to a graded film, on three 8 GB cards</span>
+
+# Making the Movie
+
+<p class="lede">Making the movie means writing many short shots and assembling them, because no model generates a film — it generates takes. This is the whole line running for real: <b>"Neon Solitude,"</b> sixteen shots of one consistent character in a rain-soaked neon city, rendered two at a time in int8 on 8 GB cards, then graded, cut and scored into a film using the model's own generated audio.</p>
+
+The single most useful thing in this chapter is a ratio, and it is worth stating before anything else. Rendering the shots took **hours**. Grading, cutting, cross-dissolving and scoring them took **about five minutes**. Every instinct says the finishing is the hard part. On this box the finishing is a rounding error, and knowing that reorders every decision downstream of it.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="The full film pipeline. One prompt file of sixteen shots goes to an encode stage which writes one state file per shot. Those feed a denoise stage on GPU zero and one running two shots at a time, producing an mp4 and a wav per shot. Those go through a grade stage, then an edit stage with cross-dissolves, then an audio stage chaining the model's own wav files, producing the finished film. The denoise stage is marked as hours and everything after it as minutes.">
+  <defs>
+    <marker id="mm1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE PROMPT FILE IN  ·  ONE FILM OUT</text>
+  <rect x="4" y="40" width="132" height="60" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="70" y="64" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">prompt file</text>
+  <text x="70" y="82" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">16 shot entries</text>
+  <line x1="138" y1="70" x2="162" y2="70" stroke="#6f7b8f" marker-end="url(#mm1)"/>
+  <rect x="166" y="40" width="150" height="60" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="241" y="64" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">encode, once</text>
+  <text x="241" y="82" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">text to a saved state .pt</text>
+  <line x1="318" y1="70" x2="342" y2="70" stroke="#6f7b8f" marker-end="url(#mm1)"/>
+  <rect x="346" y="30" width="228" height="80" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="460" y="56" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">denoise — GPU 0 + 1</text>
+  <text x="460" y="76" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">int8, two independent shots at once</text>
+  <text x="460" y="96" text-anchor="middle" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">HOURS</text>
+  <line x1="576" y1="70" x2="600" y2="70" stroke="#6f7b8f" marker-end="url(#mm1)"/>
+  <rect x="604" y="40" width="152" height="60" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="680" y="64" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">one .mp4 + .wav</text>
+  <text x="680" y="82" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">per shot</text>
+  <path d="M680,104 L680,132" fill="none" stroke="#6f7b8f" marker-end="url(#mm1)"/>
+  <rect x="560" y="136" width="196" height="52" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="658" y="158" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">grade</text>
+  <text x="658" y="176" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">2.39:1, teal and magenta</text>
+  <line x1="556" y1="162" x2="532" y2="162" stroke="#6f7b8f" marker-end="url(#mm1)"/>
+  <rect x="332" y="136" width="196" height="52" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="430" y="158" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">edit</text>
+  <text x="430" y="176" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">0.7 s cross-dissolves</text>
+  <line x1="328" y1="162" x2="304" y2="162" stroke="#6f7b8f" marker-end="url(#mm1)"/>
+  <rect x="104" y="136" width="196" height="52" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="202" y="158" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">audio</text>
+  <text x="202" y="176" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">the model's own rain and score</text>
+  <path d="M202,192 L202,214" fill="none" stroke="#6f7b8f" marker-end="url(#mm1)"/>
+  <rect x="104" y="218" width="196" height="44" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="202" y="245" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">Neon Solitude</text>
+  <text x="332" y="232" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">everything on this row: about five minutes, total</text>
+  <text x="332" y="252" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">for a film that cost hours to render</text>
+</svg>
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p><b>Sixteen short shots</b> of one consistent character, rendered two at a time in <b>int8</b> on 8 GB cards, then <b>graded, cut and scored</b> into a film using the model's <b>own generated audio</b>. One prompt file in, one movie out. The model gives shots; the <em>film</em> is the line.</p></div>
+
+## What the film was meant to be
+
+A **two-minute cinematic short**, smooth like a real movie, on hardware that officially cannot run a 33-billion-parameter video model at all. The theme: a lone woman in a rain-soaked neon city at night, intercut with atmosphere — puddles, signs, an empty street. One consistent face across her close-ups, pure-atmosphere b-roll between them.
+
+The trick that makes it possible is the one from [ch.33](33-long-video-small-card.html) and [ch.37](37-the-production-line.html): **a long film is an edit of short shots, not one long generation.** No model produces two minutes in one pass. So the roughly 15-second ceiling is not fought at all — the film is written as many five-second shots and cut on a timeline.
+
+That reframing is doing more work than it appears to. It moves the film from a *generation* problem, where the constraint is the model's trained range and nothing can be done, to an *editing* problem, where the constraints are craft decisions that have been solved for a century.
+
+## 1 · One prompt file, many shots
+
+Every shot is one entry in a Python dictionary. The character is a **shared string** reused verbatim in every one of her shots — that is the entire mechanism that keeps her face consistent across cuts. The atmosphere shots carry no face at all, so they are cheap *and* they buy variety.
+
+<div class="callout spec"><span class="t">Why a shared character string works</span>
+<p>The model has no memory between shots — each render is completely independent, starting from its own noise. Consistency is not magic, it is <b>the same words every time</b>: <code>"a young woman with wet dark hair, pale skin, subtle freckles, melancholic dark eyes, black wool coat."</code> The same description lands in the same region of the model's learned distribution, so it produces a statistically similar face. Change one adjective and she changes. This is the cheapest continuity tool available and it costs nothing.</p></div>
+
+<div class="callout warn"><span class="t">And the honest limit of it</span>
+<p>A shared string produces a face that is <em>the same type of person</em>, not <em>the same person</em>. Across chained clips, photoreal human identity visibly drifts; stylised characters hold far better ([ch.33](33-long-video-small-card.html)). Anchoring true identity needs reference conditioning — a different 20 GB transformer variant, Ref2VA, which takes reference images that FL2VA cannot accept at all ([ch.03](03-how-h3-works.html)). No amount of prompt discipline substitutes for it. Cutting between close-ups and faceless atmosphere shots is partly craft and partly a way of giving the drift somewhere to hide.</p></div>
+
+H3 also wants a **structured** prompt rather than plain prose, and the structure is the biggest single quality lever on the whole box:
+
+```text
+integrated_multimodal_description: [Shot 1] Cinematic, <framing>, <subject + scene>.
+    The camera <push in / pan / tracking> with small amplitude at slow speed as <action>.
+
+overall_soundscape: <ambient + action sounds, one to four sentences>.
+
+non_diegetic_music: <instruments, tempo, dynamics — or N/A>.
+```
+
+Two fields there are doing something unusual: `overall_soundscape` and `non_diegetic_music` are *audio* direction, in the same prompt as the picture direction, because H3 generates both together. That is the reason the soundtrack in §6 is not an afterthought — it was specified in the same sentence as the rain.
+
+One thing that cannot be asked for, at any quality setting: **readable on-screen text.** No current video diffusion model can spell. Lyrics, signage and titles are a video-editor step, not a prompt.
+
+## 2 · Encode once, render two at a time
+
+The pipeline splits in two, and the split is forced by two file sizes.
+
+The encoder is **26 GB** and the transformer is **20 GB** ([ch.03](03-how-h3-works.html)). Those two do not comfortably coexist in memory alongside everything a render needs — so they are never allowed to meet. The encoder runs **first, in its own process**, reads the prompt, writes its understanding to a `.pt` file, and exits. Only then does a second process start and load the transformer.
+
+<div class="callout truth"><span class="t">The side effect is the good part</span>
+<p>Because prompt understanding is written to disk, it is <b>reusable</b>. Encode sixteen shots once, and every one of them can be re-rendered at any resolution, any step count, any seed, without paying the 26 GB encoder again. What began as a memory workaround became the reason experiments on this box are cheap: the expensive comprehension is cached, and only the denoise is repeated.</p></div>
+
+Denoise is the expensive half, so it runs **two shots in parallel** — one on GPU 0, one on GPU 1 — because a single int8 shot at this size fits in 8 GB with room to spare ([ch.30](30-the-render-live.html)).
+
+<div class="callout warn"><span class="t">Two at a time is not the same as one split in two</span>
+<p>This is <b>not</b> ring-2 context parallelism ([ch.36](36-splitting-the-video-cp.html)), which splits <em>one</em> shot across two cards to make a <em>longer</em> take possible. For a batch of short shots, running <b>two independent renders side by side</b> is simpler and gives near-perfect 2× throughput: no NCCL, no cross-card traffic, no ring, each card doing a whole shot alone.</p>
+<p>The distinction is latency versus throughput. Ring-2 reduces what one card must hold, at the cost of communication. Side-by-side reduces total time for a batch, at no cost at all. For a film made of sixteen five-second shots, throughput is the only thing that matters — which is the [ch.32](32-thinking-like-a-circuit.html) lesson applied to a real deliverable.</p></div>
+
+<svg viewBox="0 0 760 244" width="100%" style="max-width:920px" role="img" aria-label="Two ways to use two cards. On the left, ring-2 splits one shot's sequence across both cards, which enables a longer take but takes the same wall-clock and requires communication. On the right, two independent shots render side by side, which halves the wall-clock for a batch with no communication at all.">
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">TWO CARDS, TWO COMPLETELY DIFFERENT WINS</text>
+  <rect x="4" y="30" width="366" height="200" rx="10" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="24" y="54" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">ring-2 — split ONE shot</text>
+  <rect x="24" y="70" width="150" height="46" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="200" y="70" width="150" height="46" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="99" y="92" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">shot A, first half</text>
+  <text x="99" y="108" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">of the sequence</text>
+  <text x="275" y="92" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">shot A, second half</text>
+  <text x="275" y="108" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">of the sequence</text>
+  <line x1="174" y1="93" x2="196" y2="93" stroke="#7aa2ff"/>
+  <text x="187" y="136" text-anchor="middle" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif">K/V passed every attention step</text>
+  <text x="24" y="168" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">buys: a take one card cannot hold</text>
+  <text x="24" y="190" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">costs: communication over a 4.9 GB/s link</text>
+  <text x="24" y="214" fill="#7aa2ff" font-size="12" font-family="Inter,sans-serif">CAPACITY</text>
+  <rect x="390" y="30" width="366" height="200" rx="10" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="410" y="54" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">side by side — TWO shots</text>
+  <rect x="410" y="70" width="150" height="46" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="586" y="70" width="150" height="46" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <text x="485" y="92" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">shot A, whole</text>
+  <text x="485" y="108" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">start to finish</text>
+  <text x="661" y="92" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">shot B, whole</text>
+  <text x="661" y="108" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">start to finish</text>
+  <text x="573" y="136" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">no traffic between them at all</text>
+  <text x="410" y="168" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">buys: half the wall-clock for a batch</text>
+  <text x="410" y="190" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">costs: nothing</text>
+  <text x="410" y="214" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">THROUGHPUT — what a film wants</text>
+</svg>
+
+## 3 · The measured cost
+
+Read straight off the render's own output timestamps, not estimated:
+
+| Quantity | Measured |
+|---|---|
+| One 124-frame (about 5 s) shot, int8, one 8 GB card | ~**75–80 min** |
+| Two shots in parallel on GPU 0 + 1 | ~**80 min per pair** |
+| Eight shots, four pairs | ~**5.3 hr** |
+| Encoding eight states, one-time, up front | ~**30–45 min** |
+| Grade, cut and audio — the entire finish | ~**5 min** |
+
+The second row is the one to look at twice. Two shots in parallel cost **the same wall-clock as one**. That is what "no communication" buys: the cards are not cooperating, they are simply both busy, and nothing about one render slows the other. Near-perfect scaling is available exactly when the work has no shared state.
+
+<div class="callout truth"><span class="t">The render is 99% of the wall-clock</span>
+<p>Hours to render, five minutes to finish. Grading, cutting, cross-dissolving and scoring a 36-second film took less time than making coffee. This is the deepest fact about the box: a 3060 Ti is not slow at <em>video editing</em>, it is slow at <b>denoising a 33-billion-parameter model</b>. Every optimisation that matters ([ch.30](30-the-render-live.html), [ch.34](34-open-use-close-flashattention.html), [ch.36](36-splitting-the-video-cp.html)) targets that one stage. Nothing else is worth a minute of engineering time.</p></div>
+
+## 4 · Why 832×480 and not something rounder
+
+A small detail with a sharp edge, because it cost real debugging time elsewhere in this project.
+
+Latents are 16× smaller than pixels, and the transformer groups them into patches of 2×2 before the blocks. So both dimensions, divided by 16, must be **even**. A width of 848 gives $848 / 16 = 53$, which is odd, and patching fails with a shape error deep inside the model that never mentions resolution ([ch.03](03-how-h3-works.html)). A width of 832 gives 52, which is even, and works.
+
+**832×480, 1024×576 and 1280×704 all qualify. 848 is the trap.** Frame sizes on this box are not chosen aesthetically; they are chosen so the arithmetic closes.
+
+## 5 · The grade — from a negative to a print
+
+A raw 832×480 render already looks good. What makes it look like *film* is the grade, and the useful way to hold this is photographic: **the render is the negative, the grade is the print.** The negative holds the information. The print is where contrast, colour and framing are decided, and two prints from one negative can look like different films.
+
+One ffmpeg filter chain does all of it, per shot:
+
+```text
+scale=1920:-2:flags=lanczos,      # up to 1080p width, sharp resampler
+crop=1920:803,                    # carve a 2.39:1 anamorphic frame
+eq=contrast=1.06:saturation=1.12:gamma=1.0:brightness=0.01,
+colorbalance=rs=-.06:bs=.06:rm=-.04:bm=.05:rh=.05:bh=-.04,   # teal shadows, magenta mids
+vignette=PI/6,                    # gentle darkening to the corners
+noise=alls=5:allf=t,              # fine film grain
+pad=1920:1080:0:138:black         # black bars top and bottom
+```
+
+The arithmetic in those two crop and pad numbers is the whole cinematic effect: $1920 / 803 = 2.39$, the anamorphic ratio, and then the 803-pixel strip is padded back into a 1080-line frame with bars of 138 and 139 pixels. Nothing was added to the picture; a quarter of it was thrown away, and the discarding is what reads as cinema.
+
+<div class="callout spec"><span class="t">What each move buys</span>
+<ul>
+<li><b>2.39:1 letterbox</b> — the single strongest "this is cinema" signal there is. Costs nothing but pixels, changes everything.</li>
+<li><b>Teal shadows, magenta mids</b> — the modern blockbuster grade. It leans into the neon the model already produced rather than fighting it.</li>
+<li><b>Vignette and grain</b> — hide the digital cleanliness. Real film has texture and falloff at the edges; this fakes both, and grain in particular masks the softness of an upscale.</li>
+<li><b>Lanczos upscale to 1080p</b> — a good resampler, which is not the same thing as true super-resolution. Real-ESRGAN is the next lever up.</li>
+</ul></div>
+
+<div class="callout warn"><span class="t">A grade cannot fix sampling</span>
+<p>Contrast, colour and grain operate on what is already in the frame. If a render was under-sampled, the grade makes a stylish version of a soft picture. Steps and framing are the quality levers ([ch.17](17-what-actually-improves-quality.html)); the grade is presentation. The order matters — render properly first, then print.</p></div>
+
+## 6 · The cut — cross-dissolves with real arithmetic
+
+Shots are joined with 0.7-second cross-dissolves. The only tricky part is the **offset**, meaning where each dissolve begins on the growing timeline, because `xfade` measures each offset against the accumulated output rather than against the incoming clip.
+
+For clips of equal length $d$ and transition $t$, the $k$-th dissolve, zero-indexed, starts at:
+
+$$\text{offset}_k = (k+1)\,(d - t)$$
+
+A 124-frame shot at 24 fps is $124 / 24 = 5.167$ seconds, and with $t = 0.7$ that gives a clean step of $4.467$ s: 4.47, 8.93, 13.40, and so on. Each dissolve eats $t$ seconds of running time, so the finished film is shorter than the sum of its parts:
+
+$$\text{length} = N d - (N-1)\,t = 8 \times 5.167 - 7 \times 0.7 = \mathbf{36.5\ s}$$
+
+not the 41.3 s that eight shots suggest.
+
+<svg viewBox="0 0 760 220" width="100%" style="max-width:920px" role="img" aria-label="A timeline of four shots joined by cross-dissolves. Each shot is 5.167 seconds long and each dissolve is 0.7 seconds, so consecutive shots overlap and each new shot starts 4.467 seconds after the last. The finished length is the sum of the shots minus one transition per join.">
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">EACH DISSOLVE EATS 0.7 s OF RUNNING TIME</text>
+  <rect x="4" y="40" width="248" height="34" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="128" y="62" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">shot 1 — 5.167 s</text>
+  <rect x="218" y="82" width="248" height="34" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="342" y="104" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">shot 2 — 5.167 s</text>
+  <rect x="432" y="124" width="248" height="34" rx="5" fill="#151b26" stroke="#232c3b"/>
+  <text x="556" y="146" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">shot 3 — 5.167 s</text>
+  <rect x="218" y="40" width="34" height="118" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="432" y="82" width="34" height="76" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="235" y="182" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">0.7 s</text>
+  <text x="449" y="182" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">0.7 s</text>
+  <line x1="4" y1="196" x2="756" y2="196" stroke="#6f7b8f"/>
+  <line x1="4" y1="190" x2="4" y2="202" stroke="#6f7b8f"/>
+  <line x1="218" y1="190" x2="218" y2="202" stroke="#6f7b8f"/>
+  <line x1="432" y1="190" x2="432" y2="202" stroke="#6f7b8f"/>
+  <text x="4" y="216" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">0 s</text>
+  <text x="200" y="216" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">4.467 s</text>
+  <text x="414" y="216" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">8.933 s</text>
+  <text x="500" y="216" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">offset(k) = (k+1)(d - t)</text>
+</svg>
+
+## 7 · The soundtrack — the model scored its own film
+
+H3 does not only make pictures. It renders a **synchronised audio track** for every shot: a `.wav` carrying the rain, the city hum, the ambient pad that the prompt's `overall_soundscape` and `non_diegetic_music` fields asked for. Those eight files were chained with matching **audio** cross-fades into one continuous bed, normalised, and laid under the cut.
+
+<div class="callout truth"><span class="t">The soundtrack is fully ours, and copyright-free by construction</span>
+<p>No music library was touched. The rain, the hum, the low synth pad — <b>the model generated all of it</b>, in the same forward pass as the picture, from the same prompt. It matches the picture because it was made <em>with</em> the picture, not fitted to it afterwards. Nothing to license, nothing to clear: a self-hosted film with a self-hosted score.</p></div>
+
+This is a direct consequence of the architecture rather than a happy accident. H3 carries audio latents through the same 50 blocks as the video latents — 32 audio channels alongside 24 video channels ([ch.03](03-how-h3-works.html)) — so the sound is generated jointly with the picture rather than dubbed onto it. Synchronisation is not a post-production problem here because the two were never separate.
+
+## 8 · What shipped
+
+**Act I: eight shots, 36.5 seconds, 1080p, graded and scored.** One consistent woman, clean open eyes, wet street work, moody teal and magenta throughout. The second batch of eight shots takes it toward the full two minutes.
+
+## 9 · The maximum tier, not the maximum squeeze
+
+This is the best **quality tier** the box produced at the time: int8 at 480p native, upscaled and graded to 1080p, five- to fourteen-second takes. But this particular film had not spent every lever still available:
+
+| Lever | In Act I | Still available |
+|---|---|---|
+| **Sharpness** | Lanczos scale, 480 to 1080p | **Real-ESRGAN on GPU 2** — true super-resolution, sharper faces ([ch.37](37-the-production-line.html)) |
+| **Smoothness** | 24 fps | **RIFE interpolation, 24 to 60 fps** — also enables slow motion |
+| **Shot length** | 5 s | about 8.7 s single-card; about **14 s with ring-2** ([ch.36](36-splitting-the-video-cp.html)) |
+| **Native resolution** | 480p | **720p** — now proven, at a price (below) |
+
+The original version of this chapter closed with a confident claim, and it is worth quoting because it turned out to be wrong:
+
+<div class="callout danger"><span class="t">What this chapter used to say</span>
+<p>"Past those levers is a <b>hard ceiling set by the silicon</b>: about 15 s per continuous take, 480–720p <em>native</em>, at 33B int8 quality — longer, sharper or higher-resolution than that isn't an optimisation away, it needs bigger cards."</p>
+<p>Half of that survived and half did not. The 15-second limit held, because it is the model's trained range and not a hardware wall at all ([ch.03](03-how-h3-works.html)). The resolution claim did not: the <a href="44-building-dalang.html">Dalang engine</a> put native 720p on a <em>single</em> 8 GB card by tiling every per-token operation, and three cards together later rendered native 720p at the full 345 frames ([ch.46](46-the-first-15-seconds.html)). "Needs bigger cards" was true of the pipeline that existed when it was written, not of the problem.</p></div>
+
+## 10 · Native 720p landed — and looked worse
+
+Here is the part of this chapter that teaches the most, because the first native-720p clip looked *worse* than the graded 480p films above, and nothing was broken.
+
+<div class="callout truth"><span class="t">Capability is not a finished film</span>
+<p>A raw model render and a finished film are <b>different objects</b>. The first 720p test looked poor next to <b>Neon Solitude</b> for two honest reasons: it ran at <b>4 steps</b>, just enough to prove it fit in memory, and it had <b>none of the finish this chapter is about</b> — no interpolation, no grade, no cut, no score. The films impress because of the <em>line</em>, not the model alone.</p></div>
+
+The same lesson repeated at full scale later. The three-card native 720p × 345-frame render, `g4k`, came out as mud: a mottled brown smear that barely changes across fourteen seconds, from a prompt asking for cel-shaded shattered islands at dawn. Every tempting explanation was killed by a file already on the box ([ch.46](46-the-first-15-seconds.html)):
+
+| Render | Size | Frames | **Steps** | Result |
+|---|---|---|---|---|
+| `cp15sd` | 512×288 | **345** | **49** | beautiful — islands, ruins, hero all resolved |
+| `an1` | **1280×704** | 124 | **23** | beautiful — crisp cel-shaded anime |
+| `cmp-ring` vs `cmp-normal` | 832×480 | 124 | 4 | identical to each other, both sharp |
+| **`g4k`** | 1280×704 | **345** | **3** | **mud** |
+
+345 frames is fine — `cp15sd` proves it. 1280×704 is fine — `an1` proves it. The sharded path is fine — `cmp-ring` matches its reference. What is left is the column nobody looks at: **that scene needs 49 steps, and it got 3.**
+
+<div class="callout spec"><span class="t">Steps are a quality lever, and they cost TIME, not memory</span>
+<p>More denoise steps mean more refinement at the <b>same VRAM</b> — steps do not change what is resident, only how many times the loop runs. So "does it fit?" and "does it look finished?" are different questions, answered by different numbers. And the count is a property of the <em>scene</em>, not the model: a tight close-up converges in <b>4</b> steps, a character mid-shot needs <b>23</b>, and a wide vista with a small distant subject needs <b>49</b> ([ch.47](47-the-scorecard.html)). Budget steps by content, never by habit.</p></div>
+
+## 11 · So which route should a film take?
+
+With native 720p proven, the choice is now an economic one rather than a technical one, and the numbers are unambiguous:
+
+| Route | Denoise | Output |
+|---|---|---|
+| **832×480 × 345 at 49 steps, then a 1.54× upscale** | **2.6 h** | 15 s, 720p-class, well-sampled |
+| Native 1280×704 × 345 at 49 steps | **90 h** | 15 s, true native |
+
+<div class="callout truth"><span class="t">Take the upscale</span>
+<p>Roughly <b>35× cheaper</b> for a difference most viewers cannot see. A well-sampled 832×480 lifted 1.54× beats an under-sampled 1280×704 every time, and mild upscales preserve detail where aggressive ones go soft ([ch.17](17-what-actually-improves-quality.html)). Native 720p × 15 s is a <em>capability that has been proven</em>, not a workflow to adopt — keep it for the one hero shot that justifies a weekend of GPU time.</p></div>
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>A film is an edit, not a generation.</b> Sixteen short shots cut on a timeline, never one two-minute render. The cap limits the <em>shot</em>, not the film.</li>
+<li><b>Consistency is a shared string</b> — the same character description in every shot. Cheapest continuity tool there is, and it gives the same <em>type</em> of person rather than the same person.</li>
+<li><b>The two-phase pipeline is forced by 26 GB plus 20 GB</b>, and the side effect is that encoded prompts are cached and re-renderable for free.</li>
+<li><b>Two shots in parallel, not one shot split.</b> Side-by-side renders on two cards give clean 2× throughput with no communication at all; ring-2 buys length instead.</li>
+<li><b>Render is about 99% of the wall-clock.</b> 5.3 hours to render eight shots, about 5 minutes to grade, cut and score them.</li>
+<li><b>The grade is the print, not the negative.</b> 2.39:1 letterbox, teal and magenta, grain and vignette — one ffmpeg chain, and it cannot fix under-sampling.</li>
+<li><b>The cut has arithmetic.</b> $\text{offset}_k = (k+1)(d-t)$, and the film is $Nd - (N-1)t$ — 36.5 s from eight shots, not 41.3.</li>
+<li><b>The model scores itself.</b> Audio latents ride the same 50 blocks as the picture, so the soundtrack is synchronised by construction and free of licensing.</li>
+<li><b>"Needs bigger cards" was disproved.</b> Native 720p at 345 frames now renders on three 8 GB cards — and the honest recommendation is still the 480p route plus a modest upscale, at roughly 35× the value per hour.</li>
+<li><b>Capability is not a finished film.</b> A 3- or 4-step raw render is not the film that impressed anyone; steps buy quality and cost time, not memory.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">shot vs film</span><span class="badge">shared character string</span><span class="badge">structured prompt</span><span class="badge">two-phase pipeline</span><span class="badge">cached encode state</span><span class="badge">throughput vs capacity</span><span class="badge">the grade</span><span class="badge">2.39:1 letterbox</span><span class="badge">cross-dissolve offset</span><span class="badge">diegetic vs non-diegetic</span><span class="badge">RIFE</span><span class="badge">Real-ESRGAN</span><span class="badge">steps by content</span></p>
+<p>If those feel solid, the next question is the one everybody asks after their first film.</p></div>
+
+Next: what to buy — and why the honest answer changed once native 720p started working on the cards already in the box.
+
+<p class="small">The line these shots flowed through is <a href="37-the-production-line.html">ch.37</a>; the long-take split is <a href="36-splitting-the-video-cp.html">ch.36</a>; why render is the expensive stage is <a href="30-the-render-live.html">ch.30</a>; what actually moves quality is <a href="17-what-actually-improves-quality.html">ch.17</a>; the engine that put native 720p on one card is <a href="44-building-dalang.html">ch.44</a>; the night the 15-second 720p clip finally existed is <a href="46-the-first-15-seconds.html">ch.46</a>; the full measured ledger is <a href="47-the-scorecard.html">ch.47</a>; and whether any of this is really ours is <a href="35-is-it-really-ours.html">ch.35</a>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

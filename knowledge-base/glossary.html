@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Glossary — Every Term, Plain Words</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Master Glossary · Every term we've used, in plain words</span>
+
+# The Glossary
+
+<p class="lede">Every piece of jargon in this guide — DiT, int8, SeedVR2, ref2va, sigma-shift, activations, W4A4 — defined in plain language, tied to <em>our</em> build, and cross-linked to the chapter where it matters. If a term ever felt like magic, it's demystified here. Grouped by topic so it teaches, not just looks up.</p>
+
+<div class="callout truth"><span class="t">How to read this</span>
+<p>Each entry is: <b>Term</b> — a plain-English explanation of what it actually is and why it matters to us → the chapter to go deeper. Skim a whole section to <em>understand</em> an area; jump to one term to look it up. Nothing here assumes you already know the next term.</p></div>
+
+<div class="gsearchwrap"><input class="gsearch" id="gq" type="search" placeholder="Search 151 terms — try &quot;latent&quot;, &quot;offload&quot;, &quot;int8&quot;" autocomplete="off"><span class="gcount" id="gcount"></span></div>
+
+<div class="callout spec"><span class="t">Start here — the twelve that unlock the rest</span>
+<p><a href="#weights-parameters">weights</a> · <a href="#inference-vs-training">inference</a> · <a href="#transformer">transformer</a> · <a href="#attention-self-cross">attention</a> · <a href="#diffusion">diffusion</a> · <a href="#latent-latent-space">latent</a> · <a href="#vae-variational-auto-encoder">VAE</a> · <a href="#quantization">quantization</a> · <a href="#offload-weight-streaming">offloading</a> · <a href="#vram">VRAM</a> · <a href="#token-patch-patchify">token</a> · <a href="#activation">activations</a></p>
+<p>Understand those twelve and the other 139 become learnable rather than intimidating.</p></div>
+
+## A · The model & how it makes video
+
+<div class="gcard" id="model"><a class="gch" href="19-what-a-model-is.html">ch.19 →</a><b>Model</b><p>a giant pile of learned numbers (the <em>weights</em>) plus a fixed recipe of math (the <em>architecture</em>) that together turn an input into a prediction. Not a program that "knows" things — just numbers arranged so the math means something.</p></div>
+
+<div class="gcard" id="weights-parameters"><a class="gch" href="19-what-a-model-is.html">ch.19 →</a><b>Weights / Parameters</b><p>the actual numbers inside the model (H3 has <b>33 billion</b> of them). Stored mostly as matrices. "33B parameters" = 33 billion of these values.</p></div>
+
+<div class="gcard" id="architecture"><a class="gch" href="19-what-a-model-is.html">ch.19 →</a><b>Architecture</b><p>the fixed sequence of operations (multiply, attend, normalize, repeat) that the weights get plugged into. The <em>recipe</em>; the weights are the <em>ingredients</em>.</p></div>
+
+<div class="gcard" id="inference-vs-training"><a class="gch" href="19-what-a-model-is.html">ch.19 →</a><b>Inference vs Training</b><p><b>Training</b> = the expensive search to <em>find</em> the right numbers (needs huge GPUs). <b>Inference</b> = <em>using</em> the already-found numbers to generate (what we do; far cheaper). That's why 8 GB can <em>run</em> H3 but can't <em>train</em> it.</p></div>
+
+<div class="gcard" id="neural-network"><a class="gch" href="01-what-is-genai.html">ch.01 →</a><b>Neural network</b><p>layers of numbers where each layer transforms the previous one; stack enough and it can model very complex things.</p></div>
+
+<div class="gcard" id="transformer"><a class="gch" href="01-what-is-genai.html">ch.01 →</a><b>Transformer</b><p>the dominant neural-net design; its key trick is <em>attention</em> (below). Powers LLMs and modern video models.</p></div>
+
+<div class="gcard" id="dit-diffusion-transformer"><a class="gch" href="03-how-h3-works.html">ch.03 →</a><b>DiT (Diffusion Transformer)</b><p>a transformer that does <em>diffusion</em> to make images/video. H3's core (its "H3-Omni-Transformer") is a 33B DiT.</p></div>
+
+<div class="gcard" id="diffusion"><a class="gch" href="01-what-is-genai.html">ch.01 →</a><b>Diffusion</b><p>generate by starting from pure noise and <em>removing</em> it step by step until a coherent image/video appears.</p></div>
+
+<div class="gcard" id="flow-matching-rectified-flow"><a class="gch" href="14-the-math-behind-it.html">ch.14 →</a><b>Flow matching / Rectified flow</b><p>H3's specific flavor of diffusion: instead of predicting "the noise," it predicts a <b>velocity</b> — which direction to move the noisy latent to straighten it toward the clean result. Wants <em>few, straight</em> steps.</p></div>
+
+<div class="gcard" id="velocity-field"><a class="gch" href="14-the-math-behind-it.html">ch.14 →</a><b>Velocity field</b><p>the thing a flow-matching model outputs at each step: the direction+speed to nudge the current latent.</p></div>
+
+<div class="gcard" id="denoising"><a class="gch" href="01-what-is-genai.html">ch.01 →</a><b>Denoising</b><p>the act of removing noise one step at a time; the whole generation loop.</p></div>
+
+<div class="gcard" id="sampling-step"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Sampling step</b><p>one iteration of the denoising loop. More steps = more refinement, up to a point. Flow models saturate ~30; we ran 50 (above the knee — 35 looks the same, faster).</p></div>
+
+<div class="gcard" id="sampler"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Sampler</b><p>the math that decides how big each denoising step is (<code>euler</code> = simplest/cleanest for flow; <code>dpmpp_2m</code>/<code>res_2s</code> = higher-order, can add crispness).</p></div>
+
+<div class="gcard" id="scheduler"><a class="gch" href="03-how-h3-works.html">ch.03 →</a><b>Scheduler</b><p>sets the <em>noise levels</em> (sigmas) across the steps — how noise decreases from start to finish.</p></div>
+
+<div class="gcard" id="sigma"><a class="gch" href="14-the-math-behind-it.html">ch.14 →</a><b>Sigma (σ)</b><p>the amount of noise at a given step. The schedule is a list of sigmas from high (pure noise) to low (clean).</p></div>
+
+<div class="gcard" id="sigma-shift"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Sigma-shift</b><p>a knob (<code>MiniMaxH3SigmaShift</code>) that bends the sigma schedule. <b>Lowering the video shift spends more steps in the low-noise region → sharper eyes/teeth/skin.</b> Free quality lever, ranked #1.</p></div>
+
+<div class="gcard" id="cfg-classifier-free-guidance"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>CFG (Classifier-Free Guidance)</b><p>how strongly the model obeys your prompt. Too low = ignores you; too high = burnt, plastic skin. Sweet spot ~2.5–3 for H3.</p></div>
+
+<div class="gcard" id="rescalecfg"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>RescaleCFG</b><p>a fix that keeps high guidance from blowing out highlights — lets you keep prompt adherence without the plastic look.</p></div>
+
+<div class="gcard" id="latent-latent-space"><a class="gch" href="03-how-h3-works.html">ch.03 →</a><b>Latent / Latent space</b><p>a compressed, small representation the model actually works in (not raw pixels). A 480p frame becomes a much smaller grid of latent numbers; the VAE converts back to pixels.</p></div>
+
+<div class="gcard" id="vae-variational-auto-encoder"><a class="gch" href="03-how-h3-works.html">ch.03 →</a><b>VAE (Variational Auto-Encoder)</b><p>the translator between pixels and latent. H3 has <b>two</b>: a video VAE (frames) and an audio VAE (sound). The <em>decode</em> step (latent→pixels) is a second big VRAM spike.</p></div>
+
+<div class="gcard" id="encoder"><a class="gch" href="03-how-h3-works.html">ch.03 →</a><b>Encoder</b><p>turns your text prompt into numbers the DiT understands. H3 uses <b>Qwen3-VL-32B</b>, a 32-billion-param vision-language model, as its encoder (27 GB at int8).</p></div>
+
+<div class="gcard" id="token-patch-patchify"><a class="gch" href="15-vectors-matrices-signals.html">ch.15 →</a><b>Token / Patch / Patchify</b><p>the model chops the latent into small pieces ("patches"/"tokens") and processes them. "Patchify" = the chopping step. More resolution/frames = more tokens = more memory.</p></div>
+
+<div class="gcard" id="embedding"><a class="gch" href="11-glossary.html">ch.11 →</a><b>Embedding</b><p>a list of numbers representing a thing (a word, an image patch) in a form the model can compute with.</p></div>
+
+<div class="gcard" id="attention-self-cross"><a class="gch" href="03-how-h3-works.html">ch.03 →</a><b>Attention (self / cross)</b><p>the transformer's core: every token looks at every other token to decide what matters. Cost grows with the <em>square</em> of the token count (the "N²" problem) — the thing that explodes at high resolution.</p></div>
+
+<div class="gcard" id="ffn-feed-forward-network"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>FFN (Feed-Forward Network)</b><p>the other half of each transformer block: two big matrix-multiplies with an activation in between. Its middle layer is <b>4× wider</b> than the rest, so its intermediate is often the single biggest activation buffer.</p></div>
+
+<div class="gcard" id="activation"><a class="gch" href="12-pushing-past-8gb.html">ch.12 →</a><b>Activation</b><p>the intermediate numbers <em>flowing through</em> the model as it computes a step (as opposed to the static weights). <b>On our box these are ~88% of the 8 GB wall</b> — the real bottleneck.</p></div>
+
+<div class="gcard" id="rope-rotary-position-embedding"><a class="gch" href="14-the-math-behind-it.html">ch.14 →</a><b>RoPE (Rotary Position Embedding)</b><p>how the model encodes <em>where</em> each token is (position). Applied inside attention.</p></div>
+
+<div class="gcard" id="adaln"><a class="gch" href="03-how-h3-works.html">ch.03 →</a><b>AdaLN</b><p>"adaptive layer norm," how a DiT injects the timestep/conditioning into each block. ~13B of H3's params live here.</p></div>
+
+<div class="gcard" id="nestedtensor"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>NestedTensor</b><p>a PyTorch container for variable-length sequences. H3's latent uses it — which is <em>why</em> the standard tiled-VAE and flash-attention nodes don't accept it (we'd hand-roll them).</p></div>
+
+<div class="gcard" id="chunked-autoregressive-generation"><a class="gch" href="33-long-video-small-card.html">ch.33 →</a><b>Chunked / autoregressive generation</b><p>make a long video by rendering a few seconds at a time, writing each piece to disk, and continuing from the last — so the card only ever holds one chunk and never OOMs at any length.</p></div>
+
+<div class="gcard" id="overlap-window-sliding-window"><a class="gch" href="33-long-video-small-card.html">ch.33 →</a><b>Overlap window / sliding window</b><p>condition each new chunk on the last ~1 second (many frames) of the previous one, carried in latent space, then crossfade the shared span — the fix that carries motion and audio across the seam (a single last frame can't).</p></div>
+
+<div class="gcard" id="drift-autoregressive"><a class="gch" href="33-long-video-small-card.html">ch.33 →</a><b>Drift (autoregressive)</b><p>in a chunk-chained render, each chunk copies and adds to the previous chunk's small errors, so quality slowly decays (chunk #20 looks worse than #1). The overlap window slows it, never stops it.</p></div>
+
+## B · Precision & number formats
+
+<div class="gcard" id="precision"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>Precision</b><p>how many bits you spend to store each number. More bits = more faithful but bigger and slower. The whole 8 GB game is trading bits for fit.</p></div>
+
+<div class="gcard" id="fp32-fp16-bf16-tf32"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>FP32 / FP16 / BF16 / TF32</b><p>floating-point formats at 32/16/16/~19 bits. FP32 = full/exact (but 33B×4 bytes = 132 GB, unreachable for us). <b>FP16/BF16 = our quality ceiling</b> (66 GB, streams from RAM).</p></div>
+
+<div class="gcard" id="fp8-fp4-nvfp4"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>FP8 / FP4 (NVFP4)</b><p>8-bit / 4-bit <em>floating-point</em>. Efficient, but <b>only exist on Ada/Hopper/Blackwell GPUs — our Ampere card cannot use them at all.</b></p></div>
+
+<div class="gcard" id="int8-int4"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>INT8 / INT4</b><p>8-bit / 4-bit <em>integer</em> formats. Our card <b>does</b> accelerate these on its tensor cores — so integers, not FP8/FP4, are our low-bit path.</p></div>
+
+<div class="gcard" id="quantization"><a class="gch" href="13-int8-vs-q4.html">ch.13 →</a><b>Quantization</b><p>squeezing high-precision floats onto a smaller grid of integers (× a scale factor) to shrink the model. "Quantize to Q4" = 4-bit.</p></div>
+
+<div class="gcard" id="ptq-post-training-quantization"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>PTQ (Post-Training Quantization)</b><p>quantizing a model <em>after</em> it's trained (no retraining). What all our GGUF/int8 quants are.</p></div>
+
+<div class="gcard" id="calibration"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Calibration</b><p>feeding sample data through the model to measure its number ranges so quantization picks good scales. For diffusion you must calibrate across <em>all</em> denoising timesteps or it smears.</p></div>
+
+<div class="gcard" id="gguf"><a class="gch" href="04-software-stack.html">ch.04 →</a><b>GGUF</b><p>the file format for quantized models (from llama.cpp). Our DiT is <code>MiniMax-H3-...-Q4_K_M.gguf</code>.</p></div>
+
+<div class="gcard" id="q4-k-m-q8-0"><a class="gch" href="13-int8-vs-q4.html">ch.13 →</a><b>Q4_K_M / Q8_0</b><p>GGUF quant levels. Q8 ≈ near-lossless (23 GB); <b>Q4_K_M = our default (11.6 GB), quality ≈ int8</b>; below Q4, diffusion breaks.</p></div>
+
+<div class="gcard" id="wxay-notation"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>WxAy notation</b><p>"W4A8" = <b>W</b>eights 4-bit, <b>A</b>ctivations 8-bit. Crucial because weights and activations quantize differently — weights tolerate 4-bit well, activations are touchier.</p></div>
+
+<div class="gcard" id="w4a4"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>W4A4</b><p>4-bit weights <em>and</em> 4-bit activations. The holy grail for us because it's the <b>only</b> quant that shrinks <em>activations</em> (our actual wall). Hard because 4-bit activations normally break.</p></div>
+
+<div class="gcard" id="tensor-cores"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>Tensor cores</b><p>special GPU units that do matrix-multiplies very fast, at specific precisions. Ours (Ampere) do FP16/BF16/INT8/INT4 — <em>not</em> FP8/FP4.</p></div>
+
+<div class="gcard" id="imma"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>IMMA</b><p>the integer (INT8/INT4) matrix instruction that runs on Ampere tensor cores. Our int8 kernel uses it; ComfyUI's int8 path <em>doesn't</em> (it wastes them).</p></div>
+
+<div class="gcard" id="svdquant-nunchaku"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>SVDQuant / Nunchaku</b><p>a W4A4 method that survives 4-bit activations by peeling off the outliers into a tiny FP16 "low-rank branch." <b>Proven on our sm_86 with real INT4 kernels</b> — our most credible path to native 720p. (<a href="https://arxiv.org/abs/2411.05007">paper 2411.05007</a>, <a href="https://github.com/nunchaku-ai/nunchaku">Nunchaku</a>)</p></div>
+
+<div class="gcard" id="quarot-spinquant"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>QuaRot / SpinQuant</b><p>rotate the activations by a special matrix so outliers vanish, enabling 4-bit weights+activations+KV. Proven ~2.16× on a 3090. Great for the encoder. (<a href="https://arxiv.org/abs/2404.00456">QuaRot 2404.00456</a>)</p></div>
+
+<div class="gcard" id="smoothquant"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>SmoothQuant</b><p>shifts activation outliers into the weights (a math-equivalent transform) so activations become int8-friendly. A low-cost <em>enabler</em> for the above. (<a href="https://proceedings.mlr.press/v202/xiao23c/xiao23c.pdf">paper</a>)</p></div>
+
+<div class="gcard" id="gptq-awq"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>GPTQ / AWQ</b><p>popular <em>weight-only</em> 4-bit methods. Near-lossless, but <b>weight-only = useless for our wall</b> (weights already stream from RAM).</p></div>
+
+<div class="gcard" id="th-venin-equivalent"><a class="gch" href="32-thinking-like-a-circuit.html">ch.32 →</a><b>Thévenin equivalent</b><p>the EE theorem that replaces a whole linear sub-network with one equivalent source + resistor, <em>exactly</em>. Model compression is the same move — but only <em>approximate</em>, because a nonlinearity blocks the exact collapse.</p></div>
+
+<div class="gcard" id="low-rank-factorization-svd"><a class="gch" href="32-thinking-like-a-circuit.html">ch.32 →</a><b>Low-rank factorization / SVD</b><p>approximate a weight matrix <code>W ≈ U·V</code> and store <code>m×k + k×n</code> numbers instead of <code>m×n</code>. The Thévenin-style shrink behind SVDQuant's low-rank branch.</p></div>
+
+<div class="gcard" id="pruning"><a class="gch" href="32-thinking-like-a-circuit.html">ch.32 →</a><b>Pruning</b><p>delete the weights that barely contribute, shrinking the model. One of the four compression levers (with low-rank, distillation, quantization).</p></div>
+
+<div class="gcard" id="vidit-q"><a class="gch" href="12-pushing-past-8gb.html">ch.12 →</a><b>ViDiT-Q</b><p>quantization designed for <em>video</em> DiTs; proved 4-bit weights are ~lossless and is our blueprint for calibrating H3 without smearing faces. (<a href="https://arxiv.org/abs/2406.02540">paper 2406.02540</a>)</p></div>
+
+<div class="gcard" id="bit-byte"><a class="gch" href="29-where-numbers-live.html">ch.29 →</a><b>Bit / byte</b><p>a bit is one 0/1 switch; <b>8 bits = 1 byte</b> (256 values). <code>b</code> bits store 2^b values. The atoms every weight is made of.</p></div>
+
+<div class="gcard" id="scale-factor"><a class="gch" href="29-where-numbers-live.html">ch.29 →</a><b>Scale factor</b><p>the shared multiplier in integer quant: store a whole number <code>q</code>, recover the value as <code>q × scale</code>. How int8/int4 fit real decimals.</p></div>
+
+<div class="gcard" id="safetensors"><a class="gch" href="29-where-numbers-live.html">ch.29 →</a><b>safetensors</b><p>the file format model weights ship in; literally the list of ~65 B numbers written on your disk.</p></div>
+
+<div class="gcard" id="torchao"><a class="gch" href="26-serving-h3-real-world.html">ch.26 →</a><b>TorchAO</b><p>PyTorch's quantization library; the int8 weight-only config the proven consumer H3 recipe loads with.</p></div>
+
+<div class="gcard" id="dynamic-fp8"><a class="gch" href="26-serving-h3-real-world.html">ch.26 →</a><b>Dynamic FP8</b><p>FP8 with per-row scales computed at load; SGLang's recipe (~14 GB/card on L40S).</p></div>
+
+<div class="gcard" id="kitchen-int8"><a class="gch" href="26-serving-h3-real-world.html">ch.26 →</a><b>kitchen_int8</b><p>online int8 quant of the DiT's linear layers, done at load (the single-4090 recipe).</p></div>
+
+<div class="gcard" id="wangp-wan2gp"><a class="gch" href="26-serving-h3-real-world.html">ch.26 →</a><b>WanGP (Wan2GP)</b><p>the "GPU-poor" video generator; the one tool that fits (pruned) H3 in <b>5–9 GB</b> via W4A8 + layered offload + block-cache.</p></div>
+
+## C · Kernels & compute (the "build it ourselves" layer)
+
+<div class="gcard" id="cuda"><a class="gch" href="02-your-hardware.html">ch.02 →</a><b>CUDA</b><p>NVIDIA's system for running code on the GPU. <b>CUDA cores</b> do general math (incl. FP32); <b>tensor cores</b> do the fast matrix math.</p></div>
+
+<div class="gcard" id="kernel"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Kernel</b><p>a small program that runs on the GPU. Writing our own kernels = telling the silicon <em>exactly</em> how to compute, bypassing the framework. This is Track B.</p></div>
+
+<div class="gcard" id="gemm-matmul"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>GEMM / matmul</b><p>a matrix-multiply, the operation that dominates a neural net. Our custom int8 GEMM kernel beat ComfyUI's ~3×.</p></div>
+
+<div class="gcard" id="dot-product"><a class="gch" href="31-what-the-gpu-does.html">ch.31 →</a><b>Dot product</b><p>multiply each input number by its weight and sum them all: <code>out = Σ xⱼ·Wⱼ</code>. Every layer of the model is this, stacked into a matmul.</p></div>
+
+<div class="gcard" id="mac-multiply-accumulate"><a class="gch" href="31-what-the-gpu-does.html">ch.31 →</a><b>MAC (multiply-accumulate)</b><p>the one hardware operation: <code>a×b</code> added to a running total. A render is tens of trillions of these; int8 tensor cores just do more per clock.</p></div>
+
+<div class="gcard" id="triton"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Triton</b><p>a language (ships with PyTorch) for writing GPU kernels in Python; it JIT-compiles to <b>PTX</b> (GPU assembly) and runs on the tensor cores — no CUDA toolkit needed. <b>Our kernel path.</b> (<a href="https://triton-lang.org/">docs</a>)</p></div>
+
+<div class="gcard" id="ptx"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>PTX</b><p>the low-level assembly GPUs actually run. Triton compiles down to it.</p></div>
+
+<div class="gcard" id="nvcc"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>nvcc</b><p>NVIDIA's C++/CUDA compiler (for hand-written <code>.cu</code> kernels). <b>Not installed on our box</b> — which is why we use Triton (no nvcc needed).</p></div>
+
+<div class="gcard" id="compute-capability-sm-86"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>Compute capability / sm_86</b><p>a GPU's feature/version code. Our 3060 Ti is <b>sm_86</b> (Ampere). It sets what precisions and instructions exist (e.g. sm_86 has INT8/INT4 but no FP8).</p></div>
+
+<div class="gcard" id="fused-kernel"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Fused kernel</b><p>one kernel that does several steps at once (e.g. dequant + matmul + bias) so intermediates never get written to memory. Kills big temporary buffers — key to our VRAM savings.</p></div>
+
+<div class="gcard" id="tiling"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Tiling</b><p>processing a big tensor in small blocks so only a slice is in memory at once. How we'd fit a 720p VAE decode in 8 GB.</p></div>
+
+<div class="gcard" id="autotuning"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Autotuning</b><p>automatically trying many kernel configs to find the fastest for <em>our</em> GPU (A100-tuned configs are wrong for sm_86).</p></div>
+
+<div class="gcard" id="flashattention-fa2-fa3"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>FlashAttention (FA2 / FA3)</b><p>a way to do attention <em>without</em> building the giant N² score matrix, so it fits at high resolution. <b>FA2 works on our Ampere; FA3 is Hopper-only</b> (ignore it). (<a href="https://github.com/dao-ailab/flash-attention">repo</a>)</p></div>
+
+<div class="gcard" id="memory-efficient-attention"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Memory-efficient attention</b><p>the general idea above (xformers / PyTorch SDPA also do it). Exact same result, far less memory.</p></div>
+
+<div class="gcard" id="online-running-softmax"><a class="gch" href="34-open-use-close-flashattention.html">ch.34 →</a><b>Online / running softmax</b><p>softmax computed incrementally over tiles with a running max+sum, so the full <code>N×N</code> score matrix is never stored.</p></div>
+
+<div class="gcard" id="chunked-ffn"><a class="gch" href="34-open-use-close-flashattention.html">ch.34 →</a><b>Chunked FFN</b><p>run a group of tokens through the feed-forward layer, free the wide intermediate, repeat.</p></div>
+
+<div class="gcard" id="sageattention"><b>SageAttention</b><p>an int8/fp8 <em>attention</em> speedup — but it <b>outputs pure noise on H3</b> (incompatible), so we keep it off. → [dalang setup notes]</p></div>
+
+<div class="gcard" id="torch-compile"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>torch.compile</b><p>PyTorch's auto-optimizer; fuses small ops for speed. Use <em>regional</em> (per-block) compile with H3 to avoid graph breaks from the NestedTensor/streaming.</p></div>
+
+<div class="gcard" id="cuda-graphs"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>CUDA graphs</b><p>replays a fixed sequence of GPU launches to cut overhead — but it pre-grabs a big static memory pool, which <b>fights our 8 GB budget</b>, so we skip it.</p></div>
+
+## D · Memory & system
+
+<div class="gcard" id="vram"><a class="gch" href="02-your-hardware.html">ch.02 →</a><b>VRAM</b><p>the GPU's own fast memory (our wall: <b>8 GB</b>). The GPU can only compute on what's in here.</p></div>
+
+<div class="gcard" id="ram"><a class="gch" href="19-what-a-model-is.html">ch.19 →</a><b>RAM</b><p>system memory (ours: <b>125 GB</b>, maxed). Holds the whole model; feeds it to the GPU in slices.</p></div>
+
+<div class="gcard" id="bandwidth"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Bandwidth</b><p>how fast data moves. On-card VRAM ~448 GB/s; <b>RAM→VRAM over PCIe only ~12 GB/s</b> (our Xeon is PCIe Gen3); disk far slower. For diffusion, bandwidth matters as much as capacity.</p></div>
+
+<div class="gcard" id="pcie"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>PCIe</b><p>the bus connecting GPU, CPU, and RAM. Our host is <b>Gen3</b>, capping transfer speeds (and any NVMe we add).</p></div>
+
+<div class="gcard" id="nvlink"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>NVLink</b><p>a fast direct GPU↔GPU bridge (hundreds of GB/s). <b>Our cards don't have it</b> — GPU↔GPU is only ~4.9 GB/s over PCIe, which kills single-render multi-GPU.</p></div>
+
+<div class="gcard" id="offload-weight-streaming"><a class="gch" href="02-your-hardware.html">ch.02 →</a><b>Offload / Weight streaming</b><p>because the model doesn't fit in 8 GB VRAM, we keep it in RAM and <em>stream</em> it through the GPU a layer at a time. The trick that makes H3 run at all — and why it's slow.</p></div>
+
+<div class="gcard" id="group-offloading"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Group offloading</b><p>the <em>good</em> version of offload: prefetch the next block onto the GPU (on a side stream) <em>while</em> the current one computes, hiding the transfer. A top free win.</p></div>
+
+<div class="gcard" id="pinned-memory"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Pinned memory</b><p>page-locked RAM that copies to the GPU faster and enables the prefetch overlap above.</p></div>
+
+<div class="gcard" id="mmap"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>mmap</b><p>load a model file by mapping it into memory (no full copy) — faster cold starts.</p></div>
+
+<div class="gcard" id="zero-fsdp-deepspeed"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>ZeRO / FSDP / DeepSpeed</b><p>libraries that shard a model across GPUs/RAM for <em>training</em> big models. Useful in principle, but our 4.9 GB/s link makes them economically dead for us.</p></div>
+
+<div class="gcard" id="multi-gpu-parallelism"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>Multi-GPU parallelism</b><p>ways to use 2 GPUs on <em>one</em> job: <b>tensor/sequence parallel</b> (split each layer — needs fast links we lack) vs <b>pipeline parallel</b> (different stages on each GPU). For us, only <b>parallel throughput</b> (2 independent renders) and an <b>encoder-on-GPU1 / DiT-on-GPU0</b> pipeline actually work.</p></div>
+
+<div class="gcard" id="nccl-nvidia-collective-communications-library"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>NCCL (NVIDIA Collective Communications Library)</b><p>the library GPUs use to talk to each other in multi-GPU work; carries "collective" ops like all-reduce and all-gather. Say "nickel".</p></div>
+
+<div class="gcard" id="collective-operation"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>Collective operation</b><p>an operation across ALL the GPUs at once (not one card alone) — e.g. all-reduce, all-gather, broadcast.</p></div>
+
+<div class="gcard" id="all-reduce"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>all-reduce</b><p>every GPU contributes a value and all of them receive the combined result (e.g. the sum). The basic multi-GPU sync.</p></div>
+
+<div class="gcard" id="all-gather"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>all-gather</b><p>each GPU holds a piece; the op collects every piece onto every GPU.</p></div>
+
+<div class="gcard" id="torchrun"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>torchrun</b><p>PyTorch's launcher that starts one process per GPU (one "rank" each) for distributed / multi-GPU runs.</p></div>
+
+<div class="gcard" id="rank-world-size"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>rank / world size</b><p>rank = a process/GPU's ID in the group (0,1,2…); world size = how many there are total.</p></div>
+
+<div class="gcard" id="context-sequence-parallelism-cp"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>Context / sequence parallelism (CP)</b><p>splitting the input SEQUENCE across GPUs so each processes ~1/N of the tokens; cuts per-GPU activation memory (used to fit longer video).</p></div>
+
+<div class="gcard" id="cp-plan"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>cp_plan</b><p>the map telling a model which forward inputs to split and where to gather them back, for context parallelism.</p></div>
+
+<div class="gcard" id="dma-direct-memory-access"><a class="gch" href="24-pcie-nvlink-interconnect.html">ch.24 →</a><b>DMA (Direct Memory Access)</b><p>a device (like a GPU) moving data to/from memory on its own, without the CPU copying each byte.</p></div>
+
+<div class="gcard" id="p2p-peer-to-peer"><a class="gch" href="16-multi-gpu-and-nvlink.html">ch.16 →</a><b>P2P (peer-to-peer)</b><p>direct GPU-to-GPU memory access. <b>Disabled on our setup</b> (no NVLink, PHB topology) — transfers detour through host RAM.</p></div>
+
+<div class="gcard" id="nccl-p2p-disable"><a class="gch" href="24-pcie-nvlink-interconnect.html">ch.24 →</a><b>NCCL_P2P_DISABLE</b><p>an env flag telling NCCL not to attempt direct GPU-to-GPU P2P (needed on topologies where P2P isn't available, like our no-NVLink SYS path); it falls back to routing through RAM.</p></div>
+
+<div class="gcard" id="pcie-root-complex"><a class="gch" href="24-pcie-nvlink-interconnect.html">ch.24 →</a><b>PCIe root complex</b><p>the CPU's built-in PCIe controller that connects PCIe devices (GPUs) to the CPU and memory; it routes P2P traffic.</p></div>
+
+<div class="gcard" id="activation-wall"><a class="gch" href="12-pushing-past-8gb.html">ch.12 →</a><b>Activation wall</b><p><em>our</em> specific bottleneck: the working buffers of one denoise step (~88% of the 8 GB), which scale with resolution × frames. The thing that blocks native 720p.</p></div>
+
+<div class="gcard" id="sys-phb"><a class="gch" href="24-pcie-nvlink-interconnect.html">ch.24 →</a><b>SYS / PHB</b><p>labels in <code>nvidia-smi topo</code> for how two GPUs connect: <b>PHB</b> = via the CPU's PCIe host bridge (our GPU1↔GPU2); <b>SYS</b> = across the two CPU sockets (our GPU0 to the others) — the slowest path.</p></div>
+
+<div class="gcard" id="qpi-quickpath-interconnect"><a class="gch" href="24-pcie-nvlink-interconnect.html">ch.24 →</a><b>QPI (QuickPath Interconnect)</b><p>the link between two CPU sockets on Intel multi-socket boards; GPU-to-GPU traffic that crosses it is slow.</p></div>
+
+<div class="gcard" id="ulysses-ring-attention"><a class="gch" href="24-pcie-nvlink-interconnect.html">ch.24 →</a><b>Ulysses / Ring attention</b><p>two ways to do <em>sequence-parallel</em> attention across GPUs (all-to-all vs a ring). Both need a fast link — they <b>die on our 4.9 GB/s</b> bus.</p></div>
+
+<div class="gcard" id="communication-tax-interconnect-bound"><a class="gch" href="32-thinking-like-a-circuit.html">ch.32 →</a><b>Communication tax / interconnect-bound</b><p>the cost of swapping intermediate activations between GPUs when you split one render across cards (a <code>[tokens × 5376]</code> block ~50×/step over the ~4.9 GB/s no-NVLink link). Often costs <em>more</em> than the compute it saves, so 3 GPUs can be same-speed or slower on one job.</p></div>
+
+<div class="gcard" id="pipefusion"><a class="gch" href="26-serving-h3-real-world.html">ch.26 →</a><b>PipeFusion</b><p>a patch-pipeline for Diffusion Transformers that <b>shards weights 1/N</b> and crosses the link rarely — the <em>one</em> multi-GPU scheme that both fits the model and tolerates our slow bus.</p></div>
+
+## E · Quality & post-processing tools
+
+<div class="gcard" id="upscaling"><a class="gch" href="17-what-actually-improves-quality.html">ch.17 →</a><b>Upscaling</b><p>enlarging a small render to a bigger resolution. Classic upscalers (ESRGAN) <em>interpolate</em> → they <b>soften</b> faces (our measured problem).</p></div>
+
+<div class="gcard" id="esrgan-4x-ultrasharp"><a class="gch" href="07-optimization-720p.html">ch.07 →</a><b>ESRGAN / 4x-UltraSharp</b><p>a common AI upscaler model we used; sharp on textures but softens faces at our scale.</p></div>
+
+<div class="gcard" id="seedvr2"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>SeedVR2</b><p>a <em>generative</em> video super-resolution model that <b>reconstructs</b> real texture instead of interpolating — the one upscaler that can <em>add</em> face detail. Our realistic route to a 720p-<em>looking</em> result. (<a href="https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler">repo</a>)</p></div>
+
+<div class="gcard" id="supersample"><a class="gch" href="17-what-actually-improves-quality.html">ch.17 →</a><b>Supersample</b><p>render/upscale a bit larger then scale down for cleaner detail; mild upscales preserve detail, big ones soften.</p></div>
+
+<div class="gcard" id="frame-interpolation-rife-film"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Frame interpolation (RIFE / FILM)</b><p>invents in-between frames to smooth motion / raise fps. Adds <em>smoothness</em>, not <em>detail</em>. Always the <em>last</em> step in the chain.</p></div>
+
+<div class="gcard" id="face-restore-codeformer-gfpgan"><a class="gch" href="17-what-actually-improves-quality.html">ch.17 →</a><b>Face restore (CodeFormer / GFPGAN)</b><p>post-process that rebuilds faces (eyes/teeth) on big faces. <b>Per-frame versions cause eye-shimmer</b> in video.</p></div>
+
+<div class="gcard" id="keep-dicface"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>KEEP / DicFace</b><p><em>temporally-coherent</em> video face restorers — rebuild faces <em>without</em> the per-frame shimmer. The better choice for our clips.</p></div>
+
+<div class="gcard" id="pixels-per-face"><a class="gch" href="17-what-actually-improves-quality.html">ch.17 →</a><b>Pixels-per-face</b><p>our core quality law: face quality depends on how many pixels the face occupies, not how many people. Big close-up faces = sharp; distant crowd faces = melt. Eyes fail first, then teeth, then the whole face.</p></div>
+
+<div class="gcard" id="ref2va-minimaxh3referencetovideo"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>ref2va (MiniMaxH3ReferenceToVideo)</b><p>"reference-to-video-audio": condition generation on reference <em>images/videos</em> to <b>lock a character's identity</b> across segments. <code>max</code> size = stronger lock but slower. What keeps "the same 4 band members" from morphing.</p></div>
+
+<div class="gcard" id="fl2va-first-frame-chaining"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>fl2va / first_frame chaining</b><p>"first/last-to-video-audio": feed the <b>last frame of one clip as the first frame of the next</b> for seamless continuous motion. Needs a patch-aligned resolution (832 works, 848 fails).</p></div>
+
+<div class="gcard" id="lora"><a class="gch" href="17-what-actually-improves-quality.html">ch.17 →</a><b>LoRA</b><p>a small add-on ("adapter") trained to nudge a model toward a style/subject, without retraining the whole thing. The fal face LoRA <em>softened</em> at our 480p (it needs high res).</p></div>
+
+<div class="gcard" id="dora-qlora"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>DoRA / QLoRA</b><p>LoRA variants: DoRA (slightly higher fidelity), QLoRA (train on a 4-bit frozen base to save memory). Still need ≥16–24 GB to train — rent-only for us.</p></div>
+
+<div class="gcard" id="textual-inversion"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Textual inversion</b><p>teach the model a <em>new word</em> for a concept (tiny to store) — but still needs a full forward/backward pass to train.</p></div>
+
+<div class="gcard" id="turbo-lora-step-distillation"><a class="gch" href="13-int8-vs-q4.html">ch.13 →</a><b>Turbo LoRA / step distillation</b><p>a distilled adapter that lets the model generate in ~4–8 steps instead of 50 (much faster) — but <b>under-renders fine detail (teeth)</b>. H3 ships one already.</p></div>
+
+<div class="gcard" id="trigger-word"><a class="gch" href="17-what-actually-improves-quality.html">ch.17 →</a><b>Trigger word</b><p>a special token you put in the prompt to activate a LoRA (e.g. <code>r34l1sm</code>).</p></div>
+
+## F · Training & data
+
+<div class="gcard" id="fine-tune-full-fine-tune"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Fine-tune / Full fine-tune</b><p>continue training a model on new data. Full = update all 33B params (needs 40–80 GB, many GPUs). Not on our box.</p></div>
+
+<div class="gcard" id="distillation"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Distillation</b><p>train a small/fast "student" to mimic a big "teacher" model. Expensive; H3's Turbo LoRA is already a distillation.</p></div>
+
+<div class="gcard" id="step-distillation"><a class="gch" href="35-is-it-really-ours.html">ch.35 →</a><b>Step distillation</b><p>training a student model to reproduce many sampler steps in a few (e.g. <code>49 → ~4</code>, roughly <code>12×</code> fewer steps). Changes the <b>generative math itself</b> — the most feasible "core" move we could make ours, needing one modest rented run.</p></div>
+
+<div class="gcard" id="dataset"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Dataset</b><p>the curated (clip + caption) pairs you train on. <b>Quality decides more than any setting.</b> For us: ~150–200 sharp, eyes-open, ≥720p close-up clips, captioned in H3's format.</p></div>
+
+<div class="gcard" id="captioning"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Captioning</b><p>writing the text description paired with each training clip. We can auto-draft with <b>Qwen3-VL</b> then hand-verify.</p></div>
+
+<div class="gcard" id="pyscenedetect"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>PySceneDetect</b><p>a tool that auto-splits long videos into scene clips — step 1 of dataset prep.</p></div>
+
+<div class="gcard" id="bucket"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Bucket</b><p>a resolution group; you normalize clips into a few buckets (dims must be multiples of 32) rather than random sizes.</p></div>
+
+<div class="gcard" id="rank-lora-rank"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Rank (LoRA rank)</b><p>the "size" of a LoRA adapter (e.g. 16). Higher = more capacity + bigger file; rank 16 is often best for style.</p></div>
+
+<div class="gcard" id="steps-learning-rate"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Steps / Learning rate</b><p>training-loop settings. Steps = how many update iterations; LR = how big each update is. Too many steps on too few clips = <b>overfitting</b> (memorizes instead of generalizing).</p></div>
+
+## G · Hardware
+
+<div class="gcard" id="gpu-architectures"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>GPU architectures</b><p>generations, newest features last: <b>Kepler</b> (2014, sm_37 — <em>no tensor cores</em>, e.g. K80), <b>Ampere</b> (sm_86 — ours; INT8/INT4), <b>Ada</b> (sm_89 — adds FP8), <b>Hopper</b> (sm_90 — datacenter), <b>Blackwell</b> (sm_120 — adds FP4).</p></div>
+
+<div class="gcard" id="rtx-3060-ti"><a class="gch" href="02-your-hardware.html">ch.02 →</a><b>RTX 3060 Ti</b><p>our card. 8 GB, 448 GB/s, Ampere, INT8/INT4, no FP8. Two of them.</p></div>
+
+<div class="gcard" id="rtx-3090-24-gb"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>RTX 3090 (24 GB)</b><p>the honest upgrade inflection (~$900 used): first card that breaks our 8 GB wall — native 720p, resident weights, LoRA training — same int8 path we know.</p></div>
+
+<div class="gcard" id="rtx-4090-24-gb"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>RTX 4090 (24 GB)</b><p>~2.5–3.5× faster than ours + FP8, but ~$2,200 used. Buy over a 3090 only if render <em>time</em> is the pain.</p></div>
+
+<div class="gcard" id="a100-h100"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>A100 / H100</b><p>datacenter GPUs (40–80 GB). For training / big batches — <b>rent</b> these for one-off jobs, don't buy.</p></div>
+
+<div class="gcard" id="k80-avoid"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>K80 (avoid)</b><p>a cheap old Tesla card. <b>Dead on arrival for us:</b> Kepler (sm_37), <em>no tensor cores</em>, unsupported by modern PyTorch/Triton — can't run any of our stack. Older than the techniques.</p></div>
+
+<div class="gcard" id="tops-tflops"><a class="gch" href="18-number-formats-precision.html">ch.18 →</a><b>TOPS / TFLOPS</b><p>throughput units: TOPS = integer ops/sec (int8), TFLOPS = float ops/sec. Used to compare raw compute.</p></div>
+
+<div class="gcard" id="memory-bandwidth"><a class="gch" href="20-how-far-we-can-go.html">ch.20 →</a><b>Memory bandwidth</b><p>how fast a GPU reads its own VRAM (GB/s). For diffusion this often matters <em>more</em> than core count — why the bandwidth-starved 4060 Ti (288 GB/s) can feel slow despite being newer.</p></div>
+
+## H · Engines & serving
+
+<div class="gcard" id="inference-engine"><a class="gch" href="25-inference-engine-landscape.html">ch.25 →</a><b>Inference engine</b><p>the software that loads + runs a model (weights, kernels, memory, batching). A framework does it manually and slow; an engine adds the speed and plumbing.</p></div>
+
+<div class="gcard" id="llama-cpp-ollama"><a class="gch" href="25-inference-engine-landscape.html">ch.25 →</a><b>llama.cpp / Ollama</b><p><b>LLM (text)</b> engines; gave us the GGUF quant format. Don't run diffusion video.</p></div>
+
+<div class="gcard" id="vllm-sglang-tgi"><b>vLLM / SGLang / TGI</b><p>high-throughput LLM servers (PagedAttention / RadixAttention). <b>SGLang now also serves H3</b> (diffusion) — but needs ≥14 GB/card. → <a href="25-inference-engine-landscape.html">ch.25</a> · <a href="26-serving-h3-real-world.html">ch.26</a></p></div>
+
+<div class="gcard" id="pagedattention"><a class="gch" href="35-is-it-really-ours.html">ch.35 →</a><b>PagedAttention</b><p>vLLM's memory algorithm for LLM serving: pages the KV-cache like an OS pages RAM (fragmentation 60–80% → under 4%). A <b>new algorithm in the systems layer</b> — proof that systems work can be core-worthy without touching a single weight.</p></div>
+
+<div class="gcard" id="radixattention"><a class="gch" href="35-is-it-really-ours.html">ch.35 →</a><b>RadixAttention</b><p>SGLang's KV-cache-<em>reuse</em> algorithm: shares cached prefixes across requests. Like PagedAttention, a genuine algorithm in the systems layer, not a config.</p></div>
+
+<div class="gcard" id="systems-layer-vs-generative-core"><a class="gch" href="35-is-it-really-ours.html">ch.35 →</a><b>Systems layer vs generative core</b><p><em>running</em> a model (scheduling, memory, kernels — the engine) vs the model's own <b>architecture & training</b> (what it can generate — the core). Our four inventions are the systems layer; the core was forged in MiniMax's training run.</p></div>
+
+<div class="gcard" id="diffusers"><a class="gch" href="25-inference-engine-landscape.html">ch.25 →</a><b>🤗 Diffusers</b><p>the reference <em>diffusion</em> library; H3 ships here and our own engine builds on it.</p></div>
+
+<div class="gcard" id="comfyui"><a class="gch" href="25-inference-engine-landscape.html">ch.25 →</a><b>ComfyUI</b><p>the node-graph diffusion UI (what we deliberately left).</p></div>
+
+<div class="gcard" id="xdit"><a class="gch" href="25-inference-engine-landscape.html">ch.25 →</a><b>xDiT</b><p>a multi-GPU <b>Diffusion-Transformer</b> engine ("the vLLM of DiTs") — H3's family, and our parallelism reference.</p></div>
+
+<div class="gcard" id="cuda-rocm-metal"><a class="gch" href="25-inference-engine-landscape.html">ch.25 →</a><b>CUDA / ROCm / Metal</b><p>the raw compute APIs ("the metal") per vendor: <b>CUDA</b> (NVIDIA, ours), <b>ROCm/HIP</b> (AMD), <b>Metal</b> (Apple). Every engine sits on one of these.</p></div>
+
+<div class="gcard" id="h3-consumer-bench"><a class="gch" href="27-hardware-budget-audit.html">ch.27 →</a><b>h3-consumer-bench</b><p>the community repo that proved full-33 B H3 on a single 24 GB card (int8 streaming, phase-A encode / phase-B denoise) — the recipe our render follows.</p></div>
+
+<div class="callout spec"><span class="t">Still fuzzy on one?</span>
+<p>Every term links to the chapter that uses it in context — that's where the plain explanation becomes a worked example. The older, gentler glossary of the first-six-chapters terms lives at <a href="11-glossary.html">ch.11</a>; this page is the complete, current one covering everything through ch.20.</p></div>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/app.js"></script>
+<script>
+(function(){
+  function wire(){
+    var q=document.getElementById("gq"), c=document.getElementById("gcount");
+    if(!q){ return setTimeout(wire,80); }
+    var cards=[].slice.call(document.querySelectorAll(".gcard"));
+    if(!cards.length){ return setTimeout(wire,80); }
+    var heads=[].slice.call(document.querySelectorAll(".article h2"));
+    cards.forEach(function(el){ el.dataset.t=el.textContent.toLowerCase(); });
+    function run(){
+      var v=q.value.trim().toLowerCase(), shown=0;
+      cards.forEach(function(el){
+        var hit=!v||el.dataset.t.indexOf(v)>-1;
+        el.classList.toggle("ghidden",!hit); if(hit) shown++;
+      });
+      heads.forEach(function(hd){
+        var any=false,n=hd.nextElementSibling;
+        while(n&&n.tagName!=="H2"){ if(n.classList&&n.classList.contains("gcard")&&!n.classList.contains("ghidden")) any=true; n=n.nextElementSibling; }
+        hd.classList.toggle("ghidden",!!v&&!any);
+      });
+      c.textContent=v?(shown+" of "+cards.length+" terms"):(cards.length+" terms");
+    }
+    q.addEventListener("input",run); run();
+  }
+  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded",wire); else wire();
+})();
+</script>
+
+</body>
+</html>

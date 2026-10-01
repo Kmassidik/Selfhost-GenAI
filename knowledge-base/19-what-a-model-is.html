@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>19 · What a Model Actually Is</title>
+<meta name="description" content="A model is a fixed recipe of matrix operations plus billions of learned numbers that fill it — stored on disk, held in RAM, and computed on the GPU one slice at a time.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 19 · The foundation under everything</span>
+
+# What a Model Actually Is — and Where It Runs
+
+<p class="lede">A model is <b>two things bolted together</b>: a fixed recipe of matrix operations — the <b>architecture</b> — and billions of learned numbers that fill those matrices — the <b>weights</b>. It <b>lives</b> on disk, <b>waits</b> in system RAM, and <b>runs</b> only inside the GPU, which can touch nothing that is not in its own memory at that instant.</p>
+
+Every constraint in this guide is a consequence of those two sentences. The hours per render, the offload trick, the reason a 20 GB file runs on an 8 GB card, the reason it cannot be trained there — all of it falls out of what a model physically is and where each part of it has to be at each moment.
+
+## The file is inert
+
+Start with the most concrete thing available: the file.
+
+The generator half of MiniMax-H3 is a **20 GB** file on disk. It can be copied, checksummed, moved to another machine, backed up. Doing any of that produces no video. Open it and there is no code inside, no logic, no instructions — nothing that could execute. It is a container of numbers with labels attached.
+
+That container format is `safetensors`, and its structure is worth knowing because it explains a lot of behaviour. The file is a small header followed by one enormous run of raw bytes. The header is a dictionary: for each named array it records the **name**, the **shape**, the **data type**, and the **byte offset** where that array begins. Nothing else. There is no compression, no interleaving, no code.
+
+<div class="callout spec"><span class="t">What one entry in that dictionary looks like</span>
+<p>A single attention projection inside one of H3's blocks has shape <code>5376 × 7168</code> and, under int8, one byte per number. That is <b>38,535,168</b> numbers — about <b>38.5 MB</b> — sitting as one contiguous block of bytes at a known offset. Nothing marks it as "attention" except its name. Nothing in the file says what to <em>do</em> with it.</p></div>
+
+Because the header records exact offsets, a loader can read one array out of the middle of a 20 GB file without touching the rest. That property is not a curiosity — it is the mechanism the entire offload strategy is built on, and we come back to it below.
+
+## Half one: the weights
+
+The weights are the learned half. H3's generator holds roughly **20 billion** of these numbers, arranged almost entirely as **matrices** — two-dimensional grids — with some **vectors** for biases and scale factors.
+
+They are the only part of the model that training produced. Every hour of datacentre compute MiniMax spent went into choosing these values and nothing else. The architecture around them was written by hand, in Python, by people, before training started.
+
+A useful way to hold this: the weights are the **dial settings**. Twenty billion dials, each with a number on it. Training is the search for the settings. Running the model is reading them.
+
+## Half two: the architecture
+
+The architecture is the wiring — a fixed, hand-written sequence saying which matrix multiplies what, in what order, with which normalisation and nonlinearity in between. In H3 that sequence is 50 near-identical blocks stacked end to end ([ch.28](28-anatomy-of-h3.html)).
+
+The analogy that actually holds is a **circuit board**. The board's traces are the architecture: soldered, unchanging, defining what connects to what. The component values are the weights: measured, specific, and completely meaningless without the board. Swap the board and the same components do something else, or nothing. Swap the components and the same board produces garbage.
+
+<div class="callout truth"><span class="t">Neither half is the model</span>
+<p>A model is <b>numbers arranged so that the arithmetic means something</b>. The weights without the architecture are an undifferentiated pile of floats. The architecture without the weights is a shape that computes noise. This is why a weight file and its config file must match exactly — the config <em>is</em> the board, and the file is only the components.</p></div>
+
+## What one layer actually computes
+
+Strip away the vocabulary and a layer is one operation repeated: take the numbers coming in, multiply them by a learned matrix, add a learned offset, bend the result through a nonlinearity, pass it on.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="One layer of the transformer: a 5376-wide input vector is multiplied by a 5376 by 7168 learned weight matrix to produce a 7168-wide output, and separately the feed-forward path expands 5376 to 14336 and back down to 5376.">
+  <defs>
+    <marker id="m1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="m2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE TOKEN, ONE PROJECTION — THE WHOLE OPERATION</text>
+  <rect x="2" y="60" width="36" height="140" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="220" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">in</text>
+  <text x="20" y="236" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">5376</text>
+  <text x="66" y="136" text-anchor="middle" fill="#6f7b8f" font-size="16" font-family="Inter,sans-serif">×</text>
+  <rect x="96" y="60" width="180" height="140" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <line x1="96" y1="95" x2="276" y2="95" stroke="#2a6b5c"/>
+  <line x1="96" y1="130" x2="276" y2="130" stroke="#2a6b5c"/>
+  <line x1="96" y1="165" x2="276" y2="165" stroke="#2a6b5c"/>
+  <line x1="141" y1="60" x2="141" y2="200" stroke="#2a6b5c"/>
+  <line x1="186" y1="60" x2="186" y2="200" stroke="#2a6b5c"/>
+  <line x1="231" y1="60" x2="231" y2="200" stroke="#2a6b5c"/>
+  <text x="186" y="124" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">learned weights</text>
+  <text x="186" y="142" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">5376 × 7168</text>
+  <text x="186" y="220" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">38,535,168 numbers</text>
+  <text x="186" y="236" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">≈ 38.5 MB at int8</text>
+  <text x="302" y="136" text-anchor="middle" fill="#6f7b8f" font-size="16" font-family="Inter,sans-serif">=</text>
+  <rect x="330" y="60" width="36" height="140" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <text x="348" y="220" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">out</text>
+  <text x="348" y="236" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">7168</text>
+  <line x1="392" y1="130" x2="424" y2="130" stroke="#6f7b8f" marker-end="url(#m1)"/>
+  <text x="408" y="120" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">then</text>
+  <rect x="440" y="58" width="318" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="599" y="79" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">add a learned offset, normalise</text>
+  <text x="599" y="95" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">a vector, not a matrix — cheap</text>
+  <rect x="440" y="118" width="318" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="599" y="139" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">bend through a nonlinearity</text>
+  <text x="599" y="155" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">no weights at all — pure arithmetic</text>
+  <rect x="440" y="178" width="318" height="62" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="599" y="199" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">feed-forward: 5376 → 14336 → 5376</text>
+  <text x="599" y="216" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">expand wide, squeeze back down</text>
+  <text x="599" y="232" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">two more matrices, ~154 M numbers</text>
+  <line x1="599" y1="164" x2="599" y2="174" stroke="#7aa2ff" marker-end="url(#m2)"/>
+  <text x="2" y="278" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Repeat 50 times. That stack is the entire generator — no branching, no logic, no lookup.</text>
+</svg>
+
+Written as one line, a layer is `output = nonlinearity(input × W + b)`. Everything else — attention, normalisation, the whole transformer — is a particular arrangement of that same move. There is no branching. No `if`. No search through stored examples. A forward pass through the model executes the *identical* sequence of multiplications every single time, regardless of the prompt. Only the numbers flowing through it differ.
+
+<div class="callout truth"><span class="t">Why nothing is "looked up"</span>
+<p>People reasonably assume a generative model retrieves something — a clip, a frame, a fragment. It cannot. The only operations available are multiply and add against fixed matrices. There is no index, no table, no addressing scheme that could point at a stored video. What was learned is not <em>content</em> but a <b>direction field</b>: from any arrangement of numbers, which way is more plausible (<a href="01-what-is-genai.html">ch.01</a>).</p></div>
+
+## Where each part physically sits
+
+Now the second half of the title. Four kinds of hardware are involved, and confusing their jobs is the root of almost every wrong intuition about what a machine can run.
+
+The distinction that matters is between **storing** and **computing**. They are done by different silicon, at speeds that differ by orders of magnitude, and the model spends its life shuttling between them.
+
+<div class="callout spec"><span class="t">The workshop — storage against compute</span>
+<table>
+<tr><th>Hardware</th><th>On this build</th><th>Workshop role</th><th>Job</th></tr>
+<tr><td><b>Disk</b></td><td>879 GB, 585 GB free</td><td>the <b>library</b></td><td>huge, slow, permanent — where the model file sleeps</td></tr>
+<tr><td><b>System RAM</b></td><td>125 GB DDR3-1600</td><td>the <b>workbench</b></td><td>holds the entire 20 GB model while a render is running</td></tr>
+<tr><td><b>VRAM</b></td><td>8 GB per card, 3 cards</td><td>the <b>lit circle under the lamp</b></td><td>only what the GPU is touching at this instant</td></tr>
+<tr><td><b>GPU cores</b></td><td>Ampere, sm_86</td><td>the <b>hands</b></td><td>the only place arithmetic actually happens</td></tr>
+</table>
+<p>The rule that never bends: <b>the GPU computes only on what is in VRAM.</b> It cannot reach into system RAM. It cannot read the disk. Every number it multiplies had to be carried to it first.</p></div>
+
+The analogy earns its place because the *distances* are genuinely different, not just rhetorically. A card reads its own VRAM at about **448 GB/s**. Reaching across PCIe 3.0 ×16 to system RAM is slower by more than an order of magnitude. That gap is why the lamp metaphor works: stepping outside the lit circle is not a small inconvenience, it is a different order of operation.
+
+<svg viewBox="0 0 760 280" width="100%" style="max-width:920px" role="img" aria-label="Memory hierarchy: the 20 GB model is loaded from disk into 125 GB of system RAM once, then one 0.4 GB block at a time is copied over PCIe into 8 GB of VRAM, computed by the GPU cores, and freed before the next block arrives.">
+  <defs>
+    <marker id="m3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="m4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="m5" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE SUPPLY CHAIN — ONE BLOCK AT A TIME</text>
+  <rect x="2" y="46" width="150" height="76" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="77" y="70" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Disk</text>
+  <text x="77" y="88" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">879 GB</text>
+  <text x="77" y="105" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the 20 GB file</text>
+  <rect x="196" y="46" width="196" height="76" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="294" y="70" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">System RAM — 125 GB</text>
+  <text x="294" y="88" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">all 50 blocks resident</text>
+  <text x="294" y="105" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">loaded once, at startup</text>
+  <rect x="436" y="46" width="176" height="76" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="524" y="70" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">VRAM — 8 GB</text>
+  <text x="524" y="88" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">one block ≈ 0.4 GB</text>
+  <text x="524" y="105" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">plus the latent</text>
+  <rect x="656" y="46" width="102" height="76" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="707" y="76" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">GPU</text>
+  <text x="707" y="94" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">cores</text>
+  <line x1="154" y1="84" x2="192" y2="84" stroke="#6f7b8f" marker-end="url(#m3)"/>
+  <text x="173" y="36" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">once</text>
+  <line x1="394" y1="84" x2="432" y2="84" stroke="#5ee0c0" marker-end="url(#m4)"/>
+  <text x="413" y="36" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">PCIe</text>
+  <line x1="614" y1="84" x2="652" y2="84" stroke="#5ee0c0" marker-end="url(#m4)"/>
+  <text x="633" y="36" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">448 GB/s</text>
+  <path d="M500,126 L500,152 L318,152 L318,126" fill="none" stroke="#ffb454" stroke-dasharray="3 3" marker-end="url(#m5)"/>
+  <text x="409" y="168" text-anchor="middle" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">block freed — the next one takes its place</text>
+  <rect x="2" y="192" width="756" height="76" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="16" y="214" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">50 blocks × 0.4 GB  =  20 GB crosses PCIe for ONE step.</text>
+  <text x="16" y="234" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">× 23 steps  =  about 460 GB of traffic for a single render — the whole model, pulled over 23 times.</text>
+  <text x="16" y="256" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">The card never holds more than 0.4 GB of the model at any moment.</text>
+</svg>
+
+## Running the model is a supply chain
+
+Put those together and "running a model" stops being mysterious. It is a loop of logistics:
+
+```
+disk → load into RAM (once) → copy one block into VRAM → GPU computes → free it → next block
+```
+
+The middle three steps repeat 50 times per step, and the whole thing repeats once per sampling step.
+
+<div class="callout warn"><span class="t">Why renders take hours — the entire story</span>
+<p>The generator is <b>20 GB</b>. A single card holds <b>8 GB</b>. The model cannot fit, so it is kept on the workbench in system RAM and slid through the card one block at a time. Each block is roughly <b>0.4 GB</b>; there are 50 of them; a step reads every one.</p>
+<p>A 23-step render therefore drags about <b>460 GB</b> across the PCIe bus — the entire model, fetched from scratch, 23 times over. On the measured <code>an1</code> render (1280×704, 124 frames, 23 steps) that came to <b>3,295 seconds — 55 minutes — at 143 s per step</b>. The arithmetic in the multiplies is not what costs the time. <b>The carrying is.</b></p></div>
+
+That is worth restating, because it inverts the naive picture. A card large enough to hold all 20 GB at once would do the *same* arithmetic — the same multiplies, in the same order, producing the identical result — and simply never pay the carrying cost. Same model, same maths; the only difference is whether it fits.
+
+<div class="callout truth"><span class="t">Stated plainly</span>
+<p>The <b>GPU runs</b> the model. <b>RAM holds</b> it. <b>Disk stores</b> it. <b>VRAM is the narrow window</b> between holding and running, and its width sets the pace of everything. RAM does not compute; it feeds. Disk does not compute; it archives.</p></div>
+
+## Why the format on disk decides what is possible
+
+One more consequence of the file being a plain dictionary of offsets: **it can be read in pieces**. The loader does not have to materialise 20 GB to get at block 7. It seeks to block 7's offset and reads 0.4 GB.
+
+That is the difference between a model that can be offloaded and one that cannot. A format that interleaved or compressed across the whole file would force the entire thing into memory before any of it could be used, and 20 GB would simply not run on 8 GB — not slowly, not at all.
+
+<div class="callout spec"><span class="t">The precision lever, and the wall behind it</span>
+<p>Bytes per number is the other half of what decides fit. Taking the 20 billion parameters the config actually describes, and multiplying:</p>
+<table>
+<tr><th>Format</th><th>Bytes per number</th><th>Footprint</th></tr>
+<tr><td>fp32</td><td>4</td><td>~80 GB</td></tr>
+<tr><td>bf16</td><td>2</td><td>~40 GB</td></tr>
+<tr><td>int8 — what we run</td><td>1</td><td><b>20 GB</b></td></tr>
+</table>
+<p>The bf16 transformer as originally published is a <b>~66 GB</b> file, larger than that arithmetic predicts, because the int8 build we run is not only requantized but pruned — the counting is done properly in <a href="28-anatomy-of-h3.html">ch.28</a>.</p>
+<p>The headline 33-billion-parameter figure at fp32 would be 132 GB — more than the <b>125 GB</b> of RAM on this machine. Full precision is impossible here not because the GPU refuses it, but because the numbers will not fit on the workbench, never mind under the lamp (<a href="18-number-formats-precision.html">ch.18</a>).</p></div>
+
+## Training and inference are different machines
+
+The last piece is the one that explains why an 8 GB card can *run* a 33-billion-parameter model and could never *make* one.
+
+**Inference** — what this entire guide does — pushes numbers forward through the fixed chain. The weights are read-only. Nothing about the model changes. When a block is finished, its weights can be thrown away immediately, because the next step will fetch them again anyway. That is precisely what makes the offload trick possible: the memory holding a block has no value once the block is done.
+
+**Training** runs the same forward pass, then runs it *backwards*. For every one of those billions of parameters it computes a **gradient** — a number saying which way to nudge that parameter — and the optimiser keeps its own running statistics per parameter on top of that. Worse, the backward pass needs the *activations* from the forward pass, so intermediate results cannot be discarded when computed; they must be held until the backward pass reaches them.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="Inference holds only the current block and the latent and discards each block after use, while training must additionally hold a gradient for every parameter, optimiser statistics, and all forward activations until the backward pass consumes them.">
+  <defs>
+    <marker id="m6" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="m7" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">INFERENCE — WHAT THIS BUILD DOES</text>
+  <rect x="2" y="26" width="120" height="44" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="62" y="53" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">block n</text>
+  <rect x="158" y="26" width="120" height="44" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="218" y="53" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">block n+1</text>
+  <rect x="314" y="26" width="120" height="44" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="374" y="53" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">block n+2</text>
+  <line x1="124" y1="48" x2="154" y2="48" stroke="#5ee0c0" marker-end="url(#m6)"/>
+  <line x1="280" y1="48" x2="310" y2="48" stroke="#5ee0c0" marker-end="url(#m6)"/>
+  <line x1="436" y1="48" x2="466" y2="48" stroke="#5ee0c0" marker-end="url(#m6)"/>
+  <rect x="470" y="26" width="288" height="44" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="614" y="46" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">each block dropped the moment it is done</text>
+  <text x="614" y="62" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">peak memory ≈ one block + the latent</text>
+  <line x1="2" y1="96" x2="758" y2="96" stroke="#232c3b"/>
+  <text x="2" y="120" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">TRAINING — WHY IT CANNOT HAPPEN HERE</text>
+  <rect x="2" y="132" width="120" height="44" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="62" y="159" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">block n</text>
+  <rect x="158" y="132" width="120" height="44" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="218" y="159" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">block n+1</text>
+  <rect x="314" y="132" width="120" height="44" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="374" y="159" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">block n+2</text>
+  <line x1="124" y1="154" x2="154" y2="154" stroke="#6f7b8f" marker-end="url(#m6)"/>
+  <line x1="280" y1="154" x2="310" y2="154" stroke="#6f7b8f" marker-end="url(#m6)"/>
+  <path d="M374,178 L374,200 L218,200 L218,178" fill="none" stroke="#ff6b6b" marker-end="url(#m7)"/>
+  <path d="M218,200 L62,200 L62,178" fill="none" stroke="#ff6b6b" marker-end="url(#m7)"/>
+  <text x="218" y="220" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">backward pass — nothing may be freed on the way down</text>
+  <rect x="470" y="132" width="288" height="106" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="614" y="154" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">simultaneously resident:</text>
+  <text x="614" y="174" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">every weight  +  one gradient per weight</text>
+  <text x="614" y="192" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">+ optimiser statistics per weight</text>
+  <text x="614" y="210" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">+ every forward activation, held</text>
+  <text x="614" y="230" text-anchor="middle" fill="#ffdede" font-size="11" font-family="Inter,sans-serif">several times the model, all at once</text>
+</svg>
+
+So the asymmetry is structural, not a matter of degree. Inference can stream because it is allowed to forget. Training cannot stream because it must remember everything until the gradient arrives. Reading numbers is cheap. Finding them is not.
+
+<div class="callout truth"><span class="t">The consequence, in one line</span>
+<p>The expensive half — deciding what 20 billion numbers should be — was paid once by somebody with a datacentre, and then handed out as a file. Everything in this guide is the cheap half, done stubbornly on hardware that was never meant for it.</p></div>
+
+## So: vectors, matrices, or data being predicted?
+
+All three, each in its own place — and keeping them straight is most of the battle.
+
+<div class="callout spec"><span class="t">Three different things people call "the model"</span>
+<ul>
+<li><b>The weights are matrices</b> (with some vectors) — static grids of learned numbers, 20 billion of them, sitting in a file.</li>
+<li><b>What flows through is tensors</b> — for video, a five-dimensional stack. One measured H3 latent had shape <code>(1, 24, 37, 30, 52)</code>: one clip, 24 channels, 37 latent frames, 30 tall, 52 wide.</li>
+<li><b>The act of running it is a chain of matrix multiplies ending in a prediction</b> — for H3, a prediction of which part of the current latent is noise, which the scheduler then partly subtracts.</li>
+</ul>
+<p>Not "only matrices" and not "just data": <b>matrices of learned numbers, arranged by a fixed recipe, transforming input tensors into a predicted output.</b> The shapes at each stage are worked through in <a href="15-vectors-matrices-signals.html">ch.15</a>.</p></div>
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>A model = weights + architecture.</b> Learned numbers in a fixed circuit. Neither half is the model alone.</li>
+<li><b>The file is inert</b> — a dictionary of names, shapes and byte offsets. That readable-in-pieces structure is what makes offloading possible at all.</li>
+<li><b>The GPU computes; RAM and disk store.</b> Nothing is multiplied until it has been carried into VRAM.</li>
+<li><b>Slowness here is carrying, not computing.</b> 20 GB of weights become ~460 GB of PCIe traffic across a 23-step render.</li>
+<li><b>Inference streams because it may forget; training cannot.</b> That is why 8 GB runs H3 and could never train it.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">weights</span><span class="badge">architecture</span><span class="badge">parameter</span><span class="badge">safetensors</span><span class="badge">tensor</span><span class="badge">forward pass</span><span class="badge">gradient</span><span class="badge">optimiser state</span><span class="badge">activation</span><span class="badge">VRAM vs RAM</span><span class="badge">offload</span><span class="badge">block</span><span class="badge">precision</span></p>
+<p>If those feel solid, the anatomy of a real model will read like a parts list rather than a mystery.</p></div>
+
+Next: cut H3 open and count what is inside — four files, fifty blocks, and the arithmetic that shows exactly where all 20 GB went.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

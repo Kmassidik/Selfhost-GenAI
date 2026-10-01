@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>14 · The Math Behind It All</title>
+<meta name="description" content="Every cost in this build derived from first principles — the ODE that generation solves, the token count that sets attention's price, the 20 billion parameters, and the algebra that freed two gigabytes without changing a single output bit.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 14 · The mathematics</span>
+
+# The Math Behind It All
+
+<p class="lede">Every number this build fought over — the 6.5 GB memory floor, the $2.24$ GB int8 buffer, the $1.87\times$ resolution win, the 20 GB model file, the $34\times$ jump in cost from 480p to 720p — comes out of about a dozen equations. This chapter derives all of them, in order, from a prompt to a finished file.</p>
+
+None of this is decorative. Each formula below was written down *because* something on the machine cost more than expected, and the formula is what explained it. Read the sections that answer a question actually being asked; the rest will still be here.
+
+<div class="callout spec"><span class="t">How to read the math</span>
+<p>Block equations are <code>$$ … $$</code>, inline math is <code>$…$</code> — rendered live by <b>KaTeX</b>, bundled locally so it works offline. Notation is consistent throughout: $d$ is the hidden dimension, $N$ is sequence length, bold symbols are tensors, $\theta$ is the set of model weights, and $S$ is the number of sampling steps.</p></div>
+
+---
+
+## 0 · The whole pipeline as one chain
+
+A prompt $P$ becomes tokens, then a meaning-vector, then a latent, then pixels and sound. The full chain in symbols:
+
+$$
+P \;\xrightarrow{\;\text{tok},\;E\;}\; \mathbf{x}^{(0)} \;\xrightarrow{\;f_{1:50}\;}\; \mathbf{c}
+\quad\xrightarrow[\;\text{Euler, } S \text{ steps}\;]{\;\dot{\mathbf{z}} = v_\theta(\mathbf{z},t,\mathbf{c})\;}\quad
+\mathbf{z}_0 \;\xrightarrow{\;\text{VAE}\;}\; \big(\mathbf{V},\ \mathbf{A}\big)
+$$
+
+Three arrows, three completely different kinds of cost. The first is a one-off. The second runs $S$ times and dominates the wall clock. The third runs once, and is where the most expensive failures of this project happened, because it runs *after* everything else has been paid for.
+
+---
+
+## 1 · Text becomes meaning
+
+A tokenizer chops the string into integer tokens, then an embedding table $E$ looks each one up:
+
+$$
+\mathbf{t} = \mathrm{tok}(P) \in \mathbb{N}^{L}, \qquad
+\mathbf{x}^{(0)} = E[\mathbf{t}] \in \mathbb{R}^{L \times d}
+$$
+
+The encoder — Qwen3-VL-32B, 26 GB on disk — is a stack of transformer layers $f_\ell$, and H3 taps the hidden state at layer 50 rather than reading the final output:
+
+$$
+\mathbf{x}^{(\ell)} = f_\ell\big(\mathbf{x}^{(\ell-1)}\big),\ \ \ell = 1\dots 50
+\qquad\Longrightarrow\qquad
+\mathbf{c} = \mathbf{x}^{(50)} \in \mathbb{R}^{L \times d}
+$$
+
+That tap is worth pausing on. The last layer of a language model is specialised for predicting the next token; a middle layer holds a more general representation of *meaning*. H3 wants the meaning, not the prediction, so it reaches in and takes the intermediate state.
+
+Each layer is attention plus a feed-forward network, with residual connections around both:
+
+$$
+f_\ell(\mathbf{x}) = \mathbf{x} + \mathrm{FFN}\big(\mathbf{x} + \mathrm{Attn}(\mathbf{x})\big)
+$$
+
+**Attention** — the core operation, and the origin of the famous quadratic cost:
+
+$$
+\mathrm{Attn}(\mathbf{x}) = \mathrm{softmax}\!\left(\frac{\mathbf{Q}\mathbf{K}^{\top}}{\sqrt{d_k}}\right)\mathbf{V},
+\qquad
+\mathbf{Q} = \mathbf{x}W_Q,\ \ \mathbf{K} = \mathbf{x}W_K,\ \ \mathbf{V} = \mathbf{x}W_V
+$$
+
+The score matrix $\mathbf{Q}\mathbf{K}^{\top} \in \mathbb{R}^{N \times N}$ is why compute scales as $\mathcal{O}(N^2)$: every element compared against every other. The $\sqrt{d_k}$ divisor is not cosmetic — without it the dot products grow with dimension, the softmax saturates, and gradients vanish during training.
+
+The feed-forward part is applied to each token independently and is usually the larger of the two in parameters:
+
+$$
+\mathrm{FFN}(\mathbf{x}) = \sigma\big(\mathbf{x}W_1 + b_1\big)W_2 + b_2, \qquad W_1 \in \mathbb{R}^{d \times d_{\text{ffn}}}
+$$
+
+This whole stage runs **once**, before any denoising, and $\mathbf{c}$ is then reused by every step. Its cost is fixed, and that matters later when Amdahl's law arrives.
+
+---
+
+## 2 · The canvas is noise, in latent space
+
+Video and audio are never generated in raw pixels. They live in a compressed **latent** grid, and generation starts from pure Gaussian noise:
+
+$$
+\mathbf{z}_1 \sim \mathcal{N}(\mathbf{0}, \mathbf{I}), \qquad
+\mathbf{z}_1 \in \mathbb{R}^{C \times F' \times H' \times W'}
+$$
+
+The VAE compresses space by a factor of 16 in each direction, which is the only reason a model this size can touch video at all:
+
+$$
+H' = \frac{H}{16}, \qquad W' = \frac{W}{16}
+$$
+
+Time compresses too, by roughly a factor of four — but only roughly, and the difference is measurable. The video VAE works in clips of 17 frames with 3 dropped at the seams, so the latent frame count is not a clean division.
+
+<div class="callout warn"><span class="t">Where the naive formula and the measurement disagree</span>
+<p>For an 832×480 clip of 124 frames, the measured latent shape is <code>(1, 24, 37, 30, 52)</code>. Spatially the formula is exact: $480/16 = 30$ and $832/16 = 52$. Temporally, $124/4 = 31$, but the real answer is <b>37</b>. The extra latent frames come from how clips are chunked and overlapped, not from a different compression ratio. Treat $F' \approx F/4$ as a planning estimate and the measured shape as the truth.</p></div>
+
+### From latent to tokens — the number that sets every price
+
+The transformer does not see the latent grid. It sees a **sequence**, produced by cutting the grid into patches. The config sets `patch_size` to $[1,2,2]$: no grouping in time, $2\times2$ in space.
+
+$$
+N \;=\; F' \times \frac{H'}{2} \times \frac{W'}{2}
+$$
+
+<svg viewBox="0 0 760 236" width="100%" style="max-width:920px" role="img" aria-label="Pipeline from an 832 by 480 clip of 124 frames, through the VAE which compresses space sixteen-fold to a latent of shape 1 by 24 by 37 by 30 by 52, through 2 by 2 patching, to a sequence of 14430 tokens.">
+  <defs>
+    <marker id="m1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">PIXELS → LATENT → PATCHES → THE SEQUENCE ATTENTION PAYS FOR</text>
+  <rect x="2" y="30" width="170" height="70" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="87" y="58" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">832 × 480</text>
+  <text x="87" y="78" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">124 frames</text>
+  <line x1="176" y1="64" x2="192" y2="64" stroke="#6f7b8f" marker-end="url(#m1)"/>
+  <text x="184" y="116" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">VAE ÷16</text>
+  <rect x="196" y="30" width="200" height="70" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="296" y="54" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">(1, 24, 37, 30, 52)</text>
+  <text x="296" y="72" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">measured latent shape</text>
+  <text x="296" y="90" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">24 channels · 37 latent frames</text>
+  <line x1="400" y1="64" x2="416" y2="64" stroke="#6f7b8f" marker-end="url(#m1)"/>
+  <text x="408" y="116" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">patch 1×2×2</text>
+  <rect x="420" y="30" width="170" height="70" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="505" y="58" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">37 × 15 × 26</text>
+  <text x="505" y="78" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">390 patches per frame</text>
+  <line x1="594" y1="64" x2="610" y2="64" stroke="#6f7b8f" marker-end="url(#m1)"/>
+  <rect x="614" y="30" width="144" height="70" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="686" y="58" text-anchor="middle" fill="#eafff8" font-size="14" font-family="Inter,sans-serif">14 430</text>
+  <text x="686" y="78" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">tokens</text>
+  <line x1="2" y1="140" x2="758" y2="140" stroke="#232c3b"/>
+  <text x="2" y="166" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">Every token attends to every other token, in each of 56 heads, in each of 50 blocks, on every one of S steps.</text>
+  <text x="2" y="190" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">14 430² ≈ 208 million pairs per head. Materialised in fp16 across 56 heads that would be about <tspan fill="#ff6b6b">23 GB</tspan> — on cards holding 8 GB each.</text>
+  <text x="2" y="214" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">It is never materialised. FlashAttention computes the softmax in tiles and never writes the full matrix down.</text>
+  <text x="2" y="232" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">(The 23 GB figure is arithmetic on the measured shape, not a measurement — nothing on this machine ever allocated it.)</text>
+</svg>
+
+Fourteen thousand tokens is the whole story of this build in one number. It is what makes a step take minutes instead of milliseconds, and it is what makes doubling the resolution far worse than doubling the cost.
+
+### The channels line up, which is a useful check
+
+Two config values are worth cross-checking against the VAE, because a mismatch here is the kind of error that produces a shape exception four layers deep. The transformer declares `in_channels` = 24 and `audio_in_channels` = 32. The video VAE declares `latent_channels` = 24 and the audio VAE `latent_channels` = 32. They agree exactly, which confirms that the DiT consumes VAE latents directly — no adapter, no reprojection.
+
+One value does *not* line up, and that is deliberate. `text_dim` is **5120**, while `hidden_size` is **5376**. The encoder's output width and the transformer's working width are different numbers, so the conditioning $\mathbf{c}$ has to pass through a projection $\mathbb{R}^{5120} \to \mathbb{R}^{5376}$ before it can be attended to. That is what `num_refiner_layers` = 2 is for: a short adapter stack that reshapes the text representation into something the DiT's own geometry can use.
+
+---
+
+## 2b · Position — how a token knows where it is
+
+Attention has no inherent notion of order. The softmax over $\mathbf{Q}\mathbf{K}^{\top}$ is a comparison of content, and if the sequence were shuffled the mathematics would not notice. For text that is merely wrong; for video, where a token's meaning is inseparable from *which frame and which corner of the picture* it came from, it would be fatal.
+
+The fix is **rotary position embedding**. Rather than adding a position vector to the token, RoPE *rotates* each pair of dimensions in $\mathbf{Q}$ and $\mathbf{K}$ by an angle proportional to position, using a geometric series of frequencies set by `rope_theta` = 10000:
+
+$$
+\omega_j = \frac{1}{10000^{\,2j/d_k}}, \qquad j = 0 \dots \tfrac{d_k}{2}-1
+$$
+
+Low $j$ gives fast rotation — fine positional detail; high $j$ gives slow rotation — coarse, long-range position. With $d_k = 128$ there are 64 such frequency pairs per head, and `rope_theta` is the 10000 that sets how quickly the frequencies decay.
+
+The property that makes this work is that a dot product between two rotated vectors depends only on the *difference* of their angles:
+
+$$
+\big\langle R(\omega m)\,\mathbf{q},\ R(\omega n)\,\mathbf{k}\big\rangle = g\big(\mathbf{q},\ \mathbf{k},\ m-n\big)
+$$
+
+So attention scores become functions of **relative** position, without any position ever being stored in the value being attended over. For video the rotation is applied across three axes — frame, height and width — so a token carries where it is in time and where it is on the canvas simultaneously.
+
+<div class="callout spec"><span class="t">Why this matters practically</span>
+<p>Relative positioning is a large part of why the same weights handle 512×288 and 1280×704 without retraining: the model never learned "position 4 371", only "seven patches to the left, two frames back". It is also why resolution is constrained by patch arithmetic rather than by a learned position table — and why the <a href="07-optimization-720p.html">848-pixel trap</a> is a shape error rather than a quality regression.</p></div>
+
+---
+
+## 3 · Flow matching — generation is an ODE
+
+H3 is a **flow-matching** model. It does not "remove one notch of noise" the way classic DDPM does. It learns a **velocity field** $v_\theta$, and generating means **integrating an ordinary differential equation** from noise at $t=1$ to data at $t=0$, steered the whole way by the meaning $\mathbf{c}$:
+
+$$
+\boxed{\;\frac{d\mathbf{z}_t}{dt} = v_\theta(\mathbf{z}_t,\ t,\ \mathbf{c})\;}
+\qquad \mathbf{z}_1 = \text{noise} \;\longrightarrow\; \mathbf{z}_0 = \text{clean latent}
+$$
+
+The training objective explains why this is a *regression* problem and not a classification one. Along the straight path $\mathbf{z}_t = t\,\mathbf{z}_1 + (1-t)\,\mathbf{z}_0$ between a real sample and a noise sample, the correct velocity is the constant $\mathbf{z}_1 - \mathbf{z}_0$, and the model is trained to predict exactly that:
+
+$$
+\mathcal{L} = \mathbb{E}_{t,\mathbf{z}_0,\mathbf{z}_1}\Big\|\, v_\theta(\mathbf{z}_t, t, \mathbf{c}) - (\mathbf{z}_1 - \mathbf{z}_0)\,\Big\|^2
+$$
+
+A squared error against a target vector. No probabilities over pixels, no discrete choices anywhere. And $v_\theta$ is the entire transformer — a DiT running over the packed video-and-audio latent sequence.
+
+---
+
+## 4 · Sampling is discretising that ODE
+
+Split $t \in [0,1]$ into $S$ steps. The `euler` sampler is literally Euler's method, and each step is one full forward pass through all fifty blocks:
+
+$$
+\mathbf{z}_{t-\Delta t} = \mathbf{z}_t - \Delta t \cdot v_\theta(\mathbf{z}_t, t, \mathbf{c}), \qquad \Delta t = \frac{1}{S}
+$$
+
+The true cost driver is the **number of function evaluations**:
+
+$$
+\mathrm{NFE} = S \times (\text{solver order})
+$$
+
+Euler is first order, so its local error is $\mathcal{O}(\Delta t)$ — big steps miss the curve. That single fact explains the most expensive failure in the render log.
+
+<svg viewBox="0 0 760 302" width="100%" style="max-width:920px" role="img" aria-label="Two panels showing Euler integration of the generation trajectory: with enough steps the straight chords hug the true curved path and land on the clean latent, while with only three steps the chords cut the corner and land somewhere else, producing mud.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">EULER'S METHOD ON THE GENERATION TRAJECTORY — WHY 3 STEPS IS NOT A ROUGH DRAFT</text>
+  <rect x="2" y="26" width="368" height="244" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="48" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">S = 23 · chords hug the curve</text>
+  <path d="M40,236 C110,236 150,150 200,124 S300,94 336,88" fill="none" stroke="#3a4a63" stroke-width="6" stroke-linecap="round"/>
+  <polyline points="40,236 78,234 112,224 142,200 168,172 196,144 240,116 290,98 336,88" fill="none" stroke="#5ee0c0" stroke-width="2"/>
+  <circle cx="40" cy="236" r="5" fill="#ff6b6b"/>
+  <circle cx="112" cy="224" r="3" fill="#5ee0c0"/>
+  <circle cx="168" cy="172" r="3" fill="#5ee0c0"/>
+  <circle cx="240" cy="116" r="3" fill="#5ee0c0"/>
+  <circle cx="336" cy="88" r="6" fill="#5ee0c0"/>
+  <text x="40" y="258" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">t = 1 · noise</text>
+  <text x="352" y="72" text-anchor="end" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">t = 0 · clean latent</text>
+  <rect x="390" y="26" width="368" height="244" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="408" y="48" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">S = 3 · chords cut the corner</text>
+  <path d="M428,236 C498,236 538,150 588,124 S688,94 724,88" fill="none" stroke="#3a4a63" stroke-width="6" stroke-linecap="round"/>
+  <polyline points="428,236 546,180 646,140 708,128" fill="none" stroke="#ff6b6b" stroke-width="2"/>
+  <circle cx="428" cy="236" r="5" fill="#ff6b6b"/>
+  <circle cx="546" cy="180" r="3" fill="#ff6b6b"/>
+  <circle cx="646" cy="140" r="3" fill="#ff6b6b"/>
+  <circle cx="708" cy="128" r="6" fill="#ff6b6b"/>
+  <circle cx="724" cy="88" r="6" fill="none" stroke="#5ee0c0"/>
+  <line x1="708" y1="122" x2="722" y2="94" stroke="#ff6b6b" stroke-dasharray="3 3"/>
+  <text x="740" y="160" text-anchor="end" fill="#c98f8f" font-size="10.5" font-family="Inter,sans-serif">lands somewhere else entirely</text>
+  <text x="2" y="292" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">The 3-step render was not a blurry version of the 23-step one. It integrated a different path and arrived at a different place: mud.</text>
+</svg>
+
+<div class="callout truth"><span class="t">The 5½-hour lesson</span>
+<p>The <code>g4k</code> render was 1280×704 × 345 frames at <b>3 steps</b>. It cost about five and a half hours and produced an unusable clip. The intuition that fewer steps means "the same picture, rougher" is wrong for an ODE solver: too few steps do not blur the destination, they <em>change</em> it. Composition never resolves because the trajectory left the neighbourhood of the correct solution in the first chord.</p></div>
+
+Step count is therefore not a quality slider to turn down when a render is expensive. It is a property of the **scene**: a tight close-up settles at $S=4$, a character mid-shot at $S=23$, a wide vista with a small distant subject needs $S=49$. Scenes with fine detail spread everywhere and a small subject have a more curved trajectory, and a more curved trajectory needs shorter chords.
+
+There is a way to cheat this, in principle. A distilled variant learns a *different, straighter* velocity field $v_\theta \to v'_\theta$, one whose trajectory is close enough to a straight line that four or six Euler steps are accurate. That is not integrating the same ODE more crudely — it is **changing the ODE** into one well-conditioned for coarse solvers. On this build such a distillation was never wired in; the one LoRA that was actually tried, at 480p, softened the image rather than sharpening it ([ch.40](40-lora-how-it-works.html)).
+
+---
+
+## 5 · Latent → pixels and sound
+
+Two decoders expand $\mathbf{z}_0$. Both outputs are **continuous** — a regression — and are then rescaled into integers:
+
+$$
+\mathbf{V} = \left\lfloor \big(\tanh(\mathrm{Dec}_{\text{vid}}(\mathbf{z}_0)) + 1\big)\cdot 127.5 \right\rceil \in [0,255],
+\qquad
+\mathbf{A} = \left\lfloor \mathrm{Dec}_{\text{aud}}(\mathbf{z}_0)\cdot 32767 \right\rceil \in [-32768,\ 32767]
+$$
+
+The "0–255" is a rescale of a continuous value, not a probability distribution over colours. There is no softmax anywhere near a pixel.
+
+That rounding step is also where a great deal of precision quietly dies. A weight stored to four decimal places has to survive fifty blocks and a sixteen-fold spatial expansion before landing in one of 256 integer levels. This is half the reason quantization is nearly free on a diffusion model ([ch.13](13-int8-vs-q4.html)).
+
+### The audio branch shares the same ODE
+
+H3 does not generate a picture and then score it. Video and audio latents are **packed into one sequence** and denoised together by the same velocity field. That is why `audio_in_channels` = 32 sits alongside `in_channels` = 24 in the same transformer config: one model, two kinds of token, one trajectory.
+
+The consequence is structural rather than cosmetic. Because both modalities are inside the same $\mathbf{z}_t$, every attention operation lets an audio token see the video tokens and vice versa, at every step, in every block. Sound and picture are not merely synchronised at the end — they are constrained by each other throughout the integration. A footstep and the foot landing are the same decision, made once.
+
+It also means the audio is not free. Audio tokens add to $N$, and $N$ is the quantity that attention squares. Every cost in §6 is being paid for a joint video-and-audio sequence, not a video-only one.
+
+The two decoders then run separately: $\mathrm{Dec}_{\text{vid}}$ produces frames at 24 fps, $\mathrm{Dec}_{\text{aud}}$ produces 32 kHz stereo, and the two are muxed into a single file. Only at that final stage do the modalities stop being one tensor.
+
+---
+
+## 6 · The cost model
+
+### 6.1 Where the parameters are
+
+The transformer config gives everything needed to count parameters exactly. With `hidden_size` $d = 5376$, `num_attention_heads` $h = 56$, `attention_head_dim` $d_k = 128$, `ffn_dim` $d_{\text{ffn}} = 14336$ and `time_embed_dim` $d_t = 2688$:
+
+$$
+d_{\text{attn}} = h \cdot d_k = 56 \times 128 = 7168
+$$
+
+Note that $7168 > 5376$: attention widens the stream by a third before projecting it back down. The three projections $W_Q, W_K, W_V$ plus the output projection therefore give
+
+$$
+P_{\text{attn}} = 4 \cdot d \cdot d_{\text{attn}} = 4 \times 5376 \times 7168 = 154{,}140{,}672
+$$
+
+The feed-forward network is two matrices, up and down:
+
+$$
+P_{\text{ffn}} = 2 \cdot d \cdot d_{\text{ffn}} = 2 \times 5376 \times 14336 = 154{,}140{,}672
+$$
+
+And the modulation that injects the timestep — six shift, scale and gate vectors of width $d$, produced from the time embedding:
+
+$$
+P_{\text{mod}} = 6 \cdot d_t \cdot d = 6 \times 2688 \times 5376 = 86{,}704{,}128
+$$
+
+<div class="callout spec"><span class="t">The 20 GB file, derived</span>
+<table>
+<tr><th>Component of one block</th><th>Parameters</th></tr>
+<tr><td>attention projections, $4 d\, d_{\text{attn}}$</td><td>154.1 M</td></tr>
+<tr><td>feed-forward, $2 d\, d_{\text{ffn}}$</td><td>154.1 M</td></tr>
+<tr><td>timestep modulation, $6 d_t d$</td><td>86.7 M</td></tr>
+<tr><td><b>one block</b></td><td><b>≈ 395 M</b></td></tr>
+<tr><td>× <code>num_layers</code> = 50</td><td><b>≈ 20 billion</b></td></tr>
+</table>
+<p>At one byte per parameter under int8, that is the <b>20 GB</b> file on disk. The arithmetic closes: nothing about the model's size is mysterious once the config is read.</p></div>
+
+Divide the other way and each block is about $0.4$ GB. Fifty of them stream in and out of VRAM on every step, so a 23-step render moves roughly
+
+$$
+50 \times 0.4\ \text{GB} \times 23 = 460\ \text{GB}
+$$
+
+across the bus. On a machine where the model does not fit, **file size is a per-step bandwidth cost**, not just a capacity number.
+
+### 6.2 Time
+
+Total wall-clock splits into a sampling term that scales with NFE, plus fixed serial costs:
+
+$$
+T_{\text{total}} = \underbrace{\mathrm{NFE}\cdot T_{\text{fwd}}(N)}_{\text{sampling}} \;+\; \underbrace{T_{\text{enc}} + T_{\text{dec}} + T_{\text{up}}}_{\text{fixed}}
+$$
+
+$T_{\text{fwd}}$ grows with sequence length $N$, and $N$ is proportional to resolution × frames — so resolution and length set **both** speed and memory at once, through attention's $\mathcal{O}(N^2)$.
+
+### 6.3 The prediction, and the measurement that beat it
+
+This is where theory meets the render log, and loses.
+
+Compare 832×480 with 1280×704 at the same 345 frames. The latent frame count is identical, so only the spatial patch count changes:
+
+$$
+\frac{N_{720}}{N_{480}} = \frac{(704/32)\times(1280/32)}{(480/32)\times(832/32)} = \frac{22 \times 40}{15 \times 26} = \frac{880}{390} = 2.26
+$$
+
+Quadratic attention therefore predicts
+
+$$
+\left(\frac{N_{720}}{N_{480}}\right)^{2} = 2.26^{2} \approx 5.1\times
+$$
+
+The measured cost was **34×**.
+
+<svg viewBox="0 0 760 254" width="100%" style="max-width:920px" role="img" aria-label="Bar chart comparing the 2.26 times token increase, the 5.1 times slowdown that quadratic attention predicts, and the 34 times slowdown actually measured when moving from 832 by 480 to 1280 by 704.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">832×480×345 → 1280×704×345 — PREDICTED VERSUS MEASURED</text>
+  <text x="140" y="72" text-anchor="end" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">tokens</text>
+  <rect x="150" y="50" width="40" height="34" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="202" y="72" fill="#7aa2ff" font-size="12" font-family="Inter,sans-serif">2.26×</text>
+  <text x="140" y="132" text-anchor="end" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">attention predicts</text>
+  <rect x="150" y="110" width="90" height="34" rx="4" fill="#151b26" stroke="#aab4c5"/>
+  <text x="252" y="132" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">5.1× — the square of the token ratio</text>
+  <text x="140" y="192" text-anchor="end" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">measured</text>
+  <rect x="150" y="170" width="600" height="34" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="166" y="192" fill="#ffdede" font-size="13" font-family="Inter,sans-serif">34×</text>
+  <text x="2" y="232" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">The gap — roughly <tspan fill="#ff6b6b">7× of pure overhead</tspan> — is the price of splitting one video across three cards: communication, redundant work, synchronisation.</text>
+</svg>
+
+<div class="callout truth"><span class="t">Where the missing factor went</span>
+<p>$34 / 5.1 \approx 7$. Something outside the mathematics multiplies the cost sevenfold, and it is the sharded three-card path: cards exchanging slices of the sequence, waiting for each other, and recomputing what they cannot hold ([ch.45](45-three-gpu-sequence-parallelism.html)). Quadratic attention is the <em>floor</em> on what a resolution increase costs. The implementation decides how far above that floor the real number lands.</p></div>
+
+This is also the honest answer to "would one 24 GB card be the same as three 8 GB cards?" Mathematically the token count is identical. Practically, the $7\times$ says no.
+
+### 6.4 Amdahl's law bounds every speedup
+
+A faster sampler cannot speed up what is not sampling. With $p$ the fraction of time spent sampling and $s$ the speedup applied to it:
+
+$$
+\text{speedup} = \frac{1}{(1-p) + \dfrac{p}{s}}
+$$
+
+If sampling were $p = 0.6$ of the wall clock and a distilled sampler delivered $s = 5$:
+
+$$
+\text{speedup} = \frac{1}{0.4 + 0.6/5} = \frac{1}{0.52} \approx 1.9\times
+$$
+
+A five-fold win on the dominant phase becomes a shade under two-fold overall. And the ceiling as $s \to \infty$ is $1/(1-p) = 2.5\times$ — no sampler, however good, can beat that while the fixed costs stand.
+
+> **Corollary.** Once sampling is cheap, the fixed serial costs — encoder streaming, VAE decode, upscale — become the new wall. Optimising a phase that occupies 10% of the time can never return more than about 11%.
+
+This is why the decode stage deserves more attention than its share of the wall clock suggests. It is not the biggest cost, but it is where two renders died after all the expensive work was already done ([ch.46](46-the-first-15-seconds.html)).
+
+---
+
+## 7 · Peak memory, and the buffer that was the whole 8 GB wall
+
+Profiling on the single-card build decomposed resident VRAM as a fixed part plus a part that grows with frame count:
+
+$$
+M_{\text{peak}} = \underbrace{M_{\text{fixed}}}_{\approx\,6.5\text{ GB}} + M_{\text{frames}}(F)
+$$
+
+Of the real-tensor portion, about **88%** turned out to be a *single temporary*: the output of an int8 matrix multiply, accumulated in int32 before being scaled back down. For an $[M,N]$ output that is
+
+$$
+M_{\text{int8mm}} = M \times N \times \underbrace{4\ \text{bytes}}_{\text{int32}} \approx 2.24\ \text{GB, allocated in one shot}
+$$
+
+Two and a quarter gigabytes, on an eight gigabyte card, for a value that is consumed immediately and thrown away.
+
+---
+
+## 8 · The exact optimization, and why it is bit-identical
+
+The int8 linear layer computes $\mathbf{Y} = \mathrm{dequant}(\mathbf{X}_8 W_8^{\top})\cdot s$. The crucial structural fact is that **each row has its own scale $s_i$, and rows never interact**. Row $i$ of the output depends only on row $i$ of the input. So the computation can be blocked over row groups $R_i$, never materialising the full $[M,N]$ tensor:
+
+$$
+\mathbf{Y}[R_i,:] = \big(\mathbf{X}_8[R_i,:]\; W_8^{\top}\big) \cdot (s_{R_i}\, s_w),
+\qquad \bigcup_i R_i = \{1 \dots M\}
+$$
+
+<svg viewBox="0 0 760 280" width="100%" style="max-width:920px" role="img" aria-label="Comparison of materialising the entire int32 output tensor at once, costing 2.24 gigabytes, against computing it in row blocks so only one block is alive at a time, which cut peak memory from 5.9 to 3.9 gigabytes with an identical result.">
+  <defs>
+    <marker id="m2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ROW BLOCKING — SAME ARITHMETIC, ONE BLOCK ALIVE AT A TIME</text>
+  <text x="40" y="46" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">materialise all of Y at once</text>
+  <rect x="40" y="58" width="280" height="160" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="180" y="132" text-anchor="middle" fill="#ffdede" font-size="14" font-family="Inter,sans-serif">[M, N] int32</text>
+  <text x="180" y="154" text-anchor="middle" fill="#c98f8f" font-size="12" font-family="Inter,sans-serif">2.24 GB in one allocation</text>
+  <line x1="330" y1="138" x2="428" y2="138" stroke="#5ee0c0" marker-end="url(#m2)"/>
+  <text x="440" y="46" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">block it over rows</text>
+  <rect x="440" y="58" width="280" height="160" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="452" y="66" width="256" height="28" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <text x="580" y="85" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">rows R₁ — already written out</text>
+  <rect x="452" y="100" width="256" height="28" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="580" y="119" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">rows R₂ — computing now</text>
+  <rect x="452" y="134" width="256" height="28" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <text x="580" y="153" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">rows R₃ — not yet allocated</text>
+  <rect x="452" y="168" width="256" height="28" rx="4" fill="#151b26" stroke="#232c3b"/>
+  <text x="580" y="187" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">rows R₄ — not yet allocated</text>
+  <text x="580" y="212" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">peak holds one block, not the whole tensor</text>
+  <line x1="2" y1="236" x2="758" y2="236" stroke="#232c3b"/>
+  <text x="2" y="260" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Peak VRAM 5.9 GB → 3.9 GB.  Output difference: <tspan fill="#5ee0c0">exactly zero</tspan>, proven with torch.equal.</text>
+  <text x="2" y="276" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Row i of the output depends only on row i of the input and its own scale sᵢ — so the split cannot change a single value.</text>
+</svg>
+
+$$
+M_{\text{peak}}:\ 5.9\ \text{GB} \to 3.9\ \text{GB}, \qquad \Delta Q = 0 \quad (\text{proven with } \texttt{torch.equal})
+$$
+
+That $\Delta Q = 0$ is the part worth insisting on. This is not an approximation, a trade-off, or a quality setting. It is a rearrangement of the *order* in which identical arithmetic happens, and the proof is not an eyeball comparison — it is bitwise equality of the output tensors.
+
+<div class="callout truth"><span class="t">The most reusable idea in this chapter</span>
+<p>Before assuming a memory wall is a capacity problem, look for a temporary. The 8 GB ceiling was not fifty blocks of weights; it was one intermediate tensor that did not need to exist all at once. The same shape of bug reappeared later at 1280×704, where the decoder appended every finished pixel chunk — about 216 MB each — to a GPU-resident list and OOMed at clip 14. Also not a capacity wall. Also a one-line fix ([ch.46](46-the-first-15-seconds.html)).</p></div>
+
+---
+
+## 9 · What freed memory buys
+
+Headroom is only worth having if it converts into something visible. On the single-card build, roughly 2 GB of freed VRAM went straight into pixels:
+
+$$
+\frac{\text{pixels}_{\text{after}}}{\text{pixels}_{\text{before}}}
+= \frac{768 \times 448}{576 \times 320}
+= \frac{344{,}064}{184{,}320}
+= \boxed{1.87\times}
+$$
+
+And because $N \propto$ pixels, that $1.87\times$ in area is also $1.87\times$ in sequence length — which, by §6, costs about $3.5\times$ in attention work. Memory bought resolution; resolution charged for it in time. There is no free direction on this graph.
+
+---
+
+## 10 · The six facts worth memorising
+
+1. **Sampling is solving an ODE.** Each step is one full forward pass through 20 billion parameters; $\mathrm{NFE} = S \times$ solver order. Too few steps do not blur the answer, they change it.
+2. **Attention is $\mathcal{O}(N^2)$**, and $N$ is resolution × frames — so resolution costs in speed *and* memory simultaneously.
+3. **The model file is a bandwidth budget.** 20 GB streamed 50 blocks at a time, 23 times, is 460 GB across the bus per render.
+4. **Amdahl governs every speedup.** A $5\times$ win on 60% of the work yields about $1.9\times$ overall, and can never exceed $2.5\times$.
+5. **The 8 GB wall was one temporary.** A $2.24$ GB int32 accumulation, chunked over rows, bit-identical, freeing about 2 GB.
+6. **Theory sets the floor, not the price.** Attention predicted $5\times$ for the jump to 720p. The implementation charged $34\times$.
+
+---
+
+## 11 · Where to learn this properly
+
+The derivations above are compressed. These are the sources that make them feel obvious rather than memorised.
+
+**Courses, in difficulty order.** 3Blue1Brown's *Neural Networks* and *Essence of Calculus* build the intuition underneath everything here — gradients, vectors, the chain rule. Karpathy's *Zero to Hero* and `micrograd` construct an autograd engine and a small GPT from nothing, which turns attention from a formula into a hundred lines of code. *How Diffusion Models Work* covers the denoising loop and noise schedules directly.
+
+**Papers, abstract and maths first.** Lipman et al., *Flow Matching for Generative Modeling* (2022) is the exact framework §3 describes. Liu et al. on *Rectified Flow* explains why a trajectory can be straightened so that few Euler steps stay accurate — the theory behind step distillation. Ho et al., *DDPM* (2020) is the ancestor worth reading for contrast. Vaswani et al., *Attention Is All You Need* (2017) is where the $\mathcal{O}(N^2)$ comes from, and Peebles & Xie, *Scalable Diffusion Models with Transformers* (2023) is the DiT backbone H3 uses. For quantization, *LLM.int8()* and the GPTQ line of work.
+
+**Chapters here that go further.** [Ch.15](15-vectors-matrices-signals.html) takes the linear algebra slowly. [Ch.23](23-math-from-scratch.html) rebuilds the mathematics from scratch for readers who want it without the shortcuts. [Ch.34](34-open-use-close-flashattention.html) explains how FlashAttention avoids the 23 GB matrix from §2.
+
+<div class="callout spec"><span class="t">One exercise worth doing by hand</span>
+<p>Re-derive <b>§8</b> on paper. Write out the int8 matmul for a tiny $2 \times 2$ case with two different row scales, then split it into two single-row blocks and confirm that every output value is unchanged. It takes about ten minutes and it is the difference between believing the optimization and knowing it.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">embedding table</span><span class="badge">attention · $\mathcal{O}(N^2)$</span><span class="badge">latent shape</span><span class="badge">patchification</span><span class="badge">sequence length N</span><span class="badge">flow matching</span><span class="badge">velocity field</span><span class="badge">ODE / Euler's method</span><span class="badge">solver order</span><span class="badge">NFE</span><span class="badge">Amdahl's law</span><span class="badge">peak memory decomposition</span><span class="badge">int32 accumulation</span><span class="badge">row blocking</span><span class="badge">bit-identical</span></p>
+<p>If those feel solid, no cost in this build is a surprise any more — each one has a formula behind it, and where the formula and the stopwatch disagree, that gap is itself a measurement.</p></div>
+
+Next: the linear algebra underneath all of it, taken slowly — what a vector, a matrix and a signal actually are, and why a video is all three at once — [Chapter 15](15-vectors-matrices-signals.html).
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

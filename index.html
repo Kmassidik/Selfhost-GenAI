@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Self-Hosting GenAI — Vault Hub</title>
+<style>
+  :root{
+    --bg:#0d1017; --panel:#141a24; --panel2:#0f141d; --ink:#e7ecf3; --dim:#9fb0c6;
+    --line:#26303f; --accent:#5ee0c0; --accent2:#7aa2ff; --gold:#e6c463;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+    -webkit-font-smoothing:antialiased;padding:0 0 64px}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 22px}
+  header{padding:56px 0 28px;border-bottom:1px solid var(--line);margin-bottom:34px}
+  .kick{color:var(--accent);font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700}
+  h1{font-size:34px;margin:.35em 0 .25em;line-height:1.15;letter-spacing:-.01em}
+  .lede{color:var(--dim);font-size:17px;max-width:70ch}
+  .note{margin-top:16px;font-size:13.5px;color:var(--dim)}
+  .note b{color:var(--ink)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+  a.card{display:block;text-decoration:none;color:inherit;background:var(--panel);
+    border:1px solid var(--line);border-radius:14px;padding:20px 20px 18px;
+    transition:border-color .15s,transform .15s,background .15s}
+  a.card:hover{border-color:var(--accent2);transform:translateY(-2px);background:#161d29}
+  .card .ic{font-size:24px}
+  .card h2{font-size:17px;margin:10px 0 6px}
+  .card p{margin:0;color:var(--dim);font-size:13.5px}
+  .card .tag{display:inline-block;margin-top:12px;font-size:11px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--accent);border:1px solid var(--line);
+    border-radius:999px;padding:3px 10px}
+  .big{grid-column:1/-1;background:linear-gradient(135deg,#14342c,#122033);
+    border-color:#2c5148}
+  .big h2{font-size:20px}
+  footer{margin-top:40px;padding-top:22px;border-top:1px solid var(--line);color:var(--dim);font-size:13px}
+  code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="kick">Self-Hosting GenAI · Vault Hub</div>
+    <h1>Running a 33B video model on $750 of obsolete GPUs</h1>
+    <p class="lede">A field guide, a lab notebook, and the running story of building our own inference engine — every number measured on our own hardware.</p>
+    <p class="note">📓 Prefer notes with backlinks, LaTeX &amp; diagrams? Open this folder in <b>Obsidian</b> and start at <code>HOME.md</code>. This page is the browser entry point.</p>
+  </header>
+
+  <div class="grid">
+
+    <a class="card big" href="knowledge-base/index.html">
+      <div class="ic">📚</div>
+      <h2>Knowledge — the field guide (35 chapters)</h2>
+      <p>Start here to learn. Neural nets → diffusion → the GPU doing multiply-add → the pipeline → PCIe/NVLink → the engine landscape → is it really ours. Every claim measured, nothing rounded to look good.</p>
+      <span class="tag">read to learn →</span>
+    </a>
+
+    <a class="card" href="knowledge-base/glossary.html">
+      <div class="ic">📖</div>
+      <h2>Glossary</h2>
+      <p>Every term in plain words — DiT, int8, FlashAttention, PagedAttention, step distillation — grouped and cross-linked. Start here if any jargon felt like magic.</p>
+      <span class="tag">reference</span>
+    </a>
+
+    <a class="card" href="history/index.html">
+      <div class="ic">🧭</div>
+      <h2>The Journey</h2>
+      <p>Server 1 → 2 → 3: "can it run?" → "can it be good?" → "can it be <em>ours</em>?" How the thinking evolved, not just where it landed.</p>
+      <span class="tag">the story</span>
+    </a>
+
+    <a class="card" href="experiments/index.html">
+      <div class="ic">🧪</div>
+      <h2>Experiments</h2>
+      <p>The lab notebook — benchmarks (int8 vs Q4), seed proofs, multi-GPU research, and the sampling/flow-matching math. Data, not opinion.</p>
+      <span class="tag">data · math</span>
+    </a>
+
+    <a class="card" href="planning/index.html">
+      <div class="ic">🗂️</div>
+      <h2>Planning</h2>
+      <p>Project summary, the v0.1 checkpoint, setup guide, hardware &amp; budget plan, and the architecture diagram.</p>
+      <span class="tag">plans · decisions</span>
+    </a>
+
+    <a class="card" href="source/">
+      <div class="ic">💻</div>
+      <h2>Source</h2>
+      <p>Helper scripts and how the current dalang box (3× RTX 3060 Ti) was built.</p>
+      <span class="tag">code · setup</span>
+    </a>
+
+  </div>
+
+  <footer>
+    Built from a real build on a 3× RTX 3060 Ti (8 GB) box · rendered clips live on the Mac at <code>~/Desktop/output/</code> · math renders as LaTeX and diagrams as mermaid inside the chapters and in Obsidian.
+  </footer>
+</div>
+</body>
+</html>

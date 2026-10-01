@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>47 · The Scorecard</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 47 · The ledger — every proven configuration, every capability, every wall</span>
+
+# The Scorecard
+
+<p class="lede">Forty-six chapters of building, and the honest question is simple: <b>what can this box actually do, what did we build to make it do that, and what did we fail at?</b> This is the ledger. Every number below is measured from a real render log on our own hardware — three RTX 3060 Ti, 8&nbsp;GB each, on a dual-Xeon DDR3 board. No estimates unless labelled as such.</p>
+
+## A · What renders
+
+Every row is a file that exists on the box.
+
+| Resolution | Frames | Duration | Steps | Denoise | Verdict |
+|---|---|---|---|---|---|
+| 512×288 | 345 | **15 s** | 49 | 66 min | **beautiful** — islands, ruins, hero all resolved |
+| 832×480 | 124 | 5 s | 4–50 | minutes–1 h | **the workhorse** — 60+ clips rendered |
+| 832×480 | 345 | **15 s** | 3 | 10 min | renders; under-sampled at 3 steps |
+| **1280×704** | 124 | 5 s | 23 | 55 min | **beautiful** — crisp cel-shaded anime |
+| **1280×704** | **345** | **15 s** | 3 | 5.5 h | renders; **mud** at 3 steps |
+| **1280×704** | **345** | **15 s** | **23** | **41 h 51 m** | ✅ **resolved — the closing render** |
+| 3328×1920 | 124 | 5 s | — | — | 4× upscale output (post-process) |
+
+<div class="callout truth"><span class="t">The headline nobody expected</span>
+<p><b>Native 1280×704 × 345 frames renders.</b> The 15-second native 720p clip exists ([ch.46](46-the-first-15-seconds.html)) — 345 frames, 14.375 s, no upscale, on three 8 GB cards. It is not a memory problem any more. It is a <em>time</em> problem, and the rest of this page is about that distinction.</p></div>
+
+## B · What quality costs
+
+Denoise time per step, measured from the tqdm bars (which exclude VAE decode):
+
+| Configuration | s/step | 23 steps | 49 steps |
+|---|---|---|---|
+| 512×288 × 345 | **81 s** | 0.5 h | 1.1 h |
+| 1280×704 × 124 | **143 s** | 0.9 h | 1.9 h |
+| 832×480 × 345 | **193 s** | 1.2 h | **2.6 h** |
+| 1280×704 × 345 *(3-GPU sharded)* | **6849 s** *(measured)* | **41 h 51 m** *(measured)* | ~90 h *(projected)* |
+
+Add roughly 25–50 minutes of VAE decode to each — 85 minutes at 1280×704 × 345.
+
+<div class="callout truth"><span class="t">The cost model held to within nine minutes</span>
+<p>Before the closing run, this table predicted <b>42 h</b> for 23 steps at 1280×704 × 345, extrapolated from a per-step time measured on a 3-step render. The finished run took <b>41 h 51 m</b> — <b>6849.21 s/step</b>, and the per-step time drifted by only a few seconds across all 22 iterations.</p>
+<p>That is worth more than the clip. It means the arithmetic in <a href="23-math-from-scratch.html">ch.23</a> genuinely predicts wall-clock on this hardware, so a render can be costed before it is started rather than discovered.</p></div>
+
+<div class="callout warn"><span class="t">The sharded path costs an order of magnitude</span>
+<p>Going from 832×480×345 to 1280×704×345 is <b>2.26× the tokens</b>. Attention is $O(S^2)$, so pure quadratic scaling predicts about <b>5×</b> the time. Measured: <b>34×</b>. The three-GPU sequence-parallel path ([ch.45](45-three-gpu-sequence-parallelism.html)) therefore carries roughly a <b>7× overhead beyond the maths</b> — hand-rolled fp32 ring attention in Python loops, plus a <code>deepcopy</code> of every block to every card on every step. It buys memory and sells speed.</p></div>
+
+## C · How many steps a scene needs
+
+Step count is a property of the **scene**, not the model — the single most misread number in this project.
+
+| Content | Steps needed | Evidence |
+|---|---|---|
+| Tight close-up portrait | **4** | `cmp-ring` / `cmp-normal`, sharp at 4 steps |
+| Anime character, mid-shot | **23** | `an1` at 1280×704 |
+| Wide epic vista, tiny subject | **49** | `cp15sd` — the same scene at 3 steps is mud |
+
+<div class="callout spec"><span class="t">The rule</span>
+<p><b>Fine detail everywhere + a small subject = more steps.</b> A face filling the frame converges in 4. Floating islands with "a hero standing tiny on a distant cliff" needs 49. Budget steps by content, never by habit.</p></div>
+
+## D · What we built
+
+| Capability | Status | Chapter |
+|---|---|---|
+| 33B int8 DiT streamed through 8 GB (block-level offload) | ✅ working | [ch.29](29-where-numbers-live.html) |
+| Q4 GGUF engine — ~2× faster than int8, quality a tie | ✅ default | [ch.13](13-int8-vs-q4.html) |
+| Online-softmax attention, no full score matrix | ✅ proven | [ch.34](34-open-use-close-flashattention.html) |
+| Ring / context parallelism across 2 cards | ✅ render-validated | [ch.36](36-splitting-the-video-cp.html) |
+| Single-card tiling — 15 s @ 480p **or** 5 s @ 720p | ✅ proven | [ch.44](44-building-dalang.html) |
+| 3-GPU sequence parallelism — fits what no card holds | ✅ matches reference | [ch.45](45-three-gpu-sequence-parallelism.html) |
+| Decode device fix (cpu/cuda mismatch) | ✅ fixed | [ch.46](46-the-first-15-seconds.html) |
+| Latent backup — denoise survives any decode failure | ✅ **saved 6 h** | [ch.46](46-the-first-15-seconds.html) |
+| VAE chunk offload — unblocked 720p decode | ✅ fixed | [ch.46](46-the-first-15-seconds.html) |
+| Offline re-decode from saved latents (GPU + CPU paths) | ✅ working | [ch.46](46-the-first-15-seconds.html) |
+| Upscale pipeline (4×-UltraSharp → 720p) | ✅ production | [ch.44](44-building-dalang.html) |
+| Face restore (CodeFormer) for eyes/teeth | ✅ production | [ch.17](17-what-actually-improves-quality.html) |
+| Frame-chaining for long-form | ✅ 60 s film built | [ch.33](33-long-video-small-card.html) |
+
+## E · What failed
+
+Honest list. Some are our bugs, some are the hardware, some are the model.
+
+| Attempt | Outcome |
+|---|---|
+| **Native 720p × 15 s at good quality** | ⚠️ **possible, not practical** — 42–90 h |
+| Ring-3 context parallelism | ❌ offload re-copies weights per process → OOM |
+| SageAttention on H3 | ❌ outputs pure noise; keep it off |
+| `VAEDecodeTiled` on H3 | ❌ incompatible — the latent is a NestedTensor |
+| Raw diffusers instead of our stack | ❌ no sub-12 GB recipe; wants ~75 GB RAM |
+| LoRA for quality at 480p | ❌ *softened* the image; base was sharper |
+| Readable on-screen text / lyrics | ❌ no diffusion video model can spell |
+| Identity lock across chained clips | ❌ photoreal faces morph; needs Ref2VA |
+| First decode run (g4j) | ❌ lost 6 h — the failure that caused the backup rule |
+| Closing run's inline decode (g4final) | ❌ died on the last line of denormalisation — our own two fixes collided |
+
+<div class="callout truth"><span class="t">Two failures that became the best tools we have</span>
+<p>g4j's six lost hours produced the <b>latent backup</b>, which saved the next six the very same night. The 720p decode OOM produced the <b>chunk-offload fix</b>, which turned out to be finished pixels loitering on the GPU — not a capacity wall at all. Both fixes exist only because something broke expensively.</p></div>
+
+## F · The verdict on native 720p × 15 s
+
+It works. It is just a bad trade.
+
+| Route | Denoise | Output |
+|---|---|---|
+| **832×480 × 345 @ 49 steps → upscale 1.54× to 720p** | **2.6 h** | 15 s, 720p-class, well-sampled |
+| **Native 1280×704 × 345 @ 23 steps** | **43.3 h** *(measured)* | **15 s, true native, fully resolved** |
+| Native 1280×704 × 345 @ 49 steps | ~90 h *(projected)* | 15 s, true native |
+
+<div class="callout spec"><span class="t">Take the upscale</span>
+<p><b>~17× cheaper for a result most viewers cannot distinguish</b> (2.6 h against the 43.3 h now measured). A well-sampled 832×480 lifted 1.54× beats an under-sampled 1280×704 every time — and mild upscales preserve detail where 2.5× ones go soft ([ch.17](17-what-actually-improves-quality.html)). Native 720p×15 s is now a <em>capability we have proven</em> rather than a workflow we should use. Keep it for the one hero shot that justifies a weekend of GPU time.</p></div>
+
+## G · Where the constraint moved
+
+<div class="callout truth"><span class="t">The arc, in one line each</span>
+<ol>
+<li><b>Chapters 1–30:</b> the constraint was <b>fitting the model</b> — 33B in 8 GB. Solved with quantization and block streaming.</li>
+<li><b>Chapters 31–44:</b> the constraint was <b>fitting the activations</b> — long clips at high resolution. Solved with tiling and context parallelism.</li>
+<li><b>Chapters 45–46:</b> the constraint was <b>fitting a sequence no card can hold</b>. Solved with 3-GPU sequence parallelism.</li>
+<li><b>Chapters 47–48:</b> the constraint was <b>proving the cost</b>. Closed — 43.3 hours, measured, with the file to show for it.</li>
+<li><b>Now:</b> the constraint is <b>time</b>. Nothing is out of reach; some things cost 90 hours. Different problem, different levers — step distillation, faster attention kernels, or simply not paying the quadratic.</li>
+</ol>
+<p>That is real progress worth naming: <b>we no longer ask "does it fit?" We ask "is it worth the wall-clock?"</b></p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">proven configuration</span><span class="badge">s/step</span><span class="badge">token budget</span><span class="badge">sequence parallelism</span><span class="badge">sharding overhead</span><span class="badge">upscale route</span><span class="badge">capability vs workflow</span><span class="badge">steps by content</span></p>
+<p>If those feel solid, the pipeline that produced them will make sense.</p></div>
+
+<p class="small">Sources: measured from render logs in <code>docs/</code> (<code>cp15sd-denoise.log</code>, <code>an1.log</code>, <code>e1h.log</code>, <code>e720hq.log</code>, <code>g4j.log</code>, <code>g4k.log</code>) and files in <code>h3-lab/</code>, on 3× RTX 3060 Ti 8 GB. Rows in section E marked as established findings come from earlier measured sessions ([ch.13](13-int8-vs-q4.html), [ch.17](17-what-actually-improves-quality.html), [ch.33](33-long-video-small-card.html), [ch.36](36-splitting-the-video-cp.html)); everything in sections A–C and F was re-measured for this chapter.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

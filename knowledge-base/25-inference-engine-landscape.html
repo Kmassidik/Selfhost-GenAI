@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>25 · The Inference Engine Landscape</title>
+<meta name="description" content="What actually runs a model: six rungs from silicon to serving API, repeated once per hardware vendor — why the map outlives the names, and which rung this build stands on.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 25 · What actually runs a model — the whole stack, with a date on it</span>
+
+# The Inference Engine Landscape
+
+<p class="lede">What runs a model is never one program: it is a stack of six rungs, from the silicon up to a serving API, and that entire stack exists separately for every hardware vendor. The honest count is not "thirteen engines" — it is six rungs with a handful of occupants each, repeated once per silicon. Learn the rungs and the map survives; learn the names and it expires.</p>
+
+It expires fast. Half the tools named in this chapter did not exist two years ago, and at least one claim below was true when it was written and is no longer. That is not a flaw in the map — it is the most important property of the territory, and the chapter is built to survive it.
+
+<div class="callout warn"><span class="t">Read every engine claim as dated</span>
+<p>This is the fastest-moving layer in the whole project. An engine that "cannot do diffusion video" acquires a diffusion path in a point release; an offload mode that OOM-kills a process gets fixed upstream; a model that shipped on one library gets ported to three more. <b>Every specific claim below carries the date it was true.</b> The rungs are stable, the occupants are not. Before betting a build on "engine X does not support Y", check X's release notes rather than this page.</p></div>
+
+## It is a stack, not a list
+
+The reason a beginner drowns in engine names is that the names sit on different rungs and are being compared as though they were alternatives. vLLM and CUDA are not competitors; they are three rungs apart. ComfyUI and PyTorch are not competitors; one calls the other. Sort the names by rung and the landscape shrinks to something a person can hold.
+
+<svg viewBox="0 0 760 352" width="100%" style="max-width:920px" role="img" aria-label="Six rungs of the inference stack from silicon at the bottom to serving at the top, with a column each for NVIDIA, AMD and Apple showing that every rung is re-implemented once per vendor.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">EVERY RUNG EXISTS ONCE PER SILICON — THE OCCUPANTS CHANGE, THE RUNGS DO NOT</text>
+  <text x="256" y="36" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif" letter-spacing="1.2">NVIDIA — THIS BUILD</text>
+  <text x="426" y="36" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif" letter-spacing="1.2">AMD</text>
+  <text x="596" y="36" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif" letter-spacing="1.2">APPLE</text>
+  <rect x="2" y="44" width="246" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="16" y="64" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">5 · Serving</text>
+  <text x="16" y="80" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">wraps an engine in an API</text>
+  <rect x="254" y="44" width="164" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="266" y="70" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">Triton Server, Ray</text>
+  <rect x="424" y="44" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="436" y="70" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">same, ROCm builds</text>
+  <rect x="594" y="44" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="606" y="70" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">rare on desktop</text>
+  <rect x="2" y="94" width="246" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="16" y="114" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">4 · Engine</text>
+  <text x="16" y="130" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">owns the generation loop</text>
+  <rect x="254" y="94" width="164" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="266" y="120" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">diffusers, xDiT, ComfyUI</text>
+  <rect x="424" y="94" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="436" y="120" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">llama.cpp, vLLM</text>
+  <rect x="594" y="94" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="606" y="120" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">MLX, Draw Things</text>
+  <rect x="2" y="144" width="246" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="16" y="164" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">3 · Framework</text>
+  <text x="16" y="180" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">tensors, dispatch, autograd</text>
+  <rect x="254" y="144" width="164" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="266" y="170" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">PyTorch 2.11 + cu128</text>
+  <rect x="424" y="144" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="436" y="170" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">PyTorch, ROCm build</text>
+  <rect x="594" y="144" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="606" y="170" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">PyTorch MPS, MLX</text>
+  <rect x="2" y="194" width="246" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="16" y="214" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">2 · Compiler</text>
+  <text x="16" y="230" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">maths into device code</text>
+  <rect x="254" y="194" width="164" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="266" y="220" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">Triton, TensorRT</text>
+  <rect x="424" y="194" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="436" y="220" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Triton AMD, MIGraphX</text>
+  <rect x="594" y="194" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="606" y="220" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Core ML</text>
+  <rect x="2" y="244" width="246" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="16" y="264" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">1 · Metal</text>
+  <text x="16" y="280" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the raw compute API</text>
+  <rect x="254" y="244" width="164" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="266" y="270" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">CUDA</text>
+  <rect x="424" y="244" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="436" y="270" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">ROCm / HIP</text>
+  <rect x="594" y="244" width="164" height="44" rx="6" fill="#12161f" stroke="#3a4a63"/>
+  <text x="606" y="270" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Metal / MPS</text>
+  <rect x="2" y="294" width="246" height="44" rx="6" fill="#0f141d" stroke="#232c3b"/>
+  <text x="16" y="314" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">0 · Silicon</text>
+  <text x="16" y="330" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the physical chip</text>
+  <rect x="254" y="294" width="164" height="44" rx="6" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="266" y="320" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">GA104, sm_86</text>
+  <rect x="424" y="294" width="164" height="44" rx="6" fill="#0f141d" stroke="#3a4a63"/>
+  <text x="436" y="320" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">CDNA / RDNA</text>
+  <rect x="594" y="294" width="164" height="44" rx="6" fill="#0f141d" stroke="#3a4a63"/>
+  <text x="606" y="320" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Apple Silicon</text>
+</svg>
+
+Two phrases people use loosely now have precise meanings. **"Build from metal"** means writing at rung 1 — CUDA, ROCm, Metal, Vulkan. **"Build from AMD"** means taking the AMD column of the whole grid. They are different axes: one is a depth, the other is a vendor.
+
+<div class="callout spec"><span class="t">The rail-gauge analogy, and where it stops</span>
+<p>The vendor columns behave like rail gauges. A carriage designed for one gauge does not roll onto another without work, and the deeper the rung the less portable it is: a CUDA kernel is welded to its gauge, while a PyTorch script is cargo that any locomotive can pull.</p>
+<p>The useful part of the analogy is that <b>gauge-changing bogies exist at specific rungs and nowhere else</b>. Triton compiles the same Python kernel to NVIDIA <em>and</em> AMD. ONNX Runtime re-targets an exported graph. Vulkan compute runs on almost any GPU. Those are the three places the gauge can be changed cheaply — and each one costs some performance for the privilege. Below them, nothing is portable at all.</p></div>
+
+## Rung 1 — the metal
+
+The lowest layer a person writes GPU code against. Kernels are born here, and every rung above is ultimately a way of avoiding it.
+
+| API | Silicon | What it is |
+|---|---|---|
+| **CUDA** (with PTX/SASS, cuBLAS, cuDNN) | NVIDIA | the dominant one, and what this build targets |
+| **ROCm / HIP** (with rocBLAS, MIOpen) | AMD | AMD's CUDA equivalent; HIP is near source-compatible with CUDA |
+| **Metal / MPS** | Apple | Apple's GPU API — the name is literal, not a metaphor |
+| Vulkan (compute) | cross-vendor | runs on nearly any GPU; the reason the post-processing binaries in [ch.48](48-the-pipeline-without-comfyui.html) are vendor-agnostic |
+| SYCL / oneAPI | Intel and cross | Intel's open C++ compute layer |
+| OpenCL | cross-vendor | the old portable standard, now fading |
+
+The rung matters to this project in one concrete way. The upscaler and frame interpolator used in production are `realesrgan-ncnn-vulkan` and `rife-ncnn-vulkan` — **Vulkan** binaries with no Python and no framework underneath. That is why they survived the migration off ComfyUI untouched while everything else had to be rebuilt: they never depended on any rung above 1.
+
+## Rung 2 — compilers and kernel languages
+
+The job of this rung is to turn readable maths into fast device code so nobody hand-writes assembly.
+
+| Tool | By | What it does |
+|---|---|---|
+| **Triton** | OpenAI | Python → PTX for NVIDIA, and an AMD backend as well |
+| TensorRT | NVIDIA | compiles a whole model into one optimised NVIDIA build |
+| Apache TVM | Apache | compile once, target many backends |
+| XLA | Google | the compiler behind JAX and TensorFlow; drives TPUs |
+| IREE / MLIR | Google, LLVM | the compiler infrastructure several of the others are built on |
+| Mojo · Halide · Hidet | various | newer kernel and DSL approaches |
+
+There is a naming trap here worth memorising, because it wastes an afternoon of searching for everyone exactly once: **OpenAI's Triton (a kernel language) and NVIDIA's Triton Inference Server (a serving layer) are unrelated projects with the same name, four rungs apart.**
+
+## Rung 3 — frameworks
+
+| Framework | Note |
+|---|---|
+| **PyTorch** | the default; runs on CUDA, ROCm, Metal (MPS) and XPU — the base of this build at 2.11 + cu128 |
+| JAX / TensorFlow | Google's; XLA-compiled, TPU-first |
+| **MLX** | Apple's framework for Apple Silicon |
+| ggml / GGUF | the small C tensor library beneath `llama.cpp`, and the container format that comes with it |
+| tinygrad · Candle · Burn | minimalist Python and Rust frameworks |
+| ONNX Runtime | runs an exported graph across many backends — CUDA, ROCm, DirectML, CoreML |
+
+## Rung 4a — text engines
+
+The crowded rung. All of these run autoregressive text models.
+
+| Engine | Strength |
+|---|---|
+| **llama.cpp** / Ollama / llamafile / KoboldCpp / GPT4All / LocalAI | the GGUF family — quantized LLMs on CPU and almost any GPU, down to laptops and phones |
+| **vLLM** / **SGLang** / TGI / LMDeploy / Aphrodite | high-throughput GPU serving, built on PagedAttention and RadixAttention |
+| TensorRT-LLM · ExLlamaV2 · CTranslate2 | maximally optimised single-node inference |
+| MLC-LLM | TVM-compiled, targeting browser, phone, any chip |
+| PowerInfer · KTransformers · DeepSpeed-Inference | offload, sparsity and hybrid CPU-GPU tricks |
+| Petals | one model distributed across volunteer machines |
+| text-generation-webui | the popular local LLM interface, wrapping several of the above |
+
+## Rung 4b — diffusion engines
+
+Where H3 lives: iterative denoising plus VAEs.
+
+| Engine | Strength |
+|---|---|
+| **🤗 diffusers** | the reference library — H3 ships here, and this build stands on it |
+| ComfyUI / SwarmUI | node-graph engines for image and video — **the rung this project started on and has since left** |
+| Automatic1111 / Forge / SD.Next / Fooocus / InvokeAI | Stable-Diffusion image interfaces |
+| **xDiT** | multi-GPU Diffusion-Transformer engine, described by its authors as the vLLM of DiTs |
+| Nunchaku (SVDQuant) | 4-bit W4A4 DiT inference, fast and low-VRAM on Ampere |
+| OneDiff · stable-fast | compilation and acceleration for diffusion graphs |
+| Draw Things · DiffusionKit | diffusion on Apple Silicon, via Metal and MLX |
+
+## Why the two engine families exist — and why the line is blurring
+
+The split between rung 4a and rung 4b is not marketing. It follows from two genuinely different generation loops, and the difference has a physical consequence for memory.
+
+<svg viewBox="0 0 760 286" width="100%" style="max-width:920px" role="img" aria-label="Left panel shows autoregressive generation emitting one token at a time with a KV cache that grows under each token; right panel shows iterative denoising rewriting the entire latent tensor on every one of twenty-three passes with nothing accumulated between passes.">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6f7b8f"/></marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">TWO LOOPS — ONE ACCUMULATES, ONE REWRITES</text>
+  <rect x="2" y="26" width="368" height="252" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="18" y="48" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">AUTOREGRESSIVE — one token at a time</text>
+  <rect x="18" y="62" width="54" height="26" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="45" y="79" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">tok 1</text>
+  <line x1="74" y1="75" x2="82" y2="75" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a1)"/>
+  <rect x="86" y="62" width="54" height="26" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="113" y="79" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">tok 2</text>
+  <line x1="142" y1="75" x2="150" y2="75" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a1)"/>
+  <rect x="154" y="62" width="54" height="26" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="181" y="79" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">tok 3</text>
+  <line x1="210" y1="75" x2="218" y2="75" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a1)"/>
+  <rect x="222" y="62" width="54" height="26" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="249" y="79" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">tok 4</text>
+  <line x1="278" y1="75" x2="286" y2="75" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a1)"/>
+  <rect x="290" y="62" width="54" height="26" rx="4" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="317" y="79" text-anchor="middle" fill="#eef3ff" font-size="11" font-family="Inter,sans-serif">tok 5</text>
+  <text x="18" y="112" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.2">KV CACHE — KEPT, REUSED, GROWING</text>
+  <rect x="18" y="120" width="54" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="18" y="142" width="122" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="18" y="164" width="190" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="18" y="186" width="258" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="18" y="208" width="326" height="16" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="18" y="248" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">The engine's hard problem is storing and paging</text>
+  <text x="18" y="264" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">that cache — hence PagedAttention.</text>
+  <rect x="390" y="26" width="368" height="252" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="406" y="48" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">ITERATIVE DENOISING — the whole tensor, 23 times</text>
+  <rect x="452" y="76" width="244" height="96" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="574" y="116" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">the latent</text>
+  <text x="574" y="136" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">(1, 24, 37, 30, 52)</text>
+  <path d="M452,124 C412,124 412,58 574,58 C736,58 736,124 696,124" fill="none" stroke="#5ee0c0" stroke-width="1" marker-end="url(#a2)"/>
+  <text x="574" y="50" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">× 23 passes</text>
+  <text x="406" y="204" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Every pass overwrites every number. Nothing from</text>
+  <text x="406" y="220" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">pass 7 survives into pass 8, so there is no cache to</text>
+  <text x="406" y="236" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">page. The hard problem moves to fitting one</text>
+  <text x="406" y="252" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">activation and streaming 50 blocks of weights.</text>
+</svg>
+
+The structural difference is the one between **typesetting a page and developing a photographic plate**. A compositor sets one letter after another and keeps everything already set standing in the frame — the accumulated type *is* the KV cache, and the whole craft of an LLM engine is managing that growing frame across many concurrent jobs. A darkroom worker instead exposes the entire plate, then exposes it again, and again; nothing accumulates between passes because each pass replaces the image wholesale. That is why a diffusion engine has nothing to cache, and why its hard problems are entirely different ones: fitting a single enormous activation, and moving 50 blocks of weights past the card on every pass.
+
+| | LLM engine | Diffusion engine |
+|---|---|---|
+| Loop | autoregressive, token by token | iterative denoising, 4 to 49 full passes |
+| Core trick | the KV cache (PagedAttention, RadixAttention) | fitting the activation — tiling, offload, quantization — plus VAEs |
+| Output | discrete tokens | continuous pixels and audio samples |
+| What it moves per unit of output | one token's worth of state | the entire model, once per step |
+
+<div class="callout truth"><span class="t">The claim that expired — and the date it expired on</span>
+<p>An earlier version of this chapter stated flatly that <b>engines stay family-specific and LLM and diffusion never cross.</b> That was a clean, defensible line, and it stopped being true while the chapter sat on disk. As of <b>August 2026</b>, SGLang — built for high-throughput text serving — also officially serves H3, a diffusion video model, and vLLM was adding a diffusion path.</p>
+<p>Note carefully <em>what</em> changed and what did not. The <b>architectures</b> are still different machines: a KV cache still has nothing to hold in diffusion. What converged is the <b>infrastructure around</b> the loop — schedulers, batching, memory pools, the API surface — which turns out to be reusable even when the loop is not. The right question is never "which family does this engine belong to?" but <b>"what does this engine support in the release I can install today?"</b></p></div>
+
+## Rung 5 — serving and orchestration
+
+| Server | Note |
+|---|---|
+| NVIDIA **Triton Inference Server** | the confusingly named one — a serving layer, not OpenAI's kernel language |
+| Ray Serve · BentoML · KServe | general model serving and scaling |
+| TGI · vLLM | act as servers as well as engines, which is why they appear twice |
+
+This build has no rung 5 at all. There is no API in front of the renderer; a scene is a dict entry and a render is a shell command ([ch.48](48-the-pipeline-without-comfyui.html)). That is a deliberate omission rather than an oversight — a serving layer earns its keep by multiplexing many short requests over one loaded model, and a single render here occupies the machine for between two minutes and forty-four hours ([ch.47](47-the-scorecard.html)). There is nothing to multiplex.
+
+## The vendor view — the same grid, different metal
+
+| Vendor | Metal | Compiler | Engines that run there |
+|---|---|---|---|
+| **NVIDIA** | CUDA | TensorRT, Triton | effectively everything; the default target |
+| **AMD** | ROCm / HIP | MIGraphX, Triton's AMD backend | llama.cpp, vLLM and PyTorch all have ROCm builds |
+| **Apple** | Metal / MPS | Core ML, MLX | llama.cpp on Metal, MLX, Draw Things, DiffusionKit |
+| **Intel** | oneAPI / SYCL | OpenVINO, IPEX | OpenVINO, llama.cpp on SYCL, PyTorch-XPU |
+| **Google** | TPU | XLA | JAX and TensorFlow, TPU-native |
+| Qualcomm and mobile | Hexagon / NPU | QNN, TFLite | on-device LLM and vision |
+
+<div class="callout spec"><span class="t">One consequence worth keeping</span>
+<p><b>Triton has an AMD backend.</b> Any kernel written for this build's sm_86 could in principle be recompiled for an AMD card without a hand rewrite in HIP. That is the concrete payoff of working one rung above raw CUDA: a measure of hardware portability arrives for free, and it is the single strongest argument for choosing rung 2 over rung 1 when both would work.</p></div>
+
+## Where this build sits, and the rung it walked away from
+
+The project started at rung 4 as a *user* of an engine, and ended at rung 4 as an *author* of one. That migration is the whole arc of the knowledge base compressed into one diagram.
+
+<svg viewBox="0 0 760 300" width="100%" style="max-width:920px" role="img" aria-label="The stack as this build actually stands: CUDA on sm_86, PyTorch 2.11, diffusers 0.40 with torchao 0.18, and at the engine rung ComfyUI 0.30 struck out and replaced by a two-phase pipeline written for this project, with no serving layer above it.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE RUNG CHANGED — AND IT CHANGED EVERYTHING ABOVE THE LIBRARY</text>
+  <rect x="2" y="26" width="756" height="38" rx="7" fill="#0f141d" stroke="#232c3b" stroke-dasharray="3 3"/>
+  <text x="20" y="50" fill="#6f7b8f" font-size="12" font-family="Inter,sans-serif">5 · serving — none. A render owns the machine for minutes to days.</text>
+  <rect x="2" y="72" width="368" height="52" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="20" y="94" fill="#ffd6d6" font-size="12" font-family="Inter,sans-serif">4 · engine: ComfyUI 0.30</text>
+  <text x="20" y="112" fill="#c98b8b" font-size="11" font-family="Inter,sans-serif">node graph, its own loaders, DynamicVRAM</text>
+  <line x1="14" y1="98" x2="356" y2="98" stroke="#ff6b6b" stroke-width="1"/>
+  <text x="378" y="102" fill="#6f7b8f" font-size="16" font-family="Inter,sans-serif">→</text>
+  <rect x="398" y="72" width="360" height="52" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="416" y="94" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">4 · engine: our two-phase pipeline</text>
+  <text x="416" y="112" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">phase A encode · phase B denoise · driver patches</text>
+  <rect x="2" y="132" width="756" height="38" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="20" y="156" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">3b · libraries: diffusers 0.40 · torchao 0.18 · transformers 5.16 · accelerate 1.14</text>
+  <rect x="2" y="178" width="756" height="38" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="20" y="202" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">3 · framework: PyTorch 2.11 + cu128</text>
+  <rect x="2" y="224" width="756" height="34" rx="7" fill="#12161f" stroke="#3a4a63"/>
+  <text x="20" y="246" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">1 · metal: CUDA 12.8 runtime, driver 595.84</text>
+  <rect x="2" y="266" width="756" height="32" rx="7" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="20" y="287" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">0 · silicon: 3 × RTX 3060 Ti — Ampere, sm_86, 8 GB each</text>
+</svg>
+
+<div class="callout truth"><span class="t">ComfyUI is gone from this box</span>
+<p>The engine rung is the only one that moved, and it moved completely: <b>ComfyUI has been removed from the machine</b>. Every render described from <a href="46-the-first-15-seconds.html">ch.46</a> onward was produced by a pipeline written for this project on top of diffusers 0.40 and torchao 0.18, including the post-processing (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>). Nothing below rung 3b changed during that migration — the driver, CUDA and PyTorch were never touched — which is precisely what a well-layered stack is supposed to permit.</p>
+<p>What ComfyUI gave, and it was not nothing: the node vocabulary, the loaders, and a working mental model of a generation graph. It was the right first rung and the wrong final one.</p></div>
+
+## Why the rung you stand on decides what you can fix
+
+Choosing a rung is not a matter of taste. It sets the boundary between "a setting I can change" and "a thing I would have to fork" — and for this project that boundary was the difference between shipping and stopping.
+
+<svg viewBox="0 0 760 260" width="100%" style="max-width:920px" role="img" aria-label="A denoise step drawn as a chain of operations inside one transformer block, showing that standing at the diffusers and PyTorch rung allows a patch to be inserted at the attention call and at the block-offload hook, while a node-graph engine can only change the settings that surround the whole chain.">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE TRANSFORMER BLOCK, AND THE TWO PLACES WE INSERTED OURSELVES</text>
+  <rect x="2" y="30" width="756" height="76" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <rect x="18" y="50" width="112" height="38" rx="5" fill="#151b26" stroke="#3a4a63"/>
+  <text x="74" y="74" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">QKV project</text>
+  <line x1="132" y1="69" x2="146" y2="69" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a3)"/>
+  <rect x="150" y="50" width="112" height="38" rx="5" fill="#151b26" stroke="#3a4a63"/>
+  <text x="206" y="74" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">norm + rotary</text>
+  <line x1="264" y1="69" x2="278" y2="69" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a3)"/>
+  <rect x="282" y="50" width="150" height="38" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="357" y="74" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">attention (softmax)</text>
+  <line x1="434" y1="69" x2="448" y2="69" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a3)"/>
+  <rect x="452" y="50" width="112" height="38" rx="5" fill="#151b26" stroke="#3a4a63"/>
+  <text x="508" y="74" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">out project</text>
+  <line x1="566" y1="69" x2="580" y2="69" stroke="#6f7b8f" stroke-width="1" marker-end="url(#a3)"/>
+  <rect x="584" y="50" width="156" height="38" rx="5" fill="#151b26" stroke="#3a4a63"/>
+  <text x="662" y="74" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">feed-forward</text>
+  <line x1="357" y1="92" x2="357" y2="126" stroke="#5ee0c0" stroke-width="1" marker-end="url(#a3)"/>
+  <rect x="212" y="130" width="292" height="46" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="358" y="150" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">patch point 1 — swap the attention</text>
+  <text x="358" y="168" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">ring / sequence-parallel / tiled softmax</text>
+  <rect x="2" y="192" width="368" height="58" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="20" y="214" fill="#eef3ff" font-size="11.5" font-family="Inter,sans-serif">patch point 2 — the block-offload hook</text>
+  <text x="20" y="232" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">which of the 50 blocks is resident, and when</text>
+  <rect x="390" y="192" width="368" height="58" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="408" y="214" fill="#ffd6d6" font-size="11.5" font-family="Inter,sans-serif">what a node graph could change</text>
+  <text x="408" y="232" fill="#c98b8b" font-size="10.5" font-family="Inter,sans-serif">steps, resolution, seed — the chain, never inside it</text>
+</svg>
+
+Both patch points sit *inside* one transformer block, which is to say inside the engine's inner loop. From rung 4 as a user, they are unreachable: a node exposes the arguments that surround the loop, not the loop. From rung 4 as an author — holding `diffusers` and `PyTorch` objects in ordinary Python — each one is a function that can be replaced before the render starts. Every parallelism strategy this project built is exactly that: a monkeypatch installed by a driver script, then a call into the same unchanged pipeline entry point ([ch.48](48-the-pipeline-without-comfyui.html)).
+
+<div class="callout warn"><span class="t">Standing lower also means owning the bugs</span>
+<p>The bill for that freedom arrives in the form of upstream defects that a higher rung would have hidden. Two paid in this project: <code>diffusers</code>' <code>use_stream=True</code> offload pins tens of gigabytes of host RAM and the kernel OOM-kills the process with no traceback, so the flag stays <code>False</code>; and the block-level group-offload path has a known upstream issue, so the pipeline owns weight movement explicitly rather than trusting the hook. Neither is visible from a node graph. Neither is avoidable once the graph is gone.</p></div>
+
+## What this rung actually costs to run
+
+The rung determines the mechanism, and the mechanism determines the bill. With the DiT held in system RAM and streamed block by block, roughly **0.4 GB of weights crosses PCIe per block**, 50 blocks per step — so a 23-step render moves about **460 GB** across the bus before a single frame is decoded. That number is a direct consequence of standing at rung 3 with 8 GB cards, and it is the reason so much of this knowledge base is about memory movement rather than arithmetic.
+
+The interconnect makes the same point from the other side. Between two cards without NVLink the measured path runs at about **4.9 GB/s**, while host RAM to GPU runs at about **12 GB/s** — which is why "cache a block on an idle neighbour and fetch it over PCIe" is *slower* than simply re-reading it from RAM, and why the design study rejected peer-as-cache outright ([ch.24](24-pcie-nvlink-interconnect.html), [ch.16](16-multi-gpu-and-nvlink.html)).
+
+<div class="callout spec"><span class="t">Rungs move too — an example with a date</span>
+<p>Context parallelism used to be something a team wrote by hand. As of <b>diffusers 0.40</b> it is a two-line configuration in the library itself, with Ulysses, Ring and Unified variants, benchmarked upstream on 4 × RTX 4090 over PCIe — that is, explicitly on hardware without NVLink. This project still hand-rolled its own ring (<a href="36-splitting-the-video-cp.html">ch.36</a>, <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>), for a reason that is itself a rung argument: the library's implementation is multi-process, one process per GPU, which replicates the model in RAM and hits a wall this box cannot pay (<a href="42-why-two-models.html">ch.42</a>).</p>
+<p>The general lesson: <b>capabilities migrate downward over time.</b> What is a research project at rung 4 this year is a config flag at rung 3 next year. Re-check the rung below before building anything.</p></div>
+
+## Reading the landscape without drowning in it
+
+Four questions turn any new tool name into a position on the grid, and they are worth asking in order.
+
+1. **Which rung is it on?** If it manages memory pools and batches requests, it is rung 5. If it owns the denoise or decode loop, rung 4. If it defines tensors, rung 3. If it emits device code, rung 2. If it talks to the driver, rung 1.
+2. **Which vendor column does it live in, and does it have a bogie?** Anything written directly in CUDA is welded to NVIDIA. Anything on Triton, ONNX or Vulkan can change gauge.
+3. **Which family does its loop belong to, and what does the current release actually support?** The loops still differ; the support matrix no longer follows the loop.
+4. **What can be patched from there?** This is the question that decided this project. If the thing to be changed lives inside the loop, standing outside the loop will not do.
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">inference stack</span><span class="badge">rung</span><span class="badge">metal / compute API</span><span class="badge">CUDA</span><span class="badge">ROCm / HIP</span><span class="badge">Metal / MPS</span><span class="badge">Vulkan compute</span><span class="badge">kernel language</span><span class="badge">Triton (compiler)</span><span class="badge">Triton Inference Server</span><span class="badge">framework</span><span class="badge">engine</span><span class="badge">serving layer</span><span class="badge">autoregressive loop</span><span class="badge">KV cache</span><span class="badge">PagedAttention</span><span class="badge">iterative denoising</span><span class="badge">diffusers</span><span class="badge">torchao</span><span class="badge">xDiT</span><span class="badge">GGUF / ggml</span><span class="badge">ONNX Runtime</span><span class="badge">monkeypatch / driver layer</span><span class="badge">context parallelism</span></p>
+<p>If those feel solid, a new tool announcement can be placed on the grid in about ten seconds — and the parts of it that will still matter next year can be separated from the parts that will not.</p></div>
+
+Next: the same landscape narrowed to one model — how H3 is actually served in the wild, from eight-GPU datacentre racks down to the single-digit-VRAM frontier, and which of those claims this box went on to break.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>26 · Serving H3 in the Real World</title>
+<meta name="description" content="How MiniMax-H3 is actually run — the four levers every recipe mixes, the published VRAM matrix from eight-GPU racks down to single-digit cards, and the predictions this box went on to break.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 26 · The VRAM problem — the published landscape, and what it got wrong about this box</span>
+
+# Serving MiniMax-H3 in the Real World
+
+<p class="lede">H3 is run in exactly four ways, and every published recipe is a different mixture of the same four levers: shard the model across cards, quantize it smaller, offload it to system RAM and stream it back in, or shrink the job until it fits. Nothing else is available, because everything reduces to one number — the weights do not fit on the card, and something has to give.</p>
+
+This chapter was researched and written in **September 2026** against live sources. It is preserved here with its predictions intact, including the ones this machine later disproved, because the shape of the error turns out to be more instructive than a corrected table would have been.
+
+<div class="callout truth"><span class="t">It all comes down to one number</span>
+<p>H3's DiT is roughly <b>61.7 GB in native precision</b>. The SGLang cookbook states the consequence plainly: it <b>"cannot be resident on a single consumer card."</b> Every recipe below — datacentre rack or hobbyist desktop — is an answer to that one question: <em>what do you do when the weights do not fit?</em></p></div>
+
+## The four levers
+
+There is no fifth. Any deployment of any large diffusion model is some blend of these, and knowing which blend a recipe uses predicts what it will cost and where it will break.
+
+<svg viewBox="0 0 760 328" width="100%" style="max-width:920px" role="img" aria-label="A bar representing the 61.7 gigabyte model, with four levers drawn beneath it: sharding splits it across cards, quantization narrows each weight, offload moves it to system RAM and streams it back, and shrinking the job reduces the activation instead of the weights.">
+  <defs>
+    <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6f7b8f"/></marker>
+    <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE PROBLEM, FOUR LEVERS — EVERY RECIPE IS A MIXTURE</text>
+  <rect x="2" y="26" width="756" height="42" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="20" y="52" fill="#ffd6d6" font-size="12.5" font-family="Inter,sans-serif">the DiT in native precision — about 61.7 GB</text>
+  <text x="740" y="52" text-anchor="end" fill="#c98b8b" font-size="11" font-family="Inter,sans-serif">a consumer card holds 8 to 24</text>
+  <line x1="380" y1="72" x2="380" y2="88" stroke="#6f7b8f" stroke-width="1" marker-end="url(#b1)"/>
+  <rect x="2" y="94" width="184" height="108" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="18" y="116" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">1 · SHARD</text>
+  <text x="18" y="136" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">split it across cards</text>
+  <rect x="18" y="146" width="36" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="60" y="146" width="36" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="102" y="146" width="36" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="144" y="146" width="26" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="18" y="184" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">costs: cards, and a fast</text>
+  <text x="18" y="196" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">link between them</text>
+  <rect x="192" y="94" width="184" height="108" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="208" y="116" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">2 · QUANTIZE</text>
+  <text x="208" y="136" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">fewer bits per weight</text>
+  <rect x="208" y="146" width="152" height="20" rx="3" fill="#12161f" stroke="#3a4a63"/>
+  <rect x="208" y="146" width="76" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="208" y="184" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">costs: a format the</text>
+  <text x="208" y="196" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">silicon may not implement</text>
+  <rect x="382" y="94" width="184" height="108" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="398" y="116" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">3 · OFFLOAD</text>
+  <text x="398" y="136" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">keep in RAM, stream in</text>
+  <rect x="398" y="146" width="60" height="20" rx="3" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="428" y="160" text-anchor="middle" fill="#8fd8c4" font-size="9.5" font-family="Inter,sans-serif">RAM</text>
+  <line x1="462" y1="156" x2="486" y2="156" stroke="#5ee0c0" stroke-width="1" marker-end="url(#b2)"/>
+  <rect x="490" y="146" width="60" height="20" rx="3" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="520" y="160" text-anchor="middle" fill="#8fd8c4" font-size="9.5" font-family="Inter,sans-serif">GPU</text>
+  <text x="398" y="184" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">costs: the whole model</text>
+  <text x="398" y="196" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">crosses the bus, every step</text>
+  <rect x="574" y="94" width="184" height="108" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="590" y="116" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">4 · SHRINK THE JOB</text>
+  <text x="590" y="136" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">smaller activation</text>
+  <rect x="590" y="146" width="152" height="20" rx="3" fill="#12161f" stroke="#3a4a63"/>
+  <rect x="590" y="146" width="52" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="590" y="184" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">costs: resolution, length,</text>
+  <text x="590" y="196" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">steps — or a pruned model</text>
+  <rect x="2" y="216" width="756" height="46" rx="7" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="20" y="238" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">Levers 1 to 3 attack the WEIGHTS. Lever 4 is the only one that touches the ACTIVATION —</text>
+  <text x="20" y="256" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">and on an 8 GB card the activation, not the weights, is what actually runs out first.</text>
+  <rect x="2" y="272" width="756" height="46" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="20" y="294" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">The 8 GB frontier pulls all four at once — and a fifth this chapter did not anticipate:</text>
+  <text x="20" y="312" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">split the SEQUENCE, not the weights, which shrinks the activation without shrinking the job.</text>
+</svg>
+
+That last panel is the whole story of what happened after this chapter was written, and it is worth stating early: the published landscape organises itself entirely around **where the weights go**, because on a 24 GB or 80 GB card the weights are the binding constraint. Below about 12 GB the binding constraint quietly changes to the **activation** — the working tensor of a single forward pass — and recipes tuned for the first problem give the wrong advice about the second.
+
+## The published VRAM matrix
+
+Real recipes with real numbers, as documented in September 2026. A warning mark denotes a figure taken from a secondary or summary source rather than a primary fetch, and it should be treated as indicative.
+
+| Recipe | GPUs | Precision | VRAM per card | Parallelism | Speed |
+|---|---|---|---|---|---|
+| B300 rack | 8 × B300 | BF16 | ~83.6 GB | Ulysses 8 | ⚠ ~19 s |
+| H100 rack | 4 × H100 | BF16 | ~66 GB | TP2 + Ulysses 2 | ⚠ ~13 s |
+| **L40S — the best-documented** | 4 × L40S (46 GB) | **dynamic FP8** | **14.3 GB peak** | Ulysses 4 | ~5.8 s/step, ~2× BF16 |
+| RTX 4090, single card | 1 × 4090 (24 GB) | int8 with offload | ~18 GB peak | ~20 resident layers, ~32 GB host RAM | ⚠ ~8.5 s/step |
+
+Read down the VRAM column and one thing stands out: **the racks use more VRAM per card than the desktop recipes, not less.** That is not waste. Ulysses parallelism splits the *sequence* across cards but **replicates the weights** on every one of them, so each card in an eight-GPU rack still holds a full copy. The rack is buying speed by adding compute to a problem that already fits; the desktop recipes are buying feasibility by shrinking a problem that does not.
+
+<div class="callout warn"><span class="t">The line that mattered for this box</span>
+<p>The official SGLang single-card offload recipe <b>names cards down to the 12 GB RTX 3060 — and stops there.</b> It does not name an 8 GB card. Below 12 GB the published recipes simply end, which means anything attempted at 8 GB is off the map and unsupported by construction.</p>
+<p>And the smallest anyone runs the <b>full</b> model is roughly <b>10 to 14 GB</b>, using W4A4 or Q4 on a 3090 or 4090. So the accurate statement in September 2026 was: <b>nobody credibly runs the full 33 B model in 8 GB.</b> That statement is still true, and the reason it stayed true while this box kept going is worth understanding precisely — see the section on what got broken, below.</p></div>
+
+## Lever by lever, with the mechanism
+
+### Shard — and why "more cards" is not automatically "more memory"
+
+There are two entirely different things called sharding, and confusing them is the single most expensive misunderstanding in multi-GPU work.
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:920px" role="img" aria-label="Three columns comparing sequence parallelism which replicates the full weights on every card, tensor parallelism which splits the weights but needs a fast link, and weight streaming which keeps one block on the card and the rest in system RAM.">
+  <defs>
+    <marker id="b3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THREE THINGS PEOPLE CALL &quot;USING ALL THE GPUS&quot;</text>
+  <rect x="2" y="26" width="246" height="212" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="18" y="48" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Ulysses / sequence parallel</text>
+  <text x="18" y="66" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">splits the tokens, copies the weights</text>
+  <rect x="18" y="78" width="66" height="64" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="51" y="106" text-anchor="middle" fill="#ffd6d6" font-size="10" font-family="Inter,sans-serif">ALL</text>
+  <text x="51" y="122" text-anchor="middle" fill="#ffd6d6" font-size="10" font-family="Inter,sans-serif">weights</text>
+  <rect x="92" y="78" width="66" height="64" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="125" y="106" text-anchor="middle" fill="#ffd6d6" font-size="10" font-family="Inter,sans-serif">ALL</text>
+  <text x="125" y="122" text-anchor="middle" fill="#ffd6d6" font-size="10" font-family="Inter,sans-serif">weights</text>
+  <rect x="166" y="78" width="66" height="64" rx="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="199" y="106" text-anchor="middle" fill="#ffd6d6" font-size="10" font-family="Inter,sans-serif">ALL</text>
+  <text x="199" y="122" text-anchor="middle" fill="#ffd6d6" font-size="10" font-family="Inter,sans-serif">weights</text>
+  <text x="18" y="166" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">Each card needs the whole model.</text>
+  <text x="18" y="182" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">Three 8 GB cards do not become</text>
+  <text x="18" y="198" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">one 24 GB card. It buys speed and</text>
+  <text x="18" y="214" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">a smaller activation, not capacity.</text>
+  <rect x="256" y="26" width="246" height="212" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="272" y="48" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Tensor parallel</text>
+  <text x="272" y="66" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">splits each weight matrix itself</text>
+  <rect x="272" y="78" width="66" height="64" rx="5" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="305" y="114" text-anchor="middle" fill="#eef3ff" font-size="10" font-family="Inter,sans-serif">1/3</text>
+  <rect x="346" y="78" width="66" height="64" rx="5" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="379" y="114" text-anchor="middle" fill="#eef3ff" font-size="10" font-family="Inter,sans-serif">1/3</text>
+  <rect x="420" y="78" width="66" height="64" rx="5" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="453" y="114" text-anchor="middle" fill="#eef3ff" font-size="10" font-family="Inter,sans-serif">1/3</text>
+  <text x="272" y="166" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">Genuinely divides capacity — but</text>
+  <text x="272" y="182" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">every layer needs an all-reduce,</text>
+  <text x="272" y="198" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">so it wants NVLink. Over PCIe at</text>
+  <text x="272" y="214" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">4.9 GB/s the traffic dominates.</text>
+  <rect x="510" y="26" width="248" height="212" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="526" y="48" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">Streaming — what this box does</text>
+  <text x="526" y="66" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">one block resident, 49 in RAM</text>
+  <rect x="526" y="78" width="88" height="64" rx="5" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="570" y="106" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">system RAM</text>
+  <text x="570" y="122" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">125 GB</text>
+  <line x1="618" y1="110" x2="640" y2="110" stroke="#5ee0c0" stroke-width="1" marker-end="url(#b3)"/>
+  <rect x="644" y="78" width="98" height="64" rx="5" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="693" y="106" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">GPU — 1 block</text>
+  <text x="693" y="122" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">about 0.4 GB</text>
+  <text x="526" y="166" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">Capacity solved outright: the card</text>
+  <text x="526" y="182" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">never holds more than one block.</text>
+  <text x="526" y="198" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">The bill is bandwidth — about</text>
+  <text x="526" y="214" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">460 GB moved per 23-step render.</text>
+</svg>
+
+The distinction has a blunt practical consequence. **Ulysses replicates weights**, so it can never turn small cards into a big one — an eight-card Ulysses rack is eight cards that each already fit the model. **Tensor parallelism** genuinely divides the weights, but it exchanges activations at every layer, which is why every published tensor-parallel recipe assumes NVLink. On a PCIe board where card-to-card measures about **4.9 GB/s** — slower than the roughly **12 GB/s** from host RAM to GPU — the exchange costs more than it saves ([ch.24](24-pcie-nvlink-interconnect.html)).
+
+Which leaves streaming: keep the model in system RAM and pull one block at a time. It is the only lever that dissolves the capacity problem completely, and its price is a fixed, predictable, enormous amount of bus traffic.
+
+### Quantize — and the measurement that ended the argument
+
+Published recipes offer a ladder of formats: int8, dynamic FP8, W4A8, W4A4, GGUF Q-levels, NVFP4. The temptation is to read that ladder as a quality ranking and pick the highest rung that fits. This box has a measurement that says otherwise.
+
+A single scene — a street musician singing with a guitar, ten seconds, the same 50-step sampler, the same prompt and seed, the same upscale and face-restore chain — was rendered twice on one 8 GB card, once with the patched int8 engine and once with a Q4_K_M GGUF:
+
+| Metric | int8 (patched) | Q4_K_M GGUF | Result |
+|---|---|---|---|
+| Render time | 6393 s (**107 min**) | 3122 s (**52 min**) | Q4 is **2.05× faster** |
+| Native resolution that fit | 576×320 | 704×384 | Q4 fits **47% more pixels** |
+| Peak VRAM | 7.5 GB | 7.06 GB | Q4 is lower |
+| Quality, by eye | ~85 | ~85 | **a tie, inside noise** |
+
+<div class="callout truth"><span class="t">Why the four-bit format was faster than the eight-bit one</span>
+<p>Not because four bits is inherently quicker. Because of what each path <em>does with the bits</em>. The production int8 convrot path <b>dequantizes back to bf16</b> and never engages Ampere's INT8 tensor cores at all, and the row-blocking patch this project added to make it fit puts a Python-level loop around it. The Q4 GGUF path dequantizes to fp16 and runs <b>one standard matmul</b> — and it sidesteps the 2.24 GB <code>fast_int8_mm</code> temporary buffer entirely, which is also why it fits a higher native resolution at lower peak VRAM.</p>
+<p>Honest caveats, because the result is easy to over-read: one scene, one seed, quality judged by eye rather than by a metric, and the 2× is partly self-inflicted since it compares Q4 against <em>this project's patched</em> int8 rather than raw int8. The defensible conclusion is <b>"better default pending more scenes,"</b> not "proven champion." int8 remains the higher-fidelity reference; Q4 matches it rather than beating it.</p></div>
+
+The general lesson generalises past this model: **match the format to what the silicon actually implements.** A format the hardware emulates in software will run, and it will crawl ([ch.18](18-number-formats-precision.html)).
+
+### Offload — the lever that costs bandwidth instead of memory
+
+Streaming is what makes the whole 8 GB story possible, and the arithmetic is unforgiving in a way that is easy to underestimate. The deployed transformer holds 50 blocks; roughly **0.4 GB** of int8 weights crosses PCIe per block; a **23-step** render therefore moves about **460 GB** across the bus before decode begins. Doubling the step count doubles that traffic exactly. Nothing about the scene changes it — resolution and frame count affect the *activation*, not the weight stream.
+
+<div class="callout danger"><span class="t">Two offload traps that cost real time here</span>
+<ul>
+<li><b><code>use_stream=True</code> pins tens of gigabytes of host RAM</b> and the kernel OOM-kills the process with no traceback at all. There is no error to read, only a dead job. It stays <code>False</code> — slower transfers, but a render that finishes.</li>
+<li><b>Offload replicated per process is a RAM wall, not a VRAM one.</b> A three-way ring built the obvious way OOM'd because each process re-copied the weights, and system RAM ran out before VRAM did. The fix was a single-process design (<a href="42-why-two-models.html">ch.42</a>, <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>).</li>
+</ul></div>
+
+### Shrink the job — resolution, length, steps, and the pruned model
+
+The last lever is the only one that touches the activation, and it has four independent knobs. Three of them are obvious — fewer pixels, fewer frames, fewer steps. The fourth is structural: **use a smaller model.** The variant this box runs is a **pruned int8 transformer of about 20 GB**, roughly 20 billion parameters across the same 50 blocks, alongside a 26 GB encoder and two VAEs of 4.9 GB and 0.6 GB.
+
+The step knob deserves a note because it is routinely set by habit. Measured on this box, the number of steps a scene needs is a property of **the scene**, not of the model: a tight close-up resolves in **4 steps**, a character mid-shot needs **23**, and a wide vista with a small distant subject needs **49** ([ch.47](47-the-scorecard.html)). Setting 50 steps for a close-up is a twelve-fold overspend on the largest term in the cost.
+
+## The single-digit-VRAM frontier
+
+**WanGP** — self-described as a fast video generator for the GPU-poor — is the community tool that fits H3 into single-digit VRAM. From its own documentation, as of September 2026:
+
+- **5 to 6 GB for a 5-second, 124-frame clip; 8 to 9 GB for 15 seconds at 832×480** — but for a **pruned ~20 B variant, not the full 33 B**. Its own README says the full model "requires higher specs."
+- **Quantization:** asymmetric **W4A8** — 4-bit weights with 8-bit activations on INT8 kernels, RTX 30-series and newer — plus FP8 for the video VAE and INT4 for the text encoder.
+- **Memory technique:** First-Block-Cache, which reuses near-identical block outputs; step skipping; the DiT and encoder streamed to system RAM; 4-step accelerator LoRAs.
+- **Cost:** minutes per clip. A community report of roughly 121 frames at 720p in about 15 minutes on a 6 GB card is a secondary source and flagged as such.
+
+<div class="callout spec"><span class="t">The honest 8 GB minimum, September 2026</span>
+<p><b>Full 33 B model:</b> about 10 to 14 GB, using W4A4 on a 4090 or 3090. Nobody fits the full model in 8 GB.<br>
+<b>Pruned ~20 B via WanGP:</b> about 5 to 6 GB for a 5-second 480p clip — the only configuration that genuinely fits 8 GB, at the cost of a pruned model, low resolution, and long waits.</p></div>
+
+## Community quantizations
+
+| Method | What it is | Size | Notes |
+|---|---|---|---|
+| **W4A4 / SVDQuant** (felipesztutman) | int4 weights *and* activations, real int4 GEMM | 10.58 GB of blocks; 14 GB resident, 19.6 GB peak on a 4090 | first W4A4 on pre-Blackwell silicon; 3.65 s/step; a 3090 target announced |
+| Kijai **w4a8** | ConvRot int4 with fp8 scales | FL2VA 12.5 GB, Ref2VA 11.8 GB | about 1.09× faster than int8; work in progress |
+| GGUF Q2 to Q5 (ComfyUI-GGUF) | k-quant weight compression | 3.78 GB (IQ1_S) up to 23.9 GB (Q5) | the low Q levels degrade visibly |
+| NVFP4 | FP4 on Blackwell tensor cores | ~12.5 GB | RTX 50-series only |
+
+Note the second row's two entries: **FL2VA at 12.5 GB and Ref2VA at 11.8 GB** are not two quantizations of one model — they are two *different* transformers with different conditioning inputs. FL2VA takes text plus optional first and last frames; Ref2VA takes reference images that anchor identity. They share the encoder and both VAEs, so the marginal cost of having both is one more file, but no parameter change converts one into the other ([ch.03](03-how-h3-works.html), [ch.33](33-long-video-small-card.html)).
+
+## Cross-vendor, as of September 2026
+
+- **AMD:** day-zero support on Instinct **MI300X and MI355X** — SGLang on ROCm with AITER kernels and eight-way sequence parallelism.
+- **Apple:** a Metal-native port exists; performance unverified and flagged as such.
+- **Intel:** no credible recipe found at the time of writing.
+
+## What this chapter predicted, and what actually happened
+
+Here is the verdict this chapter reached in September 2026 for a box of three RTX 3060 Ti with no NVLink, quoted as written:
+
+<div class="callout warn"><span class="t">The original verdict, preserved</span>
+<p><em>"Shard the full model across the 3 cards? Ulysses replicates weights (each card needs all 61.7 GB, so impossible). Tensor-parallel shards weights but needs NVLink we lack. A custom weight-sharded pipeline is the only scheme that could nominally fit — but no tool ships it, you build it against the 4.9 GB/s bus, and activations plus VAE plus encoder still fight for the roughly 4 GB left. <b>High-effort R&amp;D, not a deployment.</b>"</em></p>
+<p><em>"What works today: WanGP on one 3060 Ti — pruned ~20 B, W4A8, streamed to the 125 GB RAM, around 5 to 6 GB, 832×480, roughly 5-second clips, minutes each. The other two cards are throughput, not one bigger GPU."</em></p>
+<p><em>"For the full 33 B or above 480p: you are above 8 GB no matter what, so rent a card of 24 GB or more."</em></p></div>
+
+Two of those three paragraphs were right. The third was wrong, and the way it was wrong is the most useful thing on this page.
+
+<svg viewBox="0 0 760 268" width="100%" style="max-width:920px" role="img" aria-label="A comparison of three predictions from this chapter against the measured outcome: the weight-sharding verdict held, the throughput-only verdict was broken by sequence parallelism, and the rent-a-bigger-card verdict was broken by a native 720p fifteen second render on three 8 GB cards.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">PREDICTION VERSUS MEASUREMENT</text>
+  <rect x="2" y="26" width="756" height="26" rx="5" fill="#0f141d" stroke="#232c3b"/>
+  <text x="18" y="44" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">WHAT THE CHAPTER SAID</text>
+  <text x="430" y="44" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">WHAT THE RENDER LOGS SAY</text>
+  <rect x="2" y="58" width="416" height="60" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="18" y="80" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">&quot;Weight-sharding: no tool ships it,</text>
+  <text x="18" y="98" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">high-effort R and D, not a deployment.&quot;</text>
+  <rect x="426" y="58" width="332" height="60" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="442" y="80" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">HELD — it took a hand-written engine,</text>
+  <text x="442" y="98" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">a golden reference, and six chapters.</text>
+  <rect x="2" y="124" width="416" height="60" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="18" y="146" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">&quot;The three cards are a throughput asset,</text>
+  <text x="18" y="164" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">not a way to assemble one big GPU.&quot;</text>
+  <rect x="426" y="124" width="332" height="60" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="442" y="146" fill="#ffd6d6" font-size="11.5" font-family="Inter,sans-serif">BROKEN — sequence parallelism fits a</text>
+  <text x="442" y="164" fill="#c98b8b" font-size="11.5" font-family="Inter,sans-serif">sequence no single card can hold.</text>
+  <rect x="2" y="190" width="416" height="60" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="18" y="212" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">&quot;Above 480p you are above 8 GB no</text>
+  <text x="18" y="230" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">matter what — rent a 24 GB card.&quot;</text>
+  <rect x="426" y="190" width="332" height="60" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="442" y="212" fill="#ffd6d6" font-size="11.5" font-family="Inter,sans-serif">BROKEN — 1280x704, 345 frames, 15 s,</text>
+  <text x="442" y="230" fill="#c98b8b" font-size="11.5" font-family="Inter,sans-serif">rendered on three 8 GB cards.</text>
+</svg>
+
+<div class="callout truth"><span class="t">Why the prediction failed — it counted the wrong tensor</span>
+<p>The verdict reasoned entirely about <b>weights</b>: 61.7 GB does not fit, sharding weights needs a link this board lacks, therefore nothing fits. Every step of that is correct. The error was assuming weights were the binding constraint at all.</p>
+<p>On this box they are not. Streaming had already reduced resident weights to <b>one block at a time</b>, so what actually ran out was the <b>activation</b> — the working tensor of one forward pass. Splitting the <em>sequence</em> across three cards divides that activation by three without any card needing more of the model than it already streams. The lever the chapter was missing is not in its list of four, because the published recipes it surveyed were all written for cards where weights, not activations, were the wall.</p>
+<p>The result: native <b>1280×704 at 345 frames — 15 seconds, no upscale</b> — rendered on three 8 GB cards (<a href="46-the-first-15-seconds.html">ch.46</a>, <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>). Not rented. Not pruned further. Not 480p.</p></div>
+
+What the prediction got right is equally worth naming. It said the custom path would be **high-effort R&D rather than a deployment**, and that was exactly correct: it took a hand-written ring attention proved against a golden reference, a rewritten offload path, two decode bug fixes and six chapters of build log. And it correctly identified that the full 61.7 GB model at native precision remains out of reach — what runs here is the pruned int8 transformer, streamed.
+
+<div class="callout spec"><span class="t">The corrected verdict</span>
+<p><b>Capacity is no longer the constraint on this box. Time is.</b> Native 1280×704 at 15 seconds works and costs about <b>44 hours</b> of denoise at 23 steps. The same 15 seconds at 832×480 and 49 steps is <b>2.6 hours</b>, then a 1.54× upscale to 720p — roughly 35× cheaper for a difference most viewers cannot see.</p>
+<p>So the honest 2026 sentence is not "rent a bigger card to go above 480p." It is: <b>native 720p at 15 seconds is a proven capability rather than a workflow</b>, and a bigger card is bought to convert 44 hours into something a person will actually wait for (<a href="27-hardware-budget-audit.html">ch.27</a>, <a href="39-choosing-the-next-card.html">ch.39</a>).</p></div>
+
+## How to read any H3 recipe in sixty seconds
+
+1. **Which of the four levers does it pull, and in what mixture?** That predicts its failure mode before any number is read.
+2. **Does its parallelism replicate or divide the weights?** Ulysses replicates; tensor parallel divides; sequence parallel divides the *activation* instead.
+3. **What is the VRAM figure measuring — resident weights, or peak including activation?** These differ by several gigabytes and are routinely quoted interchangeably.
+4. **Is the model full or pruned?** A 20 B pruned variant and the full 33 B carry the same name in most write-ups and do not carry the same requirements.
+5. **What is the date on the claim?** This whole page has one.
+
+## Sources
+
+<p class="small">
+<a href="https://platform.minimax.io/docs/guides/local-deploy-h3">MiniMax deploy guide</a> ·
+<a href="https://docs.sglang.io/cookbook/diffusion/MiniMax/MiniMax-H3">SGLang H3 cookbook</a> ·
+<a href="https://github.com/sgl-project/sglang/discussions/34079">SGLang 4×L40S FP8 (#34079)</a> ·
+<a href="https://discuss.huggingface.co/t/minimax-h3-quantisation-ram-vram/178461">HF: H3 quant RAM/VRAM</a> ·
+<a href="https://github.com/deepbeepmeep/Wan2GP/blob/main/README.md">WanGP / Wan2GP README</a> ·
+<a href="https://huggingface.co/felipesztutman/MiniMax-H3-W4A4">H3 W4A4 (Nunchaku)</a> ·
+<a href="https://comfyui-wiki.com/en/news/2026-08-05-kijai-minimax-h3-w4a8">Kijai w4a8</a> ·
+<a href="https://comfyui-wiki.com/en/news/2026-08-03-minimax-h3-community-quants">Community quants</a> ·
+<a href="https://www.amd.com/en/developer/resources/technical-articles/2026/day-0-support-for-minimax-h3-on-amd-gpus.html">AMD day-0 H3</a> ·
+<a href="https://github.com/MiniMax-AI/awesome-minimax-h3-integration">awesome-minimax-h3-integration</a>
+</p>
+
+<p class="small"><b>Reliability:</b> strongly sourced — the engine list, the 4×L40S FP8 numbers, the W4A4 and w4a8 sizes, the GGUF and NVFP4 sizes, AMD support, WanGP mechanics. Flagged as reported — exact datacentre latencies and the single-card 4090 figures. The int8-versus-Q4 table and every figure in the corrected-verdict section were measured on this box's own render logs. This is a live-moving target: re-verify before betting on a specific number.</p>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">the four levers</span><span class="badge">Ulysses / sequence parallelism</span><span class="badge">tensor parallelism</span><span class="badge">weight replication</span><span class="badge">block streaming / offload</span><span class="badge">activation versus weights</span><span class="badge">dynamic FP8</span><span class="badge">W4A4 / W4A8</span><span class="badge">SVDQuant</span><span class="badge">GGUF Q-levels</span><span class="badge">NVFP4</span><span class="badge">First-Block-Cache</span><span class="badge">pruned model</span><span class="badge">peak versus resident VRAM</span><span class="badge">FL2VA versus Ref2VA</span><span class="badge">steps as a property of the scene</span></p>
+<p>If those feel solid, any deployment write-up can be decoded into the mixture of levers it actually uses — and the numbers in it can be compared against each other honestly.</p></div>
+
+Next: the same landscape turned into a budget — what each rung of hardware really costs, measured in money and in hours of wall-clock.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

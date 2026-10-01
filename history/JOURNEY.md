@@ -1,0 +1,52 @@
+# 🧭 The Journey — Server 1 → 2 → 3
+
+> The point of this note: not *where we landed*, but *how the thinking evolved*. Three servers, three mindsets.
+> **Honesty flag:** the current box (Server 3) I have cold. The two earlier boxes I've reconstructed from file dates and the work itself — anything marked 🖊️ is for *you* to confirm from your records, not something I know for certain.
+
+```mermaid
+timeline
+    title Three servers, three mindsets
+    Server 1 (early Aug) : "Can it even run?" : first 8GB memory-first experiments
+    Server 2 (mid–late Aug) : "Can it be good?" : benchmarks, seeds, int8 vs Q4, ComfyUI outputs
+    Server 3 / dalang (Sep) : "Can it be OURS?" : own pipeline, 3 GPUs, 35 chapters
+```
+
+---
+
+## 🟠 Server 1 — "Can it even run?" *(early August)*
+The founding question: can a 33 B video model run on a single 8 GB card at all?
+- **Mindset:** survival. Fit the impossible into 8 GB by streaming weights from RAM.
+- **Evidence in this vault:** [[answer]] (Memory-First Execution Experiment), the earliest [[EXPERIMENT-LOG]] entries, [[SAMPLING-MATH]], [[math-model]].
+- **Result:** proved the offload/streaming trick works — slow, but it runs.
+- 🖊️ *Confirm:* exact GPU/RAM/disk, provider, IP, dates. (The knowledge-base's "honest specs" page describes an early box: RTX 3060 Ti 8 GB, ~60 GB RAM, ~148 GB NVMe, ComfyUI 0.30 — likely Server 1 or 2; you'd know which.)
+
+## 🟡 Server 2 — "Can it be good?" *(mid–late August)*
+Once it ran, the question became quality and cost.
+- **Mindset:** measurement. Stop arguing, start benchmarking.
+- **Evidence:** [[BENCHMARK-int8-vs-q4]] (+ `scene3_benchmark.png`), [[SEED-EXPERIMENT]], [[MULTI-GPU-RESEARCH]], [[CHECKPOINT-v0.1]], [[hardware-investment-plan]], [[itung-itungan]].
+- **Outputs (ComfyUI era):** the montages and singing tests now on the Mac at `~/Desktop/output/` (`montage_60s`, `singing_A/B_lora`, `iso_lora`, `pip_5min`…).
+- **Result:** learned the real levers (int8 ≈ Q4, big-face framing, native resolution) and the honest ceilings.
+- 🖊️ *Confirm:* exact box specs, provider, IP, dates.
+
+## 🟢 Server 3 — "Can it be OURS?" *(September, current — the dalang box)*
+The pivot: stop relying on prebuilt tools (ComfyUI), build our own engine.
+- **Mindset:** ownership + first principles. Read the code, measure at torch/CUDA level, build the pipeline ourselves.
+- **The machine (confirmed):** `dalang-Z9PE-D8-WS` — **3× RTX 3060 Ti (8 GB each)**, dual Xeon E5-2665 (32 threads), **125 GB RAM**, **818 GB** free disk, Ubuntu 24.04. Reached over **Tailscale** at `100.122.45.32` (the flaky public path taught us a lesson — see [[../HOME]] and the connection memory).
+- **Engine:** our own diffusers-based two-phase pipeline (encode → denoise+decode), int8 block-streaming, VAE-streaming decode fix. **No ComfyUI.**
+- **What we proved here:**
+  - Full 33 B denoise on **one** 8 GB card (int8, ~75 s/step).
+  - Real clips: `exemplo-canta` (clean close-up singer), `exemplo-hiphop` (2-person) — and the frame-by-frame diagnosis (eyes bug, single-audio lip-sync).
+  - **Measured baseline:** 124 frames = **15,129 tokens, 5.72 GB peak** on the 7.66 GB card.
+  - **The wall:** 345 frames (15 s) OOMs — and reading the source showed *why* (linear rotary/QKV/FFN transients, not quadratic attention — [Ch.34](../knowledge-base/34-open-use-close-flashattention.html)).
+  - **Documentation:** the full 35-chapter knowledge base written here.
+- **The open frontier:** the 3-GPU consumer engine (parallel/segment rendering) + the one algorithmic-core move ([step distillation, Ch.35](../knowledge-base/35-is-it-really-ours.html)).
+
+---
+
+## 📈 The arc, in one line each
+1. **Server 1:** *make the impossible run* (streaming).
+2. **Server 2:** *make it good and cheap* (measurement).
+3. **Server 3:** *make it ours* (own engine → reach for the core).
+
+## 🖊️ For you to fill in
+When you have your records handy, drop in: each server's exact specs, provider, IP, cost, and start/end dates. Then this becomes the true logbook of the whole climb — the thing that lets someone (or future-you) retrace every step.

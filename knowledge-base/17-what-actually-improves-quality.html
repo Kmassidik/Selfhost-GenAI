@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>17 · What Actually Improves Quality</title>
+<meta name="description" content="A controlled ablation found that quality on this build comes from big-face framing and native resolution — not from a LoRA, not from int8 over Q4 — and that step count is a property of the scene, not the model.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 17 · Measured, the hard way</span>
+
+# What Actually Improves Quality
+
+<p class="lede">Two things measurably improve picture quality on this build: <b>how many pixels land on the subject's face</b>, and <b>rendering at the resolution the clip will be watched at</b>. A purpose-built face LoRA made the image worse, int8 against Q4 was a tie, and the step count that matters turned out to be a property of the scene rather than a setting to tune.</p>
+
+The chase started from an insult. A friend's 4 GB laptop appeared to be producing sharper faces than a 33B model streamed through an 8 GB card, and the obvious suspects were all expensive: a better quantization, a realism LoRA, a second GPU. Two controlled renders later, none of them was the answer, and 21 GB had already been downloaded to find that out.
+
+<div class="callout truth"><span class="t">The one-line answer</span>
+<p>Quality on this box = <b>big face framing + native resolution</b>. Not a LoRA. Not a fancier quant. The base model, rendered natively on a close-up, is <em>already</em> cinematic — the failures blamed on "the model" were really <b>small faces and upscaling</b>.</p></div>
+
+## Why framing is a resolution problem in disguise
+
+A generated frame does not have a quality dial. It has a fixed budget of pixels, and every object in the shot spends some of them. An iris needs enough pixels to be a *shape* rather than a smear; teeth need enough to be separate objects rather than a bright band. Whether a face gets those pixels has almost nothing to do with the model and almost everything to do with where the camera is standing.
+
+The structural analogy is a printing press with a fixed line screen. The press does not know what a face is. Print a portrait at postcard size and the eye is a dozen dots; print the same file as a poster and it is a thousand. Nothing about the press changed. This is why "the model can't do eyes" and "the eyes were 20 pixels wide" produce identical-looking complaints and require completely different fixes.
+
+<svg viewBox="0 0 760 258" width="100%" style="max-width:920px" role="img" aria-label="The pixels-per-face ladder: a single face filling the frame renders flawlessly even at 480p, a group of ten framed as a portrait holds at 1080p, and a thirty-person wide crowd at 576 by 320 gives each face about 20 pixels, at which point faces melt.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SAME MODEL · SAME SETTINGS · THE ONLY VARIABLE IS HOW BIG THE FACE IS</text>
+  <rect x="2" y="30" width="240" height="136" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <circle cx="122" cy="98" r="52" fill="#14342c" stroke="#5ee0c0"/>
+  <circle cx="104" cy="86" r="8" fill="#0d1017" stroke="#5ee0c0"/>
+  <circle cx="140" cy="86" r="8" fill="#0d1017" stroke="#5ee0c0"/>
+  <path d="M104,120 Q122,132 140,120" fill="none" stroke="#5ee0c0"/>
+  <text x="122" y="184" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">one face, filling the frame</text>
+  <text x="122" y="202" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">flawless even at 480p</text>
+  <text x="122" y="222" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">catchlights, iris, skin texture</text>
+  <rect x="260" y="30" width="240" height="136" rx="8" fill="#0f141d" stroke="#7aa2ff"/>
+  <circle cx="310" cy="80" r="20" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="356" cy="80" r="20" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="402" cy="80" r="20" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="448" cy="80" r="20" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="332" cy="126" r="20" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="378" cy="126" r="20" fill="#1a2440" stroke="#7aa2ff"/>
+  <circle cx="424" cy="126" r="20" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="380" y="184" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">ten, framed as a group portrait</text>
+  <text x="380" y="202" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">foreground faces hold at 1080p</text>
+  <text x="380" y="222" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">fewer, bigger faces = ~4x the pixels per tooth</text>
+  <rect x="518" y="30" width="240" height="136" rx="8" fill="#0f141d" stroke="#ff6b6b"/>
+  <circle cx="546" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="570" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="594" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="618" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="642" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="666" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="690" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="714" cy="70" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="546" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="570" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="594" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="618" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="642" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="666" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="690" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="714" cy="94" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="558" cy="118" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="582" cy="118" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="606" cy="118" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="630" cy="118" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="654" cy="118" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="678" cy="118" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <circle cx="702" cy="118" r="5" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="638" y="184" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">thirty, wide, at 576x320</text>
+  <text x="638" y="202" text-anchor="middle" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">~20 px per face — they melt</text>
+  <text x="638" y="222" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">no iris can exist in 20 pixels</text>
+  <rect x="90" y="234" width="580" height="24" rx="6" fill="#0f141d" stroke="#232c3b"/>
+  <text x="380" y="250" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">It is face SIZE in pixels that decides the outcome — not the number of people, and not the model.</text>
+</svg>
+
+<div class="callout truth"><span class="t">The eyes were never broken by the model</span>
+<p>Every "soft eyes" complaint on this project traced to one of two causes, and neither was model quality:</p>
+<ol>
+<li><b>Small faces.</b> A face occupying ~20–30 px cannot contain an iris. This is arithmetic, not aesthetics.</li>
+<li><b>Upscaling.</b> Generating small and then enlarging <em>softens</em>, because the enlarger is inventing detail the latent never carried.</li>
+</ol>
+<p>Give a face real pixels and render at the target resolution, and the base model produces sharp, film-like eyes with no help at all. The fix that worked on the eye artefacts, verified by inspecting frames 60–80 of a real clip: <b>tight close-up, 20 real steps rather than distilled, 768×448 native, calmer expression.</b></p></div>
+
+There is a corollary worth stating because it is counter-intuitive: **a single still image fits at far higher resolution than video does.** A still carries none of the temporal cost of 362 frames, so on 8 GB a **1920×1080 single frame fits and looks photoreal.** For one person, the measured ladder runs: 480p flawless, 720p magazine-grade, 1080p indistinguishable from a photograph. The wall that forces video down to 480p is frames, not pixels.
+
+## The controlled test: does a face LoRA help?
+
+The candidate was `fal/MiniMax-H3-Realism-People-LoRA`, purpose-built for faces, eyes, skin and hands. Its own documentation promises that "skin keeps its texture instead of smoothing out, eyes and micro-expressions stay coherent." Exactly the failure being chased.
+
+The temptation with a tool like this is to switch it on inside a working pipeline and judge the output. That test is worthless, because a production pipeline contains an upscaler and a face restorer, either of which could account for any difference. So the ablation stripped both out.
+
+<svg viewBox="0 0 760 210" width="100%" style="max-width:920px" role="img" aria-label="The ablation design: model, prompt, seed, step count, resolution are all held identical between two renders, the upscaler and face restorer are removed entirely, and only the LoRA switch differs, so any visible difference must be caused by the LoRA.">
+  <defs>
+    <marker id="q1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ISOLATE ONE VARIABLE — EVERYTHING ELSE IS NAILED DOWN OR REMOVED</text>
+  <rect x="2" y="30" width="200" height="122" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="102" y="52" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">HELD IDENTICAL</text>
+  <text x="20" y="74" fill="#aab4c5" font-size="11.5" font-family="SF Mono,monospace">Q4 GGUF engine</text>
+  <text x="20" y="92" fill="#aab4c5" font-size="11.5" font-family="SF Mono,monospace">seed 77</text>
+  <text x="20" y="110" fill="#aab4c5" font-size="11.5" font-family="SF Mono,monospace">50 steps</text>
+  <text x="20" y="128" fill="#aab4c5" font-size="11.5" font-family="SF Mono,monospace">native 848x480</text>
+  <text x="20" y="146" fill="#aab4c5" font-size="11.5" font-family="SF Mono,monospace">same prompt</text>
+  <rect x="222" y="30" width="200" height="122" rx="8" fill="#12161f" stroke="#ff6b6b"/>
+  <text x="322" y="52" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">REMOVED ENTIRELY</text>
+  <text x="240" y="78" fill="#ff6b6b" font-size="11.5" font-family="SF Mono,monospace">upscaler — none</text>
+  <text x="240" y="100" fill="#ff6b6b" font-size="11.5" font-family="SF Mono,monospace">face restore — none</text>
+  <text x="240" y="128" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">so nothing else can be</text>
+  <text x="240" y="144" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">credited or blamed</text>
+  <rect x="442" y="30" width="200" height="122" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="542" y="52" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">THE ONE VARIABLE</text>
+  <rect x="462" y="66" width="160" height="30" rx="4" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="542" y="86" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="SF Mono,monospace">LoRA off</text>
+  <rect x="462" y="104" width="160" height="30" rx="4" fill="#0d1017" stroke="#5ee0c0"/>
+  <text x="542" y="124" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="SF Mono,monospace">LoRA on, strength 0.9</text>
+  <line x1="646" y1="92" x2="690" y2="92" stroke="#5ee0c0" marker-end="url(#q1)"/>
+  <text x="700" y="88" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">any</text>
+  <text x="700" y="104" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">difference</text>
+  <text x="700" y="120" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">is the LoRA</text>
+  <rect x="140" y="168" width="480" height="36" rx="8" fill="#241a1a" stroke="#ffb454"/>
+  <text x="380" y="190" text-anchor="middle" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">Result: the LoRA was SOFTER. Dreamier, blurrier eyes, and it shifted the composition.</text>
+</svg>
+
+The baseline — no LoRA, no upscale, no restore, plain Q4 at native resolution on a close-up — came back crisp, cinematic, with detailed eyes and visible catchlights. The LoRA run came back *softer*.
+
+<div class="callout warn"><span class="t">Why a face LoRA backfires at 480p</span>
+<p>The LoRA's own training notes explain it: its detail "lives in <b>high spatial frequencies</b>, and at a lower resolution the latents barely carry them." A latent at 480p does not have channels for pore-scale texture, so an adapter trained to add that texture has nothing to attach it to — and its remaining effect is a smoothing prior. It was never a compatibility problem: the LoRA <em>loads fine</em> with the Q4 GGUF. It simply had no resolution to work with.</p>
+<p>(A footnote for anyone reproducing the run: this ablation used <b>848</b>×480 under the ComfyUI-era engine. In the pipeline built later, 848 is a trap — 848 ÷ 16 = 53, an odd number, which breaks 2×2 patching with a shape error that never mentions resolution. Use 832, where 832 ÷ 16 = 52.)</p></div>
+
+## How many steps a scene needs
+
+The other lever nobody expects is the step count, and the reason it surprises people is that it is usually presented as a model setting. It is not. It is a property of **the scene being rendered**.
+
+A denoising step removes a fixed slice of noise from the whole frame at once. A frame whose content is one large, smoothly varying object reaches its final state quickly. A frame full of small independent details — a distant figure, a horizon of separate structures — needs many more passes before every one of those details has resolved, because each of them is competing for the same denoising budget.
+
+<svg viewBox="0 0 760 244" width="100%" style="max-width:920px" role="img" aria-label="Step count by content, measured: a tight close-up resolves in 4 steps, an anime character mid-shot needs 23, and a wide vista with a small distant subject needs 49; the same wide scene at 3 steps renders as mud.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">STEPS ARE A PROPERTY OF THE SCENE, NOT OF THE MODEL</text>
+  <rect x="2" y="30" width="740" height="1" fill="#232c3b"/>
+  <rect x="2" y="42" width="86" height="52" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="45" y="66" text-anchor="middle" fill="#eafff8" font-size="17" font-family="SF Mono,monospace">4</text>
+  <text x="45" y="84" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">steps</text>
+  <text x="104" y="62" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Tight close-up portrait</text>
+  <text x="104" y="80" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">one big smooth subject · measured sharp at 832x480 x 124</text>
+  <rect x="2" y="106" width="86" height="52" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="45" y="130" text-anchor="middle" fill="#eef3ff" font-size="17" font-family="SF Mono,monospace">23</text>
+  <text x="45" y="148" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">steps</text>
+  <text x="104" y="126" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Character, mid-shot</text>
+  <text x="104" y="144" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">beautiful at native 1280x704 x 124 — 55 min, 143 s/step</text>
+  <rect x="2" y="170" width="86" height="52" rx="6" fill="#2a2420" stroke="#ffb454"/>
+  <text x="45" y="194" text-anchor="middle" fill="#ffd9a0" font-size="17" font-family="SF Mono,monospace">49</text>
+  <text x="45" y="212" text-anchor="middle" fill="#c9a06a" font-size="10.5" font-family="Inter,sans-serif">steps</text>
+  <text x="104" y="190" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">Wide vista, small distant subject</text>
+  <text x="104" y="208" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">beautiful at 512x288 x 345 — 66 min · islands, ruins and hero all resolved</text>
+  <rect x="470" y="42" width="288" height="180" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="614" y="66" text-anchor="middle" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">The same wide scene at 3 steps</text>
+  <rect x="490" y="80" width="248" height="76" rx="6" fill="#0d1017" stroke="#3a2020"/>
+  <text x="614" y="112" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">mud</text>
+  <text x="614" y="134" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">1280x704 x 345, 5.5 h of compute, unusable</text>
+  <text x="614" y="178" text-anchor="middle" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">Under-sampling is not "slightly worse".</text>
+  <text x="614" y="196" text-anchor="middle" fill="#ff6b6b" font-size="11.5" font-family="Inter,sans-serif">It is a wasted render at full price.</text>
+  <text x="614" y="214" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the same clip at 23 steps is worth ~44 h</text>
+</svg>
+
+<div class="callout spec"><span class="t">The rule</span>
+<p><b>Fine detail everywhere plus a small subject means more steps.</b> A face filling the frame converges in 4. Floating islands with a hero standing tiny on a distant cliff needs 49. Budget steps by looking at the shot, never by habit — and never assume a higher resolution rescues an under-sampled one. A well-sampled 512×288 beat an under-sampled 1280×704 outright.</p></div>
+
+An older finding from the same family: the Turbo distillation, which compresses sampling to 4–6 steps, was measured as the main culprit behind badly formed teeth. Its distillation under-renders the finest detail, and teeth are the finest thing in a face. Full 20-step euler formed them properly. Turbo remains the right tool for drafts and motion tests; it is the wrong tool for a hero shot.
+
+## Native resolution against the upscaler
+
+The second measured lever is subtler, because upscaling is not simply bad — it is bad *relative to native*, and by an amount that depends on the ratio.
+
+Three separate measurements pin this down. First, the upscaler was cleared of a crime it did not commit: it contributes only **1.02× the temporal change** between frames, so it is not the source of flicker. Second, motion judder was fixed by frame interpolation, measured at **1.8× smoother** going from 24 to 48 fps — again nothing to do with the enlarger. Third, and decisively, upscaling *does* soften, and a mild upscale softens much less than an aggressive one.
+
+That third point turns out to determine the whole production route.
+
+<svg viewBox="0 0 760 236" width="100%" style="max-width:920px" role="img" aria-label="Two routes to a fifteen-second 720p deliverable: rendering 832 by 480 at 49 steps in 2.6 hours then upscaling 1.54 times, against rendering native 1280 by 704 at 49 steps in 90 hours, roughly 35 times the cost.">
+  <defs>
+    <marker id="q2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="q3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">SAME DELIVERABLE: 15 SECONDS AT 720p · TWO WAYS TO GET THERE</text>
+  <rect x="2" y="32" width="150" height="56" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="77" y="54" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">832x480 x 345</text>
+  <text x="77" y="74" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">49 steps · 2.6 h</text>
+  <line x1="156" y1="60" x2="196" y2="60" stroke="#5ee0c0" marker-end="url(#q2)"/>
+  <rect x="200" y="32" width="150" height="56" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="275" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">upscale 1.54x</text>
+  <text x="275" y="74" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">a mild lift — detail survives</text>
+  <line x1="354" y1="60" x2="394" y2="60" stroke="#5ee0c0" marker-end="url(#q2)"/>
+  <rect x="398" y="32" width="184" height="56" rx="8" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="490" y="54" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">720p-class, well sampled</text>
+  <text x="490" y="74" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">total: ~2.6 h of denoise</text>
+  <rect x="2" y="112" width="350" height="56" rx="8" fill="#2a2420" stroke="#ffb454"/>
+  <text x="177" y="134" text-anchor="middle" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">native 1280x704 x 345, 49 steps</text>
+  <text x="177" y="154" text-anchor="middle" fill="#c9a06a" font-size="11.5" font-family="Inter,sans-serif">no upscale, nothing invented</text>
+  <line x1="356" y1="140" x2="394" y2="140" stroke="#ffb454" marker-end="url(#q3)"/>
+  <rect x="398" y="112" width="184" height="56" rx="8" fill="#0f141d" stroke="#ffb454"/>
+  <text x="490" y="134" text-anchor="middle" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">true native 720p</text>
+  <text x="490" y="154" text-anchor="middle" fill="#c9a06a" font-size="11.5" font-family="Inter,sans-serif">total: ~90 h of denoise</text>
+  <rect x="600" y="32" width="158" height="136" rx="8" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="679" y="72" text-anchor="middle" fill="#5ee0c0" font-size="26" font-family="SF Mono,monospace">35x</text>
+  <text x="679" y="96" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">cheaper</text>
+  <text x="679" y="120" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">for a difference most</text>
+  <text x="679" y="136" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">viewers cannot see</text>
+  <text x="679" y="158" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">both paths measured</text>
+  <rect x="70" y="188" width="620" height="42" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="380" y="208" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">The rule is not "never upscale". It is: sample properly, then lift gently.</text>
+  <text x="380" y="224" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">A well-sampled 832x480 lifted 1.54x beats an under-sampled 1280x704 every time.</text>
+</svg>
+
+## The quant that was supposed to matter
+
+The third suspect was precision. If Q4 destroys faces, the reasoning went, int8 should rescue them. A head-to-head was run on a street-musician scene — same prompt, same seed, same 50-step euler, same pipeline on both sides.
+
+| Metric | int8 (with our chunk patch) | Q4_K_M (GGUF) | Result |
+|---|---|---|---|
+| Render time | 6,393 s (**107 min**) | 3,122 s (**52 min**) | Q4 — **2.05× faster** |
+| Native resolution it fit | 576×320 (0.184 MP) | 704×384 (0.270 MP) | Q4 — **+47% pixels** |
+| Peak VRAM | 7.5 GB | 7.06 GB | Q4 — lower |
+| Quality, by eye | ~85 | ~85 | **tie** |
+| Teeth on the singing shot | clean | clean | both held |
+
+<div class="callout warn"><span class="t">Read that table one axis at a time</span>
+<p><b>Speed is a real, decisive win for Q4</b> — and stronger than it looks, because int8 ran at <em>lower</em> resolution and was still twice as slow. <b>Quality is a tie, not a Q4 victory.</b> An earlier write-up scored it 84 against 87, which overstated a gap that sits inside eyeball noise and is <em>confounded</em>: the two clips ran at different native resolutions and are different generated images. If anything, int8 is the higher-fidelity reference — the patched int8 path is bit-identical to unpatched int8, while Q4 is four bits. Q4 <em>matches</em> it; it does not beat it.</p>
+<p>Caveats worth keeping: <b>n = 1 scene, one seed</b>, and part of the 2× is self-inflicted, since the chunk patch added loop overhead to int8. This is a strong signal and a better default, not a proven verdict.</p></div>
+
+The practical consequence is the opposite of the intuition that started the search. Precision did not buy face quality. It bought **resolution headroom and time** — and resolution headroom is the lever that *does* buy face quality, which is why the Q4 result mattered at all.
+
+## The scoreboard
+
+| Lever | Helps? | Evidence |
+|---|---|---|
+| **Big face framing** | ✅ yes | close-up native frames have sharp eyes; wide crowds at ~20 px per face melt |
+| **Native resolution** | ✅ yes | native 480p base frame is crisp; the same content upscaled hard is softer |
+| **Enough steps for the content** | ✅ yes | 4 / 23 / 49 by scene; 3 steps on a wide vista renders mud after 5.5 h |
+| Full steps rather than Turbo, for hero shots | ✅ yes | Turbo's distillation under-renders teeth; 20-step euler forms them |
+| Frame interpolation for judder | ✅ yes | 24 → 48 fps measured 1.8× smoother |
+| Face restoration on big faces | ✅ yes | rebuilds teeth better than the alternative tried |
+| Realism-People LoRA at 480p | ❌ no | controlled ablation — softened, did not sharpen |
+| int8 over Q4 | ≈ tie | benchmark tie on quality; Q4 wins speed and headroom |
+| Aggressive upscaling | ❌ no | softens; a mild 1.54× lift is the version that works |
+
+## What this chapter predicted, and what happened next
+
+Two claims here were written when the box had one card and a 480p native ceiling. Both have since been overtaken, and both are more useful kept than deleted.
+
+> *"On 8GB (where native res is capped), the LoRA can't reach the resolution where it would help. Dead end."*
+
+<div class="callout truth"><span class="t">The premise expired; the conclusion was never re-tested</span>
+<p>The native ceiling is no longer 480p. This build now renders <b>native 1280×704</b> — 124 frames at 23 steps in 55 minutes, and 345 frames at 23 steps in about 44 hours ([ch.46](46-the-first-15-seconds.html)). The exact condition the LoRA needed to deliver its high-frequency detail now exists on the box.</p>
+<p>The honest position: <b>the LoRA has not been re-run at 720p.</b> The measurement that exists says it hurts at 480p, and the reason it hurt has been removed. Calling it a dead end today would be repeating the mistake this chapter was written to correct — asserting an outcome instead of rendering it.</p></div>
+
+> *"Multi-GPU — ❌ no (quality) — speed only, can't enlarge a single render."*
+
+<div class="callout danger"><span class="t">This one was simply wrong</span>
+<p>Three cards <em>can</em> enlarge a single render, and that is exactly what they were eventually used for. Splitting one video's token sequence across three GPUs put <b>1280×704 × 345 frames</b> — a size no single 8 GB card can hold — inside reach ([ch.45](45-three-gpu-sequence-parallelism.html)). The claim was true of the multi-GPU technique available at the time, which parked <em>weights</em> on a second card; it was false as a statement about multiple GPUs in general.</p>
+<p>Note what the correction does <em>not</em> change: extra cards still buy no quality per pixel. They buy <b>more pixels</b> — and more pixels is the chapter's own number-one lever. The old row was wrong about the mechanism and right about the physics.</p></div>
+
+<div class="callout spec"><span class="t">The honest lesson</span>
+<p>Real effort went into a multi-GPU experiment, a LoRA, and a 21 GB int8 download, all chasing a quality bump — and the answer was <b>framing, resolution, and enough steps</b> the whole time, provable with two controlled renders. When quality is the goal: frame the subject big, render at the target resolution, give the scene the steps its content demands, lift gently if at all, and accept the slow render. The simple levers beat every expensive one, and measuring first would have saved a 21 GB download.</p></div>
+
+Method note: every claim here is a same-seed, single-variable render on the box. The negative results — the LoRA, int8, the early multi-GPU verdict — are documented as fully as the positive ones, including the two that later turned out to be wrong.
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">ablation</span><span class="badge">controlled variable</span><span class="badge">pixels-per-face</span><span class="badge">native resolution</span><span class="badge">upscale ratio</span><span class="badge">high spatial frequency</span><span class="badge">LoRA strength</span><span class="badge">step count</span><span class="badge">under-sampled</span><span class="badge">distillation</span><span class="badge">frame interpolation</span><span class="badge">face restoration</span><span class="badge">confounded comparison</span><span class="badge">eyeball noise</span></p>
+<p>If those feel solid, the number formats behind int8 and Q4 will read as engineering rather than jargon.</p></div>
+
+Next: what those bit-widths actually mean — how a number is stored in 8 bits or 4, what gets thrown away, and why the difference showed up as speed rather than as picture quality ([ch.18](18-number-formats-precision.html)).
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

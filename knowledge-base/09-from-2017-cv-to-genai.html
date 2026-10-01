@@ -4,91 +4,385 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>09 · From 2017 CV to Modern GenAI</title>
+<meta name="description" content="A catch-up path for anyone who did computer vision before the field forked in 2017: what actually changed, what did not, and the four additive ideas that close the gap.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
-<span class="kicker">Chapter 09 · Your Catch-Up Path</span>
+<span class="kicker">Chapter 09 · The Catch-Up Path</span>
 
 # From 2017 CV to Modern GenAI
 
-<p class="lede">A personal bridge for someone who already did the real work — Haar cascades, backprop, CNNs, bounding-box detection, and building their own datasets — and stepped away while the field forked. You're not starting over. You're adding four chapters to a book you already understand.</p>
+<p class="lede">The distance between a 2017 computer-vision practitioner and a 2026 generative-AI one is four additive ideas — attention, diffusion, latent diffusion, and text-to-image alignment — sitting on top of a foundation that did not change at all. Nothing learned in the Haar-cascade and bounding-box era was invalidated. A wing was added to the house; the frame is the same frame.</p>
 
-## You have the hard 70% already
+That claim is worth testing rather than taking on faith, so this chapter does two things: it names precisely what carried over, and it names precisely what is new — with the new parts grounded in the actual configuration of the model this guide runs.
 
-The intuitions that take *years* to build — you own them. What's left is a small set of *additive* ideas.
+## The foundation that did not move
 
-<div class="callout truth"><span class="t">Your 2017 skills → where they live in 2026</span>
+Start with the unglamorous half, because it is the larger half.
+
+<div class="callout truth"><span class="t">A 2017 skill set, mapped onto 2026</span>
 <table>
-<tr><th>What you know</th><th>Where it lives now</th></tr>
-<tr><td><b>Backprop</b></td><td>Unchanged. Trained the 33B DiT, the encoder, both VAEs. Still the engine of everything.</td></tr>
-<tr><td><b>CNN</b></td><td>The <b>VAE is a CNN.</b> The part that turns latents into pixels is your convolutional net. ResNet ideas everywhere.</td></tr>
-<tr><td><b>Haar → hand-crafted features → learned CNN features</b></td><td>Same arc continued: transformers learn even more general features. "Less hand-engineering, more learned-from-data" is the whole story.</td></tr>
-<tr><td><b>Bounding-box detection</b> (image → class + rect)</td><td><b>Discriminative</b>: "what IS in this image." Generative just <b>flips the arrow</b>: "make an image that HAS this." Same math, reversed direction.</td></tr>
-<tr><td><b>You built datasets</b></td><td>The most underrated skill in 2026 — foundation models are mostly about data quality + scale. You already respect data.</td></tr>
-</table>
-</div>
+<tr><th>The 2017 skill</th><th>Where it lives now</th></tr>
+<tr><td><b>Backpropagation</b></td><td>Completely unchanged. It trained the 20-billion-parameter transformer in H3, it trained the 26 GB encoder, and it trained both VAEs. Still the engine of everything.</td></tr>
+<tr><td><b>Convolutional networks</b></td><td><b>The VAE is a CNN.</b> The part of H3 that turns a latent grid back into pixels is a convolutional decoder, with residual connections and normalisation that would look entirely familiar. It is 4.9 GB of the model and it is <em>not</em> new territory.</td></tr>
+<tr><td><b>Haar → hand-crafted features → learned features</b></td><td>The same arc, continued one step further. Transformers simply learn even more general features, with even less structure imposed by hand. "Less hand-engineering, more learned-from-data" is the entire history of the field in one line.</td></tr>
+<tr><td><b>Bounding-box detection</b><br/>(image → class + rectangle)</td><td><b>Discriminative</b> work: <em>what is in this image?</em> Generative work flips the arrow: <em>make an image that has this in it.</em> Same gradients, same optimisers, opposite direction.</td></tr>
+<tr><td><b>Building datasets by hand</b></td><td>The most underrated skill of 2026. Foundation models are overwhelmingly a story about data quality and scale, and anyone who has personally labelled a dataset already respects the part most newcomers skip.</td></tr>
+<tr><td><b>Overfitting, augmentation, train/val discipline</b></td><td>Identical. The scale changed; the failure modes did not.</td></tr>
+</table></div>
 
-## The fork: what changed since 2017
+The intuitions that take years to build — what a gradient actually does, why a loss curve looks the way it does, why the data is usually the problem — transfer whole. What is missing is a small, learnable, *additive* set of ideas.
 
-You were doing CV in **2017 — the exact year "Attention Is All You Need" launched.** You were on the detection track; the field forked onto the attention/generative track. Here's the timeline of what you "missed" (all learnable):
+## The fork
 
-```mermaid
-timeline
-    title The fork you can now cross
-    2012 : AlexNet — deep CNNs take over vision (you were here)
-    2015-2016 : Faster R-CNN / YOLO / SSD — detection (your world)
-    2017 : Transformers — "Attention Is All You Need" (the fork)
-    2020 : ViT (vision transformers) + DDPM (diffusion)
-    2021 : CLIP — text ↔ image alignment
-    2022 : Latent Diffusion / Stable Diffusion + Flow Matching
-    2026 : MiniMax-H3 — omni-modal video+audio (you, now)
-```
+The year matters. "Attention Is All You Need" was published in **2017**, the same period when the practical centre of computer vision was detection: Faster R-CNN, YOLO, SSD. Two tracks ran forward from that point and only one of them made the news.
 
-## The four ideas that are the whole gap
+<svg viewBox="0 0 760 296" width="100%" style="max-width:920px" role="img" aria-label="A timeline forking in 2017: the upper branch continues computer vision detection work, while the lower branch runs from transformers through vision transformers and diffusion, CLIP, latent diffusion and flow matching, to MiniMax-H3 in 2026.">
+  <defs>
+    <marker id="t1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="t2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE FORK — AND THE CROSSING BACK</text>
+  <text x="2" y="42" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.2">THE DETECTION TRACK</text>
+  <rect x="2" y="54" width="134" height="66" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="69" y="76" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">2012</text>
+  <text x="69" y="94" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">AlexNet</text>
+  <text x="69" y="110" text-anchor="middle" fill="#aab4c5" font-size="10" font-family="Inter,sans-serif">deep CNNs take vision</text>
+  <rect x="158" y="54" width="134" height="66" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="225" y="76" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">2015–2016</text>
+  <text x="225" y="94" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">R-CNN · YOLO · SSD</text>
+  <text x="225" y="110" text-anchor="middle" fill="#aab4c5" font-size="10" font-family="Inter,sans-serif">detection matures</text>
+  <line x1="138" y1="87" x2="154" y2="87" stroke="#6f7b8f" marker-end="url(#t1)"/>
+  <line x1="294" y1="87" x2="316" y2="87" stroke="#6f7b8f" stroke-dasharray="4 4"/>
+  <text x="326" y="80" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">this branch never stopped. Detection, segmentation</text>
+  <text x="326" y="96" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">and tracking are still the right tools for their jobs —</text>
+  <text x="326" y="112" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">nothing here was replaced, only joined.</text>
+  <path d="M225,122 C 225,158 132,150 69,190" fill="none" stroke="#7aa2ff" marker-end="url(#t2)"/>
+  <text x="240" y="152" fill="#7aa2ff" font-size="11.5" font-family="Inter,sans-serif">2017 — the fork</text>
+  <text x="2" y="184" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.2">THE TRACK THE FIELD TOOK</text>
+  <rect x="2" y="196" width="134" height="66" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="69" y="218" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">2017</text>
+  <text x="69" y="236" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">Transformers</text>
+  <text x="69" y="252" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">attention replaces recurrence</text>
+  <rect x="158" y="196" width="134" height="66" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="225" y="218" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">2020</text>
+  <text x="225" y="236" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">ViT + DDPM</text>
+  <text x="225" y="252" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">attention for pixels; diffusion</text>
+  <rect x="314" y="196" width="134" height="66" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="381" y="218" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">2021</text>
+  <text x="381" y="236" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">CLIP</text>
+  <text x="381" y="252" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">words aligned to pictures</text>
+  <rect x="470" y="196" width="134" height="66" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="537" y="218" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">2022</text>
+  <text x="537" y="236" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">Latent diffusion</text>
+  <text x="537" y="252" text-anchor="middle" fill="#9fb6e8" font-size="10" font-family="Inter,sans-serif">+ flow matching</text>
+  <rect x="626" y="196" width="130" height="66" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="691" y="218" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">2026</text>
+  <text x="691" y="236" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">MiniMax-H3</text>
+  <text x="691" y="252" text-anchor="middle" fill="#8fd8c4" font-size="10" font-family="Inter,sans-serif">video and audio, jointly</text>
+  <line x1="138" y1="229" x2="154" y2="229" stroke="#7aa2ff" marker-end="url(#t2)"/>
+  <line x1="294" y1="229" x2="310" y2="229" stroke="#7aa2ff" marker-end="url(#t2)"/>
+  <line x1="450" y1="229" x2="466" y2="229" stroke="#7aa2ff" marker-end="url(#t2)"/>
+  <line x1="606" y1="229" x2="622" y2="229" stroke="#7aa2ff" marker-end="url(#t2)"/>
+  <text x="2" y="286" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">Four boxes on the lower lane. That is the entire gap, and each one is a weekend of reading plus a week of playing with code.</text>
+</svg>
 
-### 1. Transformers & attention — the big one
-Replaced CNNs+RNNs as the general workhorse. The DiT *is* a transformer. Attention = "every piece looks at every other piece and weighs relevance."
-- **Read:** Jay Alammar, *The Illustrated Transformer* · **Watch:** Andrej Karpathy, *Let's build GPT* (YouTube) · **Paper:** *Attention Is All You Need* (2017).
+Notice what the picture does *not* show: an extinction event. The detection track kept going and is still the correct answer for most industrial vision problems. Nobody should generate video to count parts on a conveyor belt. The lower lane is an addition, not a replacement.
 
-### 2. The generative shift — diffusion
-Discriminative (detect the rect) → generative (synthesize). GANs matured, then **diffusion** (2020) took over. You already have most of this from Chapters 1 & 8.
-- **Read:** Lilian Weng, *What are Diffusion Models?* · **Watch:** Computerphile, *Stable Diffusion* · **Paper:** DDPM (Ho et al., 2020).
+---
 
-### 3. Latent diffusion — the combo we run
-Compress with a VAE, diffuse in the small latent space, decode back. This is exactly the H3 pipeline.
-- **Read:** the Stable Diffusion / Latent Diffusion paper (Rombach et al., 2022) · HuggingFace `diffusers` "intro to diffusers" notebook.
+## The one conceptual flip
 
-### 4. Alignment + scale (CLIP) — how words steer pixels
-How "a woman singing" becomes a coordinate the generator understands. Contrastive text–image training, then scaled to internet size.
-- **Read:** OpenAI CLIP (2021) · any "Illustrated CLIP" explainer.
+Before the four ideas, there is a single change of orientation that makes all four easier, and it can be stated in one line.
 
-<div class="callout spec"><span class="t">Bonus (H3-specific): Flow matching</span>
-<p>H3 is flow-matching (rectified flow), the 2022–2023 evolution of diffusion — straighter trajectories, fewer steps. Skim after the four above. See the <em>Sampling Math</em> notes in the repo.</p></div>
+A detector estimates the probability of a **label given the data**. A generator estimates the probability of the **data given a label**. Same networks, same backprop, same hardware; the ends of the arrow swap places.
 
-## The staged path (do it in order)
+<svg viewBox="0 0 760 262" width="100%" style="max-width:920px" role="img" aria-label="Two rows contrasting discriminative and generative training: a photograph passes through a CNN to produce a class and box under a cross-entropy loss, while text and noise pass through a transformer to produce pixels under a mean-squared-error loss on the predicted noise.">
+  <defs>
+    <marker id="f1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="f2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE ONLY CONCEPTUAL FLIP — WHICH END THE PIXELS ARE ON</text>
+  <rect x="2" y="40" width="150" height="62" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="77" y="66" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">a photograph</text>
+  <text x="77" y="84" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">pixels in</text>
+  <rect x="196" y="40" width="150" height="62" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="271" y="66" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">a CNN</text>
+  <text x="271" y="84" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">convolutions, pooling</text>
+  <rect x="390" y="40" width="180" height="62" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="480" y="66" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">"cat", box (x, y, w, h)</text>
+  <text x="480" y="84" text-anchor="middle" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">a label out</text>
+  <line x1="154" y1="71" x2="192" y2="71" stroke="#6f7b8f" marker-end="url(#f1)"/>
+  <line x1="348" y1="71" x2="386" y2="71" stroke="#6f7b8f" marker-end="url(#f1)"/>
+  <text x="596" y="60" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">DISCRIMINATIVE</text>
+  <text x="596" y="78" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">loss: cross-entropy</text>
+  <text x="596" y="93" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">learns p(label | pixels)</text>
+  <line x1="2" y1="130" x2="756" y2="130" stroke="#232c3b" stroke-dasharray="4 4"/>
+  <text x="380" y="124" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">same backprop · same optimisers · same GPUs</text>
+  <rect x="2" y="152" width="150" height="62" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="77" y="178" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">words + noise</text>
+  <text x="77" y="196" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">a label in</text>
+  <rect x="196" y="152" width="150" height="62" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="271" y="178" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">a transformer</text>
+  <text x="271" y="196" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">attention, feed-forward</text>
+  <rect x="390" y="152" width="180" height="62" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="480" y="178" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">frames that never existed</text>
+  <text x="480" y="196" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">pixels out</text>
+  <line x1="154" y1="183" x2="192" y2="183" stroke="#5ee0c0" marker-end="url(#f2)"/>
+  <line x1="348" y1="183" x2="386" y2="183" stroke="#5ee0c0" marker-end="url(#f2)"/>
+  <text x="596" y="172" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">GENERATIVE</text>
+  <text x="596" y="190" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">loss: MSE on the noise</text>
+  <text x="596" y="205" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">learns p(pixels | label)</text>
+  <text x="2" y="246" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">The training loop is the one already known: forward pass, compute a loss, backward pass, step the optimiser. Only the loss and the direction changed.</text>
+</svg>
 
-```mermaid
-flowchart LR
-    S0["You are here<br/>backprop · CNN · detection · data"] --> S1["1. Transformers<br/>Illustrated Transformer +<br/>Karpathy 'build GPT'"]
-    S1 --> S2["2. Diffusion<br/>Weng blog +<br/>Ch.1 & 8 here"]
-    S2 --> S3["3. Latent diffusion<br/>SD paper +<br/>diffusers notebook"]
-    S3 --> S4["4. CLIP / alignment<br/>+ skim flow matching"]
-    S4 --> NOW["Current — you can<br/>read any 2026 paper"]
-    style S0 fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style NOW fill:#14342c,stroke:#5ee0c0,color:#eafff8
-```
+The practical consequence of the flip is a change of loss function that surprises people. A detector's loss is a classification objective over a small set of categories. A diffusion model's loss is **mean squared error on a predicted noise field** — a regression, of exactly the kind used for bounding-box coordinate refinement in 2016. The thing that generates photorealistic video is trained with an older, simpler loss than the thing that draws rectangles.
 
-Optional but perfect for your background: **Karpathy's "Neural Networks: Zero to Hero"** series — it rebuilds backprop → transformers from scratch in code, which is exactly your learning style (you already think in gradients).
+<div class="callout truth"><span class="t">Why generative is the harder problem</span>
+<p>A detector only has to learn <em>the boundary</em> between categories. A generator has to learn <em>the whole distribution</em> — everything that a plausible frame could look like — well enough to draw a new sample from it. That is much more to represent, which is why generative models are so much larger and so much slower than the classifiers that came before. H3's transformer alone is <b>20 billion parameters</b>, and its original bf16 weights were about <b>66 GB</b> before quantization brought them down to 20 (<a href="01-what-is-genai.html">ch.01</a>).</p></div>
+
+---
+
+## Idea 1 · Attention, and what it gave up to get global reach
+
+This is the big one, and it is worth understanding as an engineering trade rather than a magic trick.
+
+A convolution has **locality baked in**. A 3×3 kernel can only see three cells at a time, and that assumption — *what matters is nearby* — is exactly right for images and is the reason CNNs were so data-efficient. The cost is reach. Context arrives only through depth: stack layers and the receptive field grows, one ring at a time.
+
+Attention makes the opposite bet. It assumes nothing about what is near what, and instead compares **every element with every other element** in a single layer, learning how much each one should weigh the others. Global context is available immediately. The price is that the number of pairs grows with the square of the sequence length.
+
+<svg viewBox="0 0 760 302" width="100%" style="max-width:920px" role="img" aria-label="Left: a convolution's receptive field grows one ring per layer, reaching seven cells after three layers. Right: attention connects one token to every other token in a single layer, at the cost of comparing every pair.">
+  <defs>
+    <marker id="c1" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L5,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE TRADE THAT DEFINES THE ERA</text>
+  <line x1="378" y1="30" x2="378" y2="244" stroke="#232c3b"/>
+  <text x="2" y="42" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">CONVOLUTION — locality assumed, reach earned by depth</text>
+  <text x="20" y="60" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">after layer 1 · sees 3</text>
+  <rect x="20" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="46" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="72" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="98" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="124" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="150" y="66" width="20" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="176" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="202" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="228" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="254" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="280" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="306" y="66" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="120" y="62" width="106" height="28" rx="5" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <text x="20" y="116" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">after layer 2 · sees 5</text>
+  <rect x="20" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="46" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="72" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="98" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="124" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="150" y="122" width="20" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="176" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="202" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="228" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="254" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="280" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="306" y="122" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="94" y="118" width="158" height="28" rx="5" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <text x="20" y="172" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">after layer 3 · sees 7</text>
+  <rect x="20" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="46" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="72" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="98" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="124" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="150" y="178" width="20" height="20" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="176" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="202" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="228" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="254" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="280" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="306" y="178" width="20" height="20" rx="3" fill="#151b26" stroke="#232c3b"/>
+  <rect x="68" y="174" width="210" height="28" rx="5" fill="none" stroke="#5ee0c0" stroke-dasharray="3 3"/>
+  <text x="20" y="228" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">Reaching the far end of a long clip would take a very deep stack.</text>
+  <text x="402" y="42" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">ATTENTION — nothing assumed, everything compared</text>
+  <text x="402" y="66" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">after layer 1 · sees all of them</text>
+  <rect x="402" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="428" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="454" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="480" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="506" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="532" y="112" width="20" height="20" rx="3" fill="#14342c" stroke="#5ee0c0" stroke-width="2"/>
+  <rect x="558" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="584" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="610" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="636" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="662" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="688" y="112" width="20" height="20" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <path d="M540,134 C 520,182 440,180 412,134" fill="none" stroke="#5ee0c0" stroke-dasharray="2 3" marker-end="url(#c1)"/>
+  <path d="M540,134 C 526,174 480,176 464,134" fill="none" stroke="#5ee0c0" stroke-dasharray="2 3" marker-end="url(#c1)"/>
+  <path d="M540,134 C 534,166 522,170 516,134" fill="none" stroke="#5ee0c0" stroke-dasharray="2 3" marker-end="url(#c1)"/>
+  <path d="M544,134 C 552,166 562,170 568,134" fill="none" stroke="#5ee0c0" stroke-dasharray="2 3" marker-end="url(#c1)"/>
+  <path d="M544,134 C 560,174 604,176 620,134" fill="none" stroke="#5ee0c0" stroke-dasharray="2 3" marker-end="url(#c1)"/>
+  <path d="M544,134 C 572,184 668,180 698,134" fill="none" stroke="#5ee0c0" stroke-dasharray="2 3" marker-end="url(#c1)"/>
+  <text x="402" y="212" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">Reach is free. The pairs are not: N tokens means N² comparisons,</text>
+  <text x="402" y="228" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">every layer, every step.</text>
+  <rect x="2" y="256" width="754" height="42" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="20" y="282" fill="#ffdede" font-size="11.5" font-family="Inter,sans-serif">This single trade is why a five-second clip at 1280×704 took 55 minutes on this build and fifteen seconds of the same scene took about 44 hours.</text>
+</svg>
+
+That trade is not academic here. It is the reason the whole later half of this guide exists: splitting the sequence across three cards, streaming weights from RAM, choosing resolutions carefully. All of it is downstream of *attention compares every pair*.
+
+<div class="callout spec"><span class="t">A transformer, in the concrete — H3's own config</span>
+<p>Abstractions land better with real numbers attached. The generator in this project is a stack of <b>50 identical blocks</b>. Inside each block: attention with <b>56 heads</b> of <b>128</b> dimensions each, operating on token vectors of width <b>5376</b>, followed by a feed-forward network that expands 5376 → <b>14336</b> → 5376. Nothing else. Fifty copies of that, plus normalisation, is the entire architecture (<a href="03-how-h3-works.html">ch.03</a>).</p>
+<p>It is genuinely simpler than a modern detection head. The complexity is in the scale, not the design.</p></div>
+
+**Where to start:** Jay Alammar's *The Illustrated Transformer* for the picture, Andrej Karpathy's *Let's build GPT* for the code, and the original *Attention Is All You Need* (2017) once the shape is familiar. For anyone who already thinks in gradients, Karpathy's *Neural Networks: Zero to Hero* series is close to ideal — it rebuilds backprop and then transformers from scratch, in code.
+
+---
+
+## Idea 2 · Diffusion, or: training a network to undo damage
+
+The generative half of the field spent 2014–2019 on **GANs** — a generator and a critic trained in opposition. Sharp results, notoriously unstable training, and hard to steer with text. Around 2020, diffusion displaced them almost completely, and the reason is worth appreciating: diffusion replaced an *adversarial* objective with a *supervised* one.
+
+The training recipe is almost embarrassingly simple:
+
+1. Take a real image. Add a known amount of random static.
+2. Show the network the damaged image and the amount of damage.
+3. Ask it to predict the static that was added.
+4. Mean squared error against the static that actually was added. Backprop.
+
+There is no critic, no minimax game, no mode collapse. It is ordinary supervised regression, on a target that is free to generate — which is why it trains stably at scale where GANs did not.
+
+Generation then runs the recipe backwards: start from static the network has never seen, ask what part of it is noise, remove a fraction, repeat. Because the network learned a *direction* rather than any particular image, following that direction from novel static arrives somewhere plausible that never existed ([ch.01](01-what-is-genai.html), [ch.08](08-how-a-prompt-becomes-video.html)).
+
+<div class="callout warn"><span class="t">The intuition that trips people who know regression well</span>
+<p>The obvious question from a supervised-learning background: if the network is only trained to reconstruct, why does it not simply reproduce training images? Because the starting point is different every time. A fixed <code>seed</code> reproduces a result exactly — same static, same trajectory, same output — which is the clearest demonstration that the only randomness in the whole process was at the start.</p></div>
+
+**Where to start:** Lilian Weng's *What are Diffusion Models?* is the best single survey; the DDPM paper (Ho et al., 2020) is the primary source.
+
+---
+
+## Idea 3 · Latent diffusion — where the old CNN skills reappear
+
+Diffusion on raw pixels is ruinously expensive, and this is where the 2017 toolkit walks back onto the stage.
+
+The fix, from Rombach et al. (2022), is to train an autoencoder that compresses images into a small latent grid, run the entire diffusion process *in that grid*, and decode only at the very end. That autoencoder is a **VAE**, and a VAE is a convolutional network — encoder down, decoder up, residual blocks in between. Anyone who has built a segmentation U-Net has built most of one.
+
+In H3 the numbers are these: the visual VAE compresses **16× in each spatial dimension** and roughly 4× in time, into **24 latent channels**. An 832×480 clip of 124 frames becomes a tensor of shape `(1, 24, 37, 30, 52)` — about 1.4 million numbers where the pixels were about 149 million. The decoder that reverses this is 4.9 GB, works in 256×256 tiles with a 64-pixel overlap, and is the only part of the pipeline that ever touches a pixel.
+
+<div class="callout truth"><span class="t">The division of labour, stated plainly</span>
+<p><b>The convolutional part handles perception.</b> Turning light into a compact code and back is a local, texture-level job, and convolutions are extremely good at it — good enough that this component has barely changed in character since 2017.</p>
+<p><b>The attention part handles composition.</b> Deciding that the figure in frame 1 is the same figure in frame 124, and that the mouth shape matches the sound at that instant, is a long-range relational job, and that is precisely what convolutions were bad at.</p>
+<p>Latent diffusion is not one idea beating another. It is two architectures each doing what it is best at, in series.</p></div>
+
+**Where to start:** the Latent Diffusion paper (Rombach et al., 2022), then the HuggingFace `diffusers` introduction notebook — which is the fastest way to get hands on the loop rather than reading about it.
+
+---
+
+## Idea 4 · Alignment — how words got a grip on pixels
+
+The last gap is the one that looks most like magic: how does *"a woman singing"* become something a pixel generator can obey?
+
+The answer is **contrastive training**, and CLIP (2021) is the canonical version. Train two encoders — one for images, one for text — on an enormous set of image-caption pairs, with an objective that pulls matching pairs together in a shared space and pushes non-matching pairs apart. What emerges is a space where the text vector for "a golden retriever on a beach" sits near the image vectors of golden retrievers on beaches. Once that space exists, a text vector is a usable steering signal.
+
+H3 goes considerably further than CLIP. Instead of a purpose-built text encoder it uses a full **32-billion-parameter vision-language model**, Qwen3-VL-32B, at **26 GB** — the largest single file in the system, larger than the generator it steers. And it does not use that model's final output; it reaches in and taps the hidden states at **layer 50**, on the reasoning that a language model's last layer is specialised for predicting words while its middle layers hold a more general representation of meaning ([ch.03](03-how-h3-works.html)).
+
+<div class="callout spec"><span class="t">The detail that reframes the whole field</span>
+<p>Twenty-six gigabytes of the model exist to <em>read the prompt</em>. Twenty gigabytes exist to <em>make the video</em>. More capacity is spent on comprehension than on generation — which is a fair summary of what changed between 2017 and now. The hard problem was never drawing; it was understanding what to draw.</p></div>
+
+**Where to start:** the CLIP paper (2021), or any illustrated explainer of it. The contrastive objective is a half-page of maths and worth reading in the original.
+
+---
+
+## The bonus idea: flow matching
+
+<div class="callout spec"><span class="t">H3-specific, and safe to defer</span>
+<p>H3 is a <b>flow-matching</b> (rectified flow) model — the 2022–2023 evolution of diffusion. Rather than learning to reverse a noising process one noisy step at a time, it learns a <em>velocity field</em>: at any point between noise and data, which direction and how fast. The trajectories are straighter, which means fewer steps are needed to traverse them.</p>
+<p>Practically, it changes what the network predicts and what the scheduler does with the prediction. It does not change the shape of the loop, the cost model, or anything else in this guide. Skim it after the four ideas above.</p></div>
+
+---
+
+## The staged path
+
+Order matters here. Each stage assumes the one before it.
+
+<svg viewBox="0 0 760 322" width="100%" style="max-width:920px" role="img" aria-label="A six-stage reading path from an existing 2017 foundation through transformers, diffusion, latent diffusion, alignment and flow matching, with what each stage unlocks.">
+  <defs>
+    <marker id="s1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE ORDER TO DO IT IN</text>
+  <circle cx="26" cy="58" r="14" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="26" y="63" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">·</text>
+  <rect x="52" y="38" width="440" height="40" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="70" y="63" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">Backprop · CNNs · detection · datasets — already held</text>
+  <text x="510" y="63" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">the hard 70%</text>
+  <circle cx="26" cy="104" r="14" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="26" y="109" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">1</text>
+  <rect x="52" y="84" width="440" height="40" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="70" y="109" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Transformers — Illustrated Transformer, then build-GPT in code</text>
+  <text x="510" y="109" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">read any modern architecture</text>
+  <circle cx="26" cy="150" r="14" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="26" y="155" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">2</text>
+  <rect x="52" y="130" width="440" height="40" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="70" y="155" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Diffusion — Weng's survey, the DDPM paper, ch.01 and ch.08</text>
+  <text x="510" y="155" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">understand the render loop</text>
+  <circle cx="26" cy="196" r="14" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="26" y="201" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">3</text>
+  <rect x="52" y="176" width="440" height="40" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="70" y="201" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Latent diffusion — Rombach 2022, then the diffusers notebook</text>
+  <text x="510" y="201" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">understand why a VAE is here</text>
+  <circle cx="26" cy="242" r="14" fill="#151b26" stroke="#5ee0c0"/>
+  <text x="26" y="247" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">4</text>
+  <rect x="52" y="222" width="440" height="40" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="70" y="247" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Alignment — CLIP, and how conditioning steers pixels</text>
+  <text x="510" y="247" fill="#aab4c5" font-size="10.5" font-family="Inter,sans-serif">understand the 26 GB encoder</text>
+  <circle cx="26" cy="288" r="14" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="26" y="293" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">5</text>
+  <rect x="52" y="268" width="440" height="40" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="70" y="293" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">Flow matching — rectified flow, the straighter trajectory</text>
+  <text x="510" y="293" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">understand H3 specifically</text>
+  <line x1="26" y1="72" x2="26" y2="88" stroke="#5ee0c0" marker-end="url(#s1)"/>
+  <line x1="26" y1="118" x2="26" y2="134" stroke="#5ee0c0" marker-end="url(#s1)"/>
+  <line x1="26" y1="164" x2="26" y2="180" stroke="#5ee0c0" marker-end="url(#s1)"/>
+  <line x1="26" y1="210" x2="26" y2="226" stroke="#5ee0c0" marker-end="url(#s1)"/>
+  <line x1="26" y1="256" x2="26" y2="272" stroke="#5ee0c0" marker-end="url(#s1)"/>
+</svg>
+
+---
+
+## What is genuinely new, and is not in any paper
+
+There is a second gap, smaller but less discussed, and this guide is largely a record of crossing it.
+
+In 2017, running a model was the easy part. Training was where the difficulty and the hardware budget went; inference was a forward pass on a card that comfortably held the weights. That relationship has inverted for anyone outside a large lab. Nobody with consumer hardware is training a 20-billion-parameter video model. **Running one is now the hard, interesting, and entirely attackable problem.**
+
+<div class="callout spec"><span class="t">The skills that did not exist as skills in 2017</span>
+<table>
+<tr><th>Skill</th><th>Why it exists now</th></tr>
+<tr><td><b>Quantization</b></td><td>The weights do not fit. int8 took H3's transformer from ~66 GB to 20 GB with quality intact (<a href="13-int8-vs-q4.html">ch.13</a>).</td></tr>
+<tr><td><b>Weight offloading</b></td><td>Even 20 GB does not fit. Blocks live in system RAM and are streamed in one at a time — about 0.4 GB per block, which means a 23-step render moves roughly <b>460 GB</b> across PCIe (<a href="02-your-hardware.html">ch.02</a>).</td></tr>
+<tr><td><b>Sequence parallelism</b></td><td>A long clip's attention sequence does not fit on one card, so the sequence itself is split across cards (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>).</td></tr>
+<tr><td><b>Scheduling and process discipline</b></td><td>The 26 GB encoder and the 20 GB generator are never resident at the same time; the encoder writes its output and exits (<a href="48-the-pipeline-without-comfyui.html">ch.48</a>).</td></tr>
+<tr><td><b>Reading a failure honestly</b></td><td>Some of the most expensive lessons here were bugs that looked like hardware limits — including a decode that ran out of memory because finished results were never moved off the GPU (<a href="46-the-first-15-seconds.html">ch.46</a>).</td></tr>
+</table></div>
+
+None of these appear in the four papers above. They are systems engineering, and they reward exactly the temperament that builds a dataset by hand: patience, instrumentation, and a refusal to accept a number without measuring it.
 
 ## The honest reframe
 
-<div class="callout truth"><span class="t">You didn't fall behind</span>
-<p>Someone who trained a detector from scratch and built their own dataset understands <b>the machine</b>. A 2026 "prompt engineer" understands <b>the API</b>. You're ahead of them, not behind — the foundation is the hard part, and you did it. The field added a wing to the house while you were away; the frame is still yours. Four ideas, a few weeks each, and you're fully current.</p>
-</div>
+<div class="callout truth"><span class="t">The foundation was the hard part, and it was already done</span>
+<p>Someone who trained a detector from scratch and built their own dataset understands <b>the machine</b>. Someone who learned the field in 2026 through an API understands <b>the interface</b>. Those are not the same thing, and the first one is far harder to acquire late.</p>
+<p>The field did not leave anyone behind; it added a wing to a house whose frame was already sound. Four ideas, a few weeks each, and the papers stop being opaque. The measurements in the rest of this guide are the proof that the crossing is finishable — every number in it was produced by someone doing exactly this, on three consumer graphics cards.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">discriminative</span><span class="badge">generative</span><span class="badge">attention</span><span class="badge">transformer block</span><span class="badge">receptive field</span><span class="badge">ViT</span><span class="badge">DDPM</span><span class="badge">latent diffusion</span><span class="badge">VAE</span><span class="badge">contrastive training / CLIP</span><span class="badge">conditioning</span><span class="badge">flow matching</span><span class="badge">quantization</span><span class="badge">offloading</span><span class="badge">sequence parallelism</span></p>
+<p>If those feel solid, every paper on the lower lane of that timeline is now readable.</p></div>
+
+Next: the experiment that started this project — how far peak VRAM can be pushed down without moving quality, and the one number that was still missing.
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

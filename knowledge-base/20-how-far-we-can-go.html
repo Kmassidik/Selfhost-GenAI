@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>20 · How Far We Can Go</title>
+<meta name="description" content="A synthesis of six research passes into the quality and optimisation ceiling of an 8 GB box — the free wins, the kernels worth building, the hardware decision, and the hard wall that later turned out not to be one.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 20 · The whole map, synthesized</span>
+
+# How Far We Can Go — The Quality &amp; Optimization Ceiling
+
+<p class="lede">This chapter set out to draw the ceiling of an 8 GB machine, and it drew it in the wrong place. The map of free wins, buildable kernels and hardware trade-offs below is largely still accurate; the <b>hard wall</b> it marked at native 720p was real for one card and fell to three, without a single line of it being wrong about physics. Both versions are kept here, because the gap between them is the most instructive thing on the page.</p>
+
+The chapter was written after six parallel research passes — precision, kernels, inference knobs, training, memory, hardware — each measured against the machine as it was then: **two RTX 3060 Ti, 8 GB each, Ampere sm_86, 125 GB of RAM.** It has since become a document about how a careful, well-sourced forecast can be right about every mechanism and still miss the answer, because it assumed the wrong unit of work.
+
+<div class="callout truth"><span class="t">The one law that governed the analysis</span>
+<p>On this box, roughly <b>88% of the real peak memory during sampling was activation and quantization working buffers, not weights</b>. Weights already stream from RAM one block at a time, so shrinking them further — Q4 to Q2, GPTQ, AWQ — does <b>nothing</b> for the wall ([ch.12](12-pushing-past-8gb.html)). Only three things move it: <b>(1) shrink the activations</b>, <b>(2) hide or stream them better</b>, or <b>(3) accept the wall and rebuild detail afterwards</b>. And no software changes the <em>scaling law</em> — resolution × frames × tokens — only the constant in front of it.</p></div>
+
+That law is sound and still holds. What the list is missing is a fourth option, which is the one that eventually worked: **(4) divide the activation across more devices.** It is absent because at the time the project owned two cards and had already concluded, correctly, that a second card cannot hold half of a computation the engine insists on doing in one place. The gap was never in the physics. It was in the assumption that one render lives on one GPU.
+
+<svg viewBox="0 0 760 234" width="100%" style="max-width:920px" role="img" aria-label="Four ways to move an activation wall: shrink the activation, hide it by streaming, accept it and rebuild detail afterwards, and the fourth option missing from the original analysis — divide the token sequence across several devices.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">FOUR WAYS PAST AN ACTIVATION WALL — THE CHAPTER LISTED THREE</text>
+  <rect x="2" y="30" width="180" height="112" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="92" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">1 · shrink it</text>
+  <text x="92" y="76" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">4-bit activations,</text>
+  <text x="92" y="92" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">fused kernels</text>
+  <text x="92" y="118" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">throws information</text>
+  <text x="92" y="134" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">away, or reorders work</text>
+  <rect x="192" y="30" width="180" height="112" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="282" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">2 · hide it</text>
+  <text x="282" y="76" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">stream, tile,</text>
+  <text x="282" y="92" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">recompute</text>
+  <text x="282" y="118" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">buys memory,</text>
+  <text x="282" y="134" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">pays in time</text>
+  <rect x="382" y="30" width="180" height="112" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="472" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">3 · accept it</text>
+  <text x="472" y="76" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">render small,</text>
+  <text x="472" y="92" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">rebuild after</text>
+  <text x="472" y="118" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">the production route,</text>
+  <text x="472" y="134" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">still the sane default</text>
+  <rect x="572" y="30" width="186" height="112" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="665" y="54" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">4 · divide it</text>
+  <text x="665" y="76" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">split the token sequence</text>
+  <text x="665" y="92" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">across three cards</text>
+  <text x="665" y="118" text-anchor="middle" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">NOT IN THE ORIGINAL LIST</text>
+  <text x="665" y="134" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">this is the one that worked</text>
+  <rect x="60" y="164" width="640" height="62" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="380" y="186" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">Options 1-3 all ask: how do we make the working set fit one card?</text>
+  <text x="380" y="206" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">Option 4 asks: why does one card have to hold all of it?</text>
+  <text x="380" y="222" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Same physics. Different unit of work.</text>
+</svg>
+
+## Tier 1 — free wins, and which ones survived contact
+
+These cost nothing and were, at the time of writing, being left on the table. Ranked by leverage as they were then assessed:
+
+| Lever | What it does | Why it was expected to help |
+|---|---|---|
+| **Lower the video sigma-shift** | packs more sampling steps into the low-noise region | targets sharp eyes, teeth and skin — the exact failure order measured on this box |
+| **Drop 50 → ~35 steps** | flow-matching was believed to saturate around 30 steps | same quality, faster; 50 assumed to be above the knee |
+| **CFG ~2.5–3 with rescaling** | modest guidance, de-burned | keeps skin photoreal instead of plastic |
+| **A generative video super-resolver** rather than a plain enlarger | reconstructs texture rather than interpolating it | the one class of upscaler that *adds* face detail instead of softening |
+| **Temporal face restoration** | coherent multi-frame face reconstruction | rebuilds eyes and teeth without per-frame shimmer |
+| **Prompt camera-clauses** | H3's structured format — "push in, tight close-up" | commands the big-face framing that is the strongest measured quality lever |
+| **Stream int8 weights rather than Q4 for hero shots** | ~0.65 GB per block int8 against roughly half that for Q4; RAM has room | assumed better faces, at ~2× the streaming traffic |
+| **Identity references plus frame-exact chaining** | holds one person across segments | fixes the morphing seen across chained clips |
+| **VAE tiling** | tiles the decode | cuts the second VRAM peak, near-free headroom |
+
+Two rows in that table have since been measured, and both came back differently than expected.
+
+<div class="callout truth"><span class="t">"Drop 50 → ~35 steps" — the knee does not exist</span>
+<p>The premise was that flow matching saturates at a fixed step count, so 50 was waste. Measurement says step count is a property of the <b>scene</b>, not the sampler: a tight close-up is sharp at <b>4</b> steps, a character mid-shot needs <b>23</b>, and a wide vista with a small distant subject needs <b>49</b> — the same wide scene at 3 steps renders as mud after five and a half hours of compute ([ch.17](17-what-actually-improves-quality.html)). There is no single number to drop to. Budget steps by looking at the shot.</p></div>
+
+<div class="callout danger"><span class="t">"Q4 is what destroys faces/hands" — not supported by the benchmark</span>
+<p>That row asserts a quality gap that a controlled head-to-head does not find. Same scene, same seed, same 50-step pipeline: <b>int8 scored ~85, Q4 scored ~85 — a tie</b>, with clean teeth on both. Q4 was <b>2.05× faster</b> (52 min against 107 min) and fit <b>+47% more native pixels</b> at <em>lower</em> peak VRAM (7.06 GB against 7.5 GB). Since resolution is a proven quality lever and precision is not, the recommendation inverts: for a hero shot, the argument for int8 is fidelity-as-reference, not faces ([ch.13](13-int8-vs-q4.html)).</p></div>
+
+The rest of Tier 1 remains a reasonable, untested list. Kept as written, and labelled as what it is: **proposals, not measurements.** The one item in it that has been confirmed repeatedly is the last thing anyone expects to matter — the prompt's camera clause, because it is the cheapest way to command the framing that dominates every other quality lever.
+
+## Tier 2 — build it ourselves
+
+The kernel reality first, and it is sobering: a fused int8 GEMM is a genuine win on the matmul itself, **but matmuls are only around 12% of the forward pass**. Amdahl's law caps what that can be worth end to end. So the plan named the three largest activation transients and proposed removing them:
+
+| Kernel proposed | Intended to kill | Effort |
+|---|---|---|
+| **Fused chunked FFN** (up-projection → activation → down-projection, tiled over tokens) | the 4×D FFN intermediate — "the single biggest transient in a DiT block" | high |
+| **Flash / memory-efficient attention** over H3's nested latent | the N² attention score buffer | medium–high |
+| **Tiled spatio-temporal VAE decode**, hand-rolled | the full-resolution decode peak — "often the *actual* OOM at 720p" | medium |
+| **4-bit activations** with a low-rank outlier branch | halves the activation footprint itself | high |
+
+<div class="callout truth"><span class="t">What was predicted here, verbatim</span>
+<p>"<em>Fused FFN + flash-attention + tiled VAE + SVDQuant W4A4 together remove all three activation transients and halve what's left. This is the</em> only <em>credible software path to native 720p on 8 GB — and honestly, it may still not fully get there.</em>"</p></div>
+
+Scoring that four-item plan against what was actually built and measured:
+
+| Proposed | Outcome |
+|---|---|
+| Fused chunked FFN | ❌ **The premise was wrong.** A chunked-FFN sweep over 2, 4, 8 and 16 chunks moved the peak from 7,832 MB to 7,832 MB, with one non-monotonic dip that did not reproduce. The FFN intermediate is not the dominant transient in this stack — the int8 GEMM buffers are |
+| Memory-efficient attention | ✅ **Built.** Online-softmax attention that never materialises the full score matrix ([ch.34](34-open-use-close-flashattention.html)) |
+| Tiled VAE decode | ⚠️ **Half right, for the wrong reason.** The stock tiled decoder is incompatible with H3's nested latent, so a hand-rolled path was needed — but the actual 720p decode failure was an <b>accumulation bug</b>, not a capacity wall: finished pixel chunks (~216 MB each) were being appended to a GPU-resident list. Moving them to CPU on append fixed it ([ch.46](46-the-first-15-seconds.html)) |
+| 4-bit activations | ❌ **Never built.** And never needed for the result it was meant to enable |
+| — | ✅ **Sequence parallelism across three cards** — the thing that actually delivered native 720p, and the one item not on the list |
+
+The pattern is the same one that shows up in [ch.12](12-pushing-past-8gb.html): the proposals all assumed the answer was *fewer bytes per token*, because that is what the literature optimises. The answer was *fewer tokens per device*.
+
+## Tier 3 — improve the model itself
+
+The tuned adapter that would genuinely fix faces requires *training*, and **8 GB trains nothing** — not a 33B video DiT, where the video activations alone exceed the card. The split proposed was clean and cheap: build the dataset on the box, where the work is GPU-light (scene detection, resampling to 24 fps, bucket resizing, auto-captioning with the Qwen3-VL encoder already on disk, human verification), landing 150–200 clean clips of sharp, eyes-open, close-up faces sourced at 720p or better. Then rent a single training run, and come back to the box for same-seed A/B evaluation.
+
+That reasoning still stands, and it is worth noting *why* the dataset specifies high-resolution source material: the earlier LoRA failure was a resolution mismatch, so an adapter trained on crisp faces is the version that could carry sharpness a 480p render lacks. **This tier has not been executed.** No LoRA has been trained, and the plan remains a plan.
+
+## The honest 8 GB ceiling — as forecast, and as measured
+
+This is the table the chapter existed to produce. It is reproduced exactly as written, with what happened beside it.
+
+<div class="callout truth"><span class="t">Forecast against outcome</span>
+<table>
+<tr><th>Target</th><th>Forecast, verbatim</th><th>Measured since</th></tr>
+<tr><td>Native single-pass 720p</td><td>"❌ <b>hard wall</b> — 720p ≈ 2.3× the tokens of 480p; even linear-cost flash attention ×2.3 exceeds 8 GB. <b>Physics, not tuning.</b>"</td><td><b>1280×704 × 124 frames at 23 steps — 55 min.</b> And 345 frames at 23 steps in about 44 h, across three cards</td></tr>
+<tr><td>15 s continuous clip</td><td>"❌ single-context / ✅ chunked — length scales activations linearly; chain 5 s chunks (with visible seam drift)"</td><td><b>Single context, no chaining.</b> 512×288 × 345 frames at 49 steps, 66 min, and the result is the best-looking clip on the box</td></tr>
+<tr><td>A 720p-<em>looking</em> deliverable</td><td>"✅ via pipeline — native 480p, then upscale"</td><td>✅ <b>Confirmed, and now the recommended route anyway</b> — 832×480 at 49 steps then a 1.54× lift is ~35× cheaper than native</td></tr>
+<tr><td>Sharper, more photoreal faces</td><td>"⚠️ partial — stream int8 rather than Q4 weights"</td><td>⚠️ <b>Right verdict, wrong mechanism.</b> The gain came from framing and resolution, not precision</td></tr>
+<tr><td>Speed</td><td>"~3× floor … Minutes, never real-time"</td><td>✅ <b>Still true, and understated.</b> Native 720p runs at 143 s <em>per step</em>; the sharded 15 s path runs at 6,845 s per step</td></tr>
+</table></div>
+
+Read row one carefully, because the sentence "physics, not tuning" is not retracted. Every clause in it is true: 720p really is about 2.3× the tokens, that really does exceed 8 GB, and no amount of tuning changes it. What the sentence quietly assumes is that "8 GB" is the relevant quantity — that the render must fit **one card**. Split the token sequence three ways and each card's activation scratch falls from roughly **5.70 GB to about 1.90 GB**, which leaves 4.56 GB free on a card that previously had 0.76 GB. The wall was never moved. The work was divided.
+
+<div class="callout warn"><span class="t">And the division was expensive</span>
+<p>832×480 × 345 to 1280×704 × 345 is <b>2.26× the tokens</b>. Quadratic attention predicts roughly <b>5×</b> the time. The measured figure is <b>34×</b>, so the three-card path carries about a <b>7× overhead beyond the mathematics</b> — hand-rolled ring attention running in Python loops, plus a copy of every block to every card on every step. The forecast's instinct that this would be miserable was correct; it was the feasibility that was wrong, not the economics ([ch.45](45-three-gpu-sequence-parallelism.html)).</p></div>
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:920px" role="img" aria-label="Where the binding constraint moved over the project: first fitting the model into 8 GB, then fitting the activations for long clips, then fitting a sequence no single card can hold, and finally time, where nothing is out of reach but some things cost ninety hours.">
+  <defs>
+    <marker id="f1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE CONSTRAINT KEEPS MOVING — THAT IS WHAT PROGRESS LOOKS LIKE HERE</text>
+  <line x1="20" y1="60" x2="740" y2="60" stroke="#232c3b"/>
+  <circle cx="100" cy="60" r="6" fill="#151b26" stroke="#7aa2ff"/>
+  <circle cx="290" cy="60" r="6" fill="#151b26" stroke="#7aa2ff"/>
+  <circle cx="480" cy="60" r="6" fill="#151b26" stroke="#7aa2ff"/>
+  <circle cx="670" cy="60" r="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="100" y="42" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">ch. 1-30</text>
+  <text x="290" y="42" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">ch. 31-44</text>
+  <text x="480" y="42" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">ch. 45-46</text>
+  <text x="670" y="42" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">NOW</text>
+  <rect x="20" y="82" width="160" height="96" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="100" y="106" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">fit the model</text>
+  <text x="100" y="128" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">33B into 8 GB</text>
+  <text x="100" y="152" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">solved: quantization</text>
+  <text x="100" y="168" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">+ block streaming</text>
+  <rect x="210" y="82" width="160" height="96" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="290" y="106" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">fit the activations</text>
+  <text x="290" y="128" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">long clips, higher res</text>
+  <text x="290" y="152" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">solved: exact chunking,</text>
+  <text x="290" y="168" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">tiling, context parallel</text>
+  <rect x="400" y="82" width="160" height="96" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="480" y="106" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">fit a sequence</text>
+  <text x="480" y="122" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">no card can hold</text>
+  <text x="480" y="146" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">solved: 3-GPU</text>
+  <text x="480" y="162" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">sequence parallelism</text>
+  <rect x="590" y="82" width="160" height="96" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="670" y="106" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">time</text>
+  <text x="670" y="128" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">nothing is out of reach</text>
+  <text x="670" y="152" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">some things cost 90 h</text>
+  <text x="670" y="168" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">a different problem</text>
+  <line x1="184" y1="130" x2="204" y2="130" stroke="#5ee0c0" marker-end="url(#f1)"/>
+  <line x1="374" y1="130" x2="394" y2="130" stroke="#5ee0c0" marker-end="url(#f1)"/>
+  <line x1="564" y1="130" x2="584" y2="130" stroke="#5ee0c0" marker-end="url(#f1)"/>
+  <rect x="80" y="200" width="600" height="44" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="380" y="220" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">The question stopped being "does it fit?"</text>
+  <text x="380" y="238" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">and became "is it worth the wall-clock?"</text>
+</svg>
+
+<div class="callout warn"><span class="t">"We're near the software ceiling" — the claim that aged worst</span>
+<p>The original warning read: software "<em>cannot break the activation wall for native 720p or long single-context clips. Remaining gains are single-digit multipliers on speed and incremental on quality. Past this point, quality costs hardware.</em>"</p>
+<p>Both named impossibilities were delivered <b>by software</b>, on cards the project already owned. The hardware added was a third copy of the cheapest card in the table below — not the upgrade this chapter recommended. What the warning got right is the shape of the remaining gains: the wins since have been feasibility wins, and the speed picture is exactly as bleak as forecast.</p></div>
+
+## If hardware is bought — the decision tree
+
+For diffusion, memory bandwidth matters first, then capacity. Prices are used street, at the time of writing.
+
+| Card | Used price | VRAM / bandwidth | FP8 | Verdict as written |
+|---|---|---|---|---|
+| 3060 Ti (owned) | — | 8 GB / 448 GB/s | no | baseline; a second card was seen as a parallel render farm only |
+| RTX 3060 12 GB | ~$260 | 12 GB / **360 GB/s** | no | ❌ **skip — sidegrade** (fewer cores and *lower* bandwidth than already owned) |
+| RTX 4060 Ti 16 GB | ~$340–420 | 16 GB / **288 GB/s** | yes | capacity with FP8, but bandwidth-starved; budget stopgap |
+| **RTX 3090 24 GB** | **~$850–1050** | 24 GB / **936 GB/s** | no | ✅ **the value pick** — "the first card that breaks our wall" |
+| RTX 4090 24 GB | ~$2150–2350 | 24 GB / 1008 GB/s | yes | faster, plus FP8 face quality; buy over the 3090 only if render *time* is the pain |
+| A100 40/80 GB | $2k–15k | 40–80 GB | no | training and 1080p; risky used market — rent instead |
+| Tesla K80 | ~$80 | 2×12 GB / old | no | ❌ **do not** — Kepler, no tensor cores, unsupported by modern torch or Triton |
+
+<svg viewBox="0 0 760 208" width="100%" style="max-width:920px" role="img" aria-label="The recommended purchase was a single used RTX 3090 with 24 GB at around 900 dollars; what actually happened was a third RTX 3060 Ti with 8 GB, and native 720p rendered anyway across the three cards.">
+  <defs>
+    <marker id="f2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE RECOMMENDED PURCHASE · AND THE PURCHASE THAT HAPPENED</text>
+  <rect x="2" y="30" width="360" height="150" rx="10" fill="#12161f" stroke="#3a4a63"/>
+  <text x="24" y="54" fill="#9fb6e8" font-size="12" font-family="Inter,sans-serif">RECOMMENDED HERE</text>
+  <rect x="24" y="66" width="316" height="44" rx="6" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="182" y="84" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">one used RTX 3090 — 24 GB</text>
+  <text x="182" y="102" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="SF Mono,monospace">~$900 · 936 GB/s</text>
+  <text x="24" y="132" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">"the one purchase that actually breaks the</text>
+  <text x="24" y="148" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">8 GB wall. Skip everything cheaper."</text>
+  <text x="24" y="170" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">Sound reasoning. Never bought.</text>
+  <line x1="366" y1="104" x2="396" y2="104" stroke="#6f7b8f" marker-end="url(#f2)"/>
+  <rect x="400" y="30" width="358" height="150" rx="10" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="422" y="54" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">WHAT HAPPENED</text>
+  <rect x="422" y="66" width="100" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="472" y="84" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">3060 Ti</text>
+  <text x="472" y="100" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="SF Mono,monospace">8 GB</text>
+  <rect x="530" y="66" width="100" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="580" y="84" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">3060 Ti</text>
+  <text x="580" y="100" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="SF Mono,monospace">8 GB</text>
+  <rect x="638" y="66" width="100" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="688" y="84" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">3060 Ti</text>
+  <text x="688" y="100" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="SF Mono,monospace">8 GB</text>
+  <text x="422" y="132" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">A third copy of the cheapest card in the table —</text>
+  <text x="422" y="148" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">the one dismissed as "a parallel render farm only".</text>
+  <text x="422" y="170" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">Native 1280x704 x 345 rendered. It cost ~44 h.</text>
+  <rect x="150" y="188" width="460" height="1" fill="#232c3b"/>
+  <text x="380" y="204" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">The 3090 would still be the faster machine. It was not the necessary one.</text>
+</svg>
+
+<div class="callout truth"><span class="t">The FP8-versus-INT8 myth — still true, still worth reading</span>
+<p>"An FP8 card is far faster than int8" is <b>mostly false on the same silicon.</b> On Ada, FP8 and INT8 run at roughly <b>equal</b> tensor throughput — FP8 buys <b>quality at the same memory footprint</b>, because its non-uniform grid holds detail better, not speed. A 4090 is faster because it is a bigger chip with more cores and roughly twice the bandwidth, <em>not</em> because of FP8. Ampere has no FP8 at all, so <b>the int8 path already uses the fastest datapath these cards have</b> ([ch.18](18-number-formats-precision.html)).</p></div>
+
+<div class="callout spec"><span class="t">The decision tree, updated</span>
+<ul>
+<li><b>Better faces now, no hardware</b> → frame the subject big, render at the target resolution, give the scene the steps it needs. Measured, free, and stronger than any of the alternatives below.</li>
+<li><b>A 720p-looking deliverable now</b> → 832×480 at 49 steps, then a mild 1.54× lift. ~35× cheaper than native, and the difference is one most viewers cannot see.</li>
+<li><b>Native 720p at 15 s</b> → three 8 GB cards and about 44 hours. A proven capability rather than a workflow; keep it for the one hero shot that justifies a weekend ([ch.47](47-the-scorecard.html)).</li>
+<li><b>Render <em>time</em> is the pain</b> → this is where a single big card genuinely wins. One 24 GB card holds what three 8 GB cards only hold by paying a 7× coordination overhead.</li>
+<li><b>Training anything</b> → still off the table on this hardware. Build the dataset on the box, rent one run.</li>
+<li><b>Avoid:</b> a 12 GB card with lower bandwidth than the cards already owned, anything pre-tensor-core, and buying Ada expecting FP8 to be an accelerant.</li>
+</ul></div>
+
+## Bottom line
+
+<div class="callout truth"><span class="t">What the map got right, and what it got wrong</span>
+<ol>
+<li><b>Right about the diagnosis.</b> The wall is activations, not weights; weight-side tricks were spent; the scaling law is untouchable by software.</li>
+<li><b>Right about the economics.</b> Native 720p was always going to be brutally expensive, and it is — 44 hours at 23 steps, ~90 at 49.</li>
+<li><b>Wrong about the unit.</b> "8 GB" was treated as the budget for a render. It is the budget for a <em>device</em>. Three devices, one render, and the impossible row became a 55-minute clip at 124 frames.</li>
+<li><b>Wrong about the route.</b> The four kernels proposed here were not what delivered it; one of them was aimed at a transient that profiling showed does not dominate.</li>
+</ol>
+<p>The forecast's real error was not pessimism. It was drawing the ceiling of a <em>machine</em> when it should have been drawing the ceiling of a <em>machine plus an assumption</em> — and the assumption was the cheaper thing to change.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">activation wall</span><span class="badge">scaling law vs constant factor</span><span class="badge">sigma-shift</span><span class="badge">CFG</span><span class="badge">step knee</span><span class="badge">fused kernel</span><span class="badge">FFN intermediate</span><span class="badge">4-bit activations</span><span class="badge">memory bandwidth</span><span class="badge">sidegrade</span><span class="badge">FP8 vs INT8 parity</span><span class="badge">sequence parallelism</span><span class="badge">coordination overhead</span><span class="badge">unit of work</span></p>
+<p>If those feel solid, the question of whether cleverness can substitute for money is now a concrete one rather than a slogan.</p></div>
+
+Next: the same question asked from the other side — whether a builder with no budget can out-engineer the hardware wall, what the historical record says about that, and where this project's own answer landed ([ch.21](21-build-vs-buy.html)).
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

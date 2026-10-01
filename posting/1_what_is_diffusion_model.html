@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>There Is No Image Step</title>
+<meta name="description" content="What actually happens between a prompt and a video — traced through one real render on consumer hardware, with the measured shapes at every stage.">
+<style>
+:root{
+  --ink:#242424; --soft:#5c5c5c; --faint:#9a9a9a; --rule:#e8e8ea;
+  --panel:#f7f7f8; --deep:#f2f2f4;
+  --accent:#0f7b6c; --accent-bg:#e8f4f1;
+  --blue:#2b5fa8; --blue-bg:#ecf1fa;
+  --warn:#8a5a00; --warn-bg:#fdf3e3;
+  --serif:Charter,"Iowan Old Style",Georgia,"Times New Roman",serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;color:var(--ink);font-family:var(--serif);
+  font-size:21px;line-height:1.58;-webkit-font-smoothing:antialiased;letter-spacing:-.003em}
+.wrap{max-width:740px;margin:0 auto;padding:72px 24px 140px}
+.kicker{font-family:var(--sans);font-size:13px;font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--accent);margin:0 0 18px}
+h1{font-family:var(--sans);font-size:44px;line-height:1.12;letter-spacing:-.028em;
+  font-weight:700;margin:0 0 22px}
+.lede{font-size:22px;line-height:1.5;color:var(--soft);margin:0 0 34px}
+.byline{font-family:var(--sans);font-size:14px;color:var(--faint);
+  border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
+  padding:16px 0;margin-bottom:48px;line-height:1.7}
+.byline b{color:var(--ink);font-weight:600}
+h2{font-family:var(--sans);font-size:30px;line-height:1.22;letter-spacing:-.022em;
+  font-weight:700;margin:62px 0 6px}
+.step{font-family:var(--mono);font-size:13px;color:var(--accent);
+  letter-spacing:.1em;text-transform:uppercase;margin:62px 0 -52px}
+.sub{font-family:var(--sans);font-size:15px;color:var(--faint);margin:0 0 26px}
+p{margin:0 0 26px}
+em{font-style:italic}
+strong{font-weight:600}
+figure{margin:38px 0 34px;width:100%}
+@media(min-width:1040px){figure{width:calc(100% + 200px);margin-left:-100px}}
+figure svg{width:100%;height:auto;display:block;border:1px solid var(--rule);
+  border-radius:6px;background:#fff}
+figcaption{font-family:var(--sans);font-size:14px;color:var(--faint);
+  text-align:center;margin-top:14px;line-height:1.5}
+.note{border-left:3px solid var(--accent);background:var(--accent-bg);
+  padding:20px 24px;margin:34px 0;border-radius:0 4px 4px 0}
+.note.warn{border-left-color:var(--warn);background:var(--warn-bg)}
+.note.blue{border-left-color:var(--blue);background:var(--blue-bg)}
+.note .t{display:block;font-family:var(--sans);font-size:12.5px;font-weight:700;
+  letter-spacing:.07em;text-transform:uppercase;color:var(--accent);margin-bottom:10px}
+.note.warn .t{color:var(--warn)} .note.blue .t{color:var(--blue)}
+.note p{margin:0 0 12px;font-size:19px;line-height:1.54}
+.note p:last-child{margin-bottom:0}
+code{font-family:var(--mono);font-size:.8em;background:var(--deep);
+  padding:.16em .42em;border-radius:3px;color:#333}
+table{border-collapse:collapse;width:100%;margin:32px 0;font-family:var(--sans);font-size:16px}
+th{text-align:left;padding:10px 12px;border-bottom:2px solid var(--ink);
+  font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600}
+td{text-align:left;padding:12px;border-bottom:1px solid var(--rule);line-height:1.45}
+td b{color:var(--accent);font-weight:700}
+hr{border:none;border-top:1px solid var(--rule);margin:56px 0}
+.end{font-family:var(--sans);font-size:15px;color:var(--faint);line-height:1.65}
+.end a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(15,123,108,.3)}
+@media(max-width:680px){
+  body{font-size:19px} .wrap{padding:44px 20px 90px}
+  h1{font-size:32px} h2{font-size:24px} .lede{font-size:19px}
+  .step{margin-bottom:-44px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<p class="kicker">Self-hosting generative AI · 1 of 3</p>
+<h1>There Is No Image Step</h1>
+<p class="lede">Most people picture text-to-video as: write a prompt, get a picture, animate the picture. That is not what happens. There is no image stage anywhere in the pipeline — and understanding why explains every constraint, every cost, and every failure mode of these systems.</p>
+
+<p class="byline">Traced through one real render · MiniMax-H3 (33B) on 3 × RTX 3060 Ti, 8 GB each<br>
+Output: <b>1280 × 704 · 345 frames · 14.375 s</b> &nbsp;·&nbsp; Cost: <b>43.3 hours</b><br>
+Every shape and timing below was measured, not estimated.</p>
+
+<p class="step">Step 1</p>
+<h2>The prompt is read by a model bigger than the one that draws</h2>
+<p class="sub">26 GB to understand · 20 GB to generate</p>
+
+<p>The first surprise is that there is no single model. There are four, and the largest one never produces a pixel — it reads your sentence.</p>
+
+<figure>
+<svg viewBox="0 0 900 260" role="img" aria-label="The prompt enters a 26 GB Qwen3-VL-32B encoder and is tapped at layer 50, producing meaning vectors that steer the 20 GB generator.">
+  <defs><marker id="a1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#2b5fa8"/></marker></defs>
+  <rect x="14" y="92" width="176" height="72" rx="6" fill="#f7f7f8" stroke="#d9d9de"/>
+  <text x="102" y="122" text-anchor="middle" fill="#242424" font-size="15" font-family="-apple-system,sans-serif">the prompt</text>
+  <text x="102" y="143" text-anchor="middle" fill="#9a9a9a" font-size="13" font-family="-apple-system,sans-serif">a sentence</text>
+  <line x1="194" y1="128" x2="226" y2="128" stroke="#2b5fa8" marker-end="url(#a1)"/>
+  <rect x="232" y="34" width="300" height="188" rx="6" fill="#ecf1fa" stroke="#2b5fa8"/>
+  <text x="382" y="60" text-anchor="middle" fill="#1c3f73" font-size="15" font-family="-apple-system,sans-serif" font-weight="600">Qwen3-VL-32B encoder — 26 GB</text>
+  <rect x="256" y="76" width="252" height="20" rx="3" fill="#fff" stroke="#c5d4ec"/>
+  <text x="382" y="90" text-anchor="middle" fill="#9a9a9a" font-size="12" font-family="SF Mono,monospace">layers 1 … 49</text>
+  <rect x="256" y="102" width="252" height="26" rx="3" fill="#0f7b6c" stroke="#0f7b6c"/>
+  <text x="382" y="120" text-anchor="middle" fill="#fff" font-size="13" font-family="SF Mono,monospace">layer 50 — tapped here</text>
+  <rect x="256" y="134" width="252" height="20" rx="3" fill="#fff" stroke="#e0e0e4"/>
+  <text x="382" y="148" text-anchor="middle" fill="#c4c4c8" font-size="12" font-family="SF Mono,monospace">layers 51 … end (never run)</text>
+  <text x="382" y="180" text-anchor="middle" fill="#3f5c8c" font-size="13" font-family="-apple-system,sans-serif">the last layer predicts words.</text>
+  <text x="382" y="200" text-anchor="middle" fill="#3f5c8c" font-size="13" font-family="-apple-system,sans-serif">the middle holds meaning.</text>
+  <line x1="536" y1="128" x2="568" y2="128" stroke="#2b5fa8" marker-end="url(#a1)"/>
+  <rect x="574" y="92" width="312" height="72" rx="6" fill="#e8f4f1" stroke="#0f7b6c"/>
+  <text x="730" y="120" text-anchor="middle" fill="#0b5a4f" font-size="15" font-family="-apple-system,sans-serif" font-weight="600">Omni-Transformer — 20 GB</text>
+  <text x="730" y="142" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="-apple-system,sans-serif">50 blocks · 56 attention heads</text>
+</svg>
+<figcaption>The encoder is 26 GB. The generator is 20 GB. Six extra gigabytes are spent on comprehension.</figcaption>
+</figure>
+
+<p>Consider what a sentence has to carry. <em>"A lone figure walks away down a rain-slick neon street, camera following gently."</em> Rain-slick implies reflections. Neon implies coloured light on wet ground. "Walks away" puts the camera behind the subject. "Gently" rules out handheld shake. None of that is in the words — it is in the <em>understanding</em> of the words.</p>
+
+<div class="note blue"><span class="t">Why layer 50, not the end</span>
+<p>A language model's final layer is specialised for its own job: predicting the next word. Its middle layers hold something more useful to an outsider — a general representation of meaning, before it narrows toward producing text. H3 stops the encoder halfway and takes its <strong>understanding</strong> rather than its <strong>conclusion</strong>.</p></div>
+
+<p>There is a practical consequence. 26 GB and 20 GB never coexist in memory: one process encodes the prompt and exits, a second loads only the generator. Embeddings cache to disk, so a scene is understood once and can then be re-rendered at any resolution, step count or seed for free.</p>
+
+<p class="step">Step 2</p>
+<h2>A latent is created — 24 channels of noise, not a picture</h2>
+<p class="sub">(1, 24, 37, 30, 52) — read off a real render</p>
+
+<p>Now the thing that breaks the mental model. The system does not create an image and refine it. It creates a <strong>latent</strong>: a compressed grid of numbers filled with random noise, whose channels mean nothing to a human eye.</p>
+
+<figure>
+<svg viewBox="0 0 900 230" role="img" aria-label="A frame of pixels has three channels of red green and blue at full resolution; a latent has twenty-four abstract channels at one sixteenth the resolution, about a hundred times fewer numbers.">
+  <text x="14" y="18" fill="#9a9a9a" font-size="12" font-family="-apple-system,sans-serif" letter-spacing="1.4">WHAT A HUMAN SEES</text>
+  <rect x="14" y="30" width="376" height="112" rx="6" fill="#f7f7f8" stroke="#d9d9de"/>
+  <rect x="38" y="52" width="100" height="68" rx="4" fill="#fdecec" stroke="#c53030"/>
+  <text x="88" y="92" text-anchor="middle" fill="#8f2020" font-size="14" font-family="-apple-system,sans-serif" font-weight="600">R</text>
+  <rect x="152" y="52" width="100" height="68" rx="4" fill="#e8f4f1" stroke="#0f7b6c"/>
+  <text x="202" y="92" text-anchor="middle" fill="#0b5a4f" font-size="14" font-family="-apple-system,sans-serif" font-weight="600">G</text>
+  <rect x="266" y="52" width="100" height="68" rx="4" fill="#ecf1fa" stroke="#2b5fa8"/>
+  <text x="316" y="92" text-anchor="middle" fill="#1c3f73" font-size="14" font-family="-apple-system,sans-serif" font-weight="600">B</text>
+  <text x="202" y="164" text-anchor="middle" fill="#5c5c5c" font-size="13" font-family="-apple-system,sans-serif">3 channels · 832 × 480 · 124 frames</text>
+  <text x="202" y="186" text-anchor="middle" fill="#242424" font-size="14" font-family="SF Mono,monospace">149,000,000 numbers</text>
+  <text x="510" y="18" fill="#9a9a9a" font-size="12" font-family="-apple-system,sans-serif" letter-spacing="1.4">WHAT THE MODEL WORKS ON</text>
+  <rect x="510" y="30" width="376" height="112" rx="6" fill="#e8f4f1" stroke="#0f7b6c"/>
+  <rect x="530" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="558" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="586" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="614" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="642" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="670" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="698" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="726" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="754" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="782" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="810" y="50" width="24" height="34" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <text x="862" y="72" text-anchor="middle" fill="#3b7d72" font-size="14" font-family="SF Mono,monospace">… 24</text>
+  <text x="698" y="106" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="-apple-system,sans-serif">channels with no human meaning</text>
+  <text x="698" y="126" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="-apple-system,sans-serif">only the decoder knows what they are</text>
+  <text x="698" y="164" text-anchor="middle" fill="#5c5c5c" font-size="13" font-family="-apple-system,sans-serif">24 channels · 52 × 30 grid · 37 latent frames</text>
+  <text x="698" y="186" text-anchor="middle" fill="#242424" font-size="14" font-family="SF Mono,monospace">1,400,000 numbers</text>
+  <rect x="300" y="198" width="300" height="28" rx="14" fill="#0f7b6c"/>
+  <text x="450" y="217" text-anchor="middle" fill="#fff" font-size="13.5" font-family="-apple-system,sans-serif" font-weight="600">about 100× compression</text>
+</svg>
+<figcaption>Not a small picture. A different representation entirely — 24 abstract channels, not red, green and blue.</figcaption>
+</figure>
+
+<p>Those numbers came off disk from a real render. The shape <code>(1, 24, 37, 30, 52)</code> is one clip, 24 channels, 37 latent frames covering 124 real ones, on a 30 × 52 grid.</p>
+
+<div class="note"><span class="t">This is why it can run at all</span>
+<p>A hundredfold compression is the difference between possible and impossible. The expensive loop that follows runs entirely in this small space. Pixels are never touched until the very last stage.</p></div>
+
+<p class="step">Step 3</p>
+<h2>The loop: predict the noise, remove a fraction, repeat</h2>
+<p class="sub">50 blocks per step · 23 steps · 1,150 block executions</p>
+
+<p>Here is what a "step" actually is. The model receives three things — the current noisy latent, which noise level it is at, and the prompt vectors — and pushes them through <strong>50 transformer blocks</strong> in sequence.</p>
+
+<p>What comes out is <em>not</em> a picture. It is a prediction of <strong>which part of the current latent is noise</strong>: a grid the same shape as the input, saying "this much of what you gave me is static."</p>
+
+<figure>
+<svg viewBox="0 0 900 240" role="img" aria-label="Each step passes the latent through fifty transformer blocks, which predict the noise; the scheduler subtracts a fraction and the loop repeats twenty-three times.">
+  <defs><marker id="b1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#0f7b6c"/></marker>
+  <marker id="b2" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#9a9a9a"/></marker></defs>
+  <text x="14" y="18" fill="#9a9a9a" font-size="12" font-family="-apple-system,sans-serif" letter-spacing="1.4">ONE STEP, REPEATED 23 TIMES</text>
+  <rect x="14" y="60" width="150" height="66" rx="6" fill="#f7f7f8" stroke="#d9d9de"/>
+  <text x="89" y="88" text-anchor="middle" fill="#242424" font-size="14" font-family="-apple-system,sans-serif">noisy latent</text>
+  <text x="89" y="108" text-anchor="middle" fill="#9a9a9a" font-size="12" font-family="SF Mono,monospace">1.4M numbers</text>
+  <line x1="168" y1="93" x2="198" y2="93" stroke="#9a9a9a" marker-end="url(#b2)"/>
+  <rect x="204" y="44" width="320" height="98" rx="6" fill="#e8f4f1" stroke="#0f7b6c"/>
+  <text x="364" y="70" text-anchor="middle" fill="#0b5a4f" font-size="14.5" font-family="-apple-system,sans-serif" font-weight="600">50 transformer blocks</text>
+  <rect x="224" y="84" width="26" height="20" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="256" y="84" width="26" height="20" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="288" y="84" width="26" height="20" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="320" y="84" width="26" height="20" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="352" y="84" width="26" height="20" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <rect x="384" y="84" width="26" height="20" rx="2" fill="#fff" stroke="#9ecfc5"/>
+  <text x="440" y="99" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="SF Mono,monospace">… × 50</text>
+  <text x="364" y="128" text-anchor="middle" fill="#3b7d72" font-size="12.5" font-family="-apple-system,sans-serif">each streamed from RAM: 0.4 GB at a time</text>
+  <line x1="528" y1="93" x2="558" y2="93" stroke="#0f7b6c" marker-end="url(#b1)"/>
+  <rect x="564" y="52" width="170" height="82" rx="6" fill="#fdecec" stroke="#c53030"/>
+  <text x="649" y="80" text-anchor="middle" fill="#8f2020" font-size="14" font-family="-apple-system,sans-serif" font-weight="600">predicted noise</text>
+  <text x="649" y="100" text-anchor="middle" fill="#a15252" font-size="12.5" font-family="-apple-system,sans-serif">same shape as the</text>
+  <text x="649" y="117" text-anchor="middle" fill="#a15252" font-size="12.5" font-family="-apple-system,sans-serif">input — not an image</text>
+  <line x1="738" y1="93" x2="768" y2="93" stroke="#0f7b6c" marker-end="url(#b1)"/>
+  <rect x="774" y="60" width="112" height="66" rx="6" fill="#ecf1fa" stroke="#2b5fa8"/>
+  <text x="830" y="86" text-anchor="middle" fill="#1c3f73" font-size="13.5" font-family="-apple-system,sans-serif">subtract a</text>
+  <text x="830" y="105" text-anchor="middle" fill="#1c3f73" font-size="13.5" font-family="-apple-system,sans-serif">fraction</text>
+  <path d="M830,130 L830,178 L89,178 L89,130" fill="none" stroke="#0f7b6c" stroke-dasharray="5 4" marker-end="url(#b1)"/>
+  <text x="452" y="198" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="-apple-system,sans-serif">slightly less random than before — same shape, same size, still not a picture</text>
+  <text x="452" y="222" text-anchor="middle" fill="#9a9a9a" font-size="12.5" font-family="-apple-system,sans-serif">23 steps × 50 blocks = 1,150 block executions, ~460 GB moved across PCIe</text>
+</svg>
+<figcaption>The scheduler removes only a <em>fraction</em> of the predicted noise. A partial move is more reliable than a full jump.</figcaption>
+</figure>
+
+<div class="note warn"><span class="t">Why not do it in one jump?</span>
+<p>Because from pure static the most accurate single answer is a vague average of everything plausible — a blur. Each small correction is one the model can make <em>accurately</em>, and the corrections compound. Early steps set composition; late steps set detail.</p>
+<p>Too few steps does not give you a rough draft. It gives you mud, because the composition never settled.</p></div>
+
+<table>
+  <tr><th>Scene type</th><th>Steps needed</th></tr>
+  <tr><td>Tight close-up portrait</td><td><b>4</b></td></tr>
+  <tr><td>Character, mid-shot</td><td><b>23</b></td></tr>
+  <tr><td>Wide vista, small distant subject</td><td><b>49</b></td></tr>
+</table>
+
+<p>Step count is a property of the <em>scene</em>, not the model. Getting this wrong cost one render five and a half hours and produced an unusable clip.</p>
+
+<p class="step">Step 4</p>
+<h2>Sound is generated in the same pass, not added afterwards</h2>
+<p class="sub">32 audio channels riding the same 50 blocks</p>
+
+<p>Most pipelines generate video, then score it. This one carries audio latents — 32 channels of them — through the <em>same</em> transformer blocks, in the same steps, as the video.</p>
+
+<figure>
+<svg viewBox="0 0 900 168" role="img" aria-label="Video latents of twenty-four channels and audio latents of thirty-two channels pass together through the same fifty transformer blocks and are denoised jointly.">
+  <defs><marker id="c1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#0f7b6c"/></marker></defs>
+  <rect x="14" y="24" width="190" height="52" rx="6" fill="#e8f4f1" stroke="#0f7b6c"/>
+  <text x="109" y="46" text-anchor="middle" fill="#0b5a4f" font-size="14" font-family="-apple-system,sans-serif" font-weight="600">video latent</text>
+  <text x="109" y="65" text-anchor="middle" fill="#3b7d72" font-size="12.5" font-family="SF Mono,monospace">24 channels</text>
+  <rect x="14" y="92" width="190" height="52" rx="6" fill="#ecf1fa" stroke="#2b5fa8"/>
+  <text x="109" y="114" text-anchor="middle" fill="#1c3f73" font-size="14" font-family="-apple-system,sans-serif" font-weight="600">audio latent</text>
+  <text x="109" y="133" text-anchor="middle" fill="#3f5c8c" font-size="12.5" font-family="SF Mono,monospace">32 channels</text>
+  <path d="M208,50 L256,74" fill="none" stroke="#0f7b6c" marker-end="url(#c1)"/>
+  <path d="M208,118 L256,94" fill="none" stroke="#0f7b6c" marker-end="url(#c1)"/>
+  <rect x="262" y="48" width="324" height="72" rx="6" fill="#f7f7f8" stroke="#0f7b6c"/>
+  <text x="424" y="76" text-anchor="middle" fill="#242424" font-size="14.5" font-family="-apple-system,sans-serif" font-weight="600">the same 50 blocks</text>
+  <text x="424" y="98" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="-apple-system,sans-serif">attention relates picture and sound to each other</text>
+  <line x1="590" y1="84" x2="622" y2="84" stroke="#0f7b6c" marker-end="url(#c1)"/>
+  <rect x="628" y="48" width="258" height="72" rx="6" fill="#fff" stroke="#0f7b6c"/>
+  <text x="757" y="76" text-anchor="middle" fill="#242424" font-size="13.5" font-family="-apple-system,sans-serif">denoised together, every step</text>
+  <text x="757" y="98" text-anchor="middle" fill="#3b7d72" font-size="12.5" font-family="-apple-system,sans-serif">32 kHz stereo, synchronised by construction</text>
+</svg>
+<figcaption>Lip-sync and footfalls are not aligned in post. They are born aligned, because both live in the same sequence.</figcaption>
+</figure>
+
+<p class="step">Step 5</p>
+<h2>After the last step, there is still no picture</h2>
+<p class="sub">A separate network, run once, makes pixels</p>
+
+<p>The loop ends. The model believes there is no noise left to remove. The latent's shape has not changed once during the entire process — still <code>(1, 24, 37, 30, 52)</code>, still 1.4 million numbers.</p>
+
+<p>Nothing here could be opened in a video player. A completely separate network — the decoder — now expands it.</p>
+
+<figure>
+<svg viewBox="0 0 900 200" role="img" aria-label="The clean latent is expanded by the decoder from an eighty by forty-four grid into 1280 by 704 pixels, tile by tile, producing 345 frames.">
+  <defs><marker id="d1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#0f7b6c"/></marker></defs>
+  <rect x="14" y="56" width="184" height="86" rx="6" fill="#f7f7f8" stroke="#0f7b6c"/>
+  <text x="106" y="84" text-anchor="middle" fill="#242424" font-size="14.5" font-family="-apple-system,sans-serif" font-weight="600">clean latent</text>
+  <text x="106" y="105" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="SF Mono,monospace">80 × 44 grid</text>
+  <text x="106" y="125" text-anchor="middle" fill="#9a9a9a" font-size="12.5" font-family="-apple-system,sans-serif">still not a picture</text>
+  <line x1="202" y1="99" x2="234" y2="99" stroke="#0f7b6c" marker-end="url(#d1)"/>
+  <rect x="240" y="40" width="286" height="118" rx="6" fill="#fff" stroke="#0f7b6c"/>
+  <text x="383" y="66" text-anchor="middle" fill="#242424" font-size="14.5" font-family="-apple-system,sans-serif" font-weight="600">decoder (VAE) — 4.9 GB</text>
+  <rect x="262" y="80" width="42" height="32" rx="2" fill="#e8f4f1" stroke="#9ecfc5"/>
+  <rect x="308" y="80" width="42" height="32" rx="2" fill="#e8f4f1" stroke="#9ecfc5"/>
+  <rect x="354" y="80" width="42" height="32" rx="2" fill="#e8f4f1" stroke="#9ecfc5"/>
+  <rect x="400" y="80" width="42" height="32" rx="2" fill="#e8f4f1" stroke="#9ecfc5"/>
+  <rect x="446" y="80" width="42" height="32" rx="2" fill="#e8f4f1" stroke="#9ecfc5"/>
+  <text x="383" y="134" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="-apple-system,sans-serif">256 × 256 tiles, overlaps blended</text>
+  <text x="383" y="152" text-anchor="middle" fill="#9a9a9a" font-size="12.5" font-family="-apple-system,sans-serif">runs once, at the very end</text>
+  <line x1="530" y1="99" x2="562" y2="99" stroke="#0f7b6c" marker-end="url(#d1)"/>
+  <rect x="568" y="56" width="318" height="86" rx="6" fill="#e8f4f1" stroke="#0f7b6c"/>
+  <text x="727" y="86" text-anchor="middle" fill="#0b5a4f" font-size="15" font-family="-apple-system,sans-serif" font-weight="600">1280 × 704 · 345 frames</text>
+  <text x="727" y="108" text-anchor="middle" fill="#3b7d72" font-size="13" font-family="-apple-system,sans-serif">the first moment pixels exist</text>
+  <text x="727" y="128" text-anchor="middle" fill="#9a9a9a" font-size="12.5" font-family="SF Mono,monospace">85 minutes</text>
+</svg>
+<figcaption>Of a 43-hour render, the part that produces anything image-shaped takes 85 minutes at the end.</figcaption>
+</figure>
+
+<div class="note warn"><span class="t">Which makes decode a real failure point</span>
+<p>Because the loop and the decoder are separate code paths, a bug in the cheap final stage can destroy the expensive one. On one run, six hours of completed denoising was lost to two tensors sitting on different devices — a single line, in the last stage, after all the hard work was done.</p>
+<p>The fix is not cleverness. It is writing the latents to disk the moment the loop finishes, before anything downstream can fail.</p></div>
+
+<p class="step">Step 6</p>
+<h2>What this explains</h2>
+<p class="sub">Every constraint follows from the shape of the pipeline</p>
+
+<p>Once you see that the whole process runs on a compressed grid rather than pictures, the behaviour of these systems stops being mysterious.</p>
+
+<table>
+  <tr><th>Observation</th><th>Because</th></tr>
+  <tr><td>Same prompt, different result every time</td><td>The starting noise is random. Fix the seed and it becomes repeatable.</td></tr>
+  <tr><td>Nothing is "retrieved"</td><td>There is no library inside. The model learned a <em>direction</em>, not images.</td></tr>
+  <tr><td>Longer clips cost far more than bigger ones</td><td>Attention compares every token with every other. Cost grows with the <b>square</b> of length.</td></tr>
+  <tr><td>Text on screen comes out as gibberish</td><td>Letters are high-frequency detail in a space compressed 100×.</td></tr>
+  <tr><td>Too few steps gives mud, not blur</td><td>Composition is set in the early steps. Stop early and it never settled.</td></tr>
+</table>
+
+<div class="note"><span class="t">The whole pipeline in one paragraph</span>
+<p>A 26 GB model reads your sentence and hands over its understanding. A small grid is filled with random numbers. Twenty-three times, a 20 GB network is asked which of those numbers are noise, and a fraction of what it points at is removed — with the prompt in view the entire time, and the soundtrack travelling alongside. When nothing is left to remove, a fourth network expands the grid into pixels.</p>
+<p>At no point does an image exist and get animated. <strong>There is no image step.</strong></p></div>
+
+<hr>
+
+<p class="end">Traced through a real render on three RTX 3060 Ti cards — 8 GB of VRAM each, 24 GB total, running a model whose weights are 20 GB. Output: 1280 × 704, 345 frames, 14.375 seconds, 43.3 hours. Every shape and timing above was measured, not estimated.<br><br>
+Next in this series: <em>why length costs more than resolution</em> — the token budget, the per-card ceiling, and what quadratic attention does to a schedule.<br><br>
+Code and full write-up: <a href="https://github.com/Kmassidik/Selfhost-GenAI">github.com/Kmassidik/Selfhost-GenAI</a></p>
+
+</div>
+</body>
+</html>

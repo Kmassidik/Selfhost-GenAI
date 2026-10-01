@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>18 · Number Formats &amp; Precision</title>
+<meta name="description" content="What a number format is, how quantization actually works, and why the same transformer is 66 GB in bf16 and 20 GB in int8 — with the two harmless kernel failures that open every render log on this Ampere box.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 18 · The bits themselves</span>
+
+# Number Formats &amp; Precision
+
+<p class="lede">A number format is the decision of how many bits each of the model's billions of numbers gets, and that one decision sets four things simultaneously: how much space the model takes, how fast the arithmetic runs, how good the output looks, and whether the thing can be run on this hardware at all. Measured here, the same transformer is about <b>66 GB in bf16</b> and <b>20 GB in int8</b> — same model, same weights, one choice of format between them.</p>
+
+Every render on this machine begins with two failures.
+
+```
+Failed to load .../torchao/_C_cutlass_90a.abi3.so
+Failed to load .../torchao/_C_mxfp8.cpython-310-x86_64-linux-gnu.so
+Unable to import `torchao` Tensor objects.
+```
+
+Nothing is wrong. Those two lines are a quantization library discovering, at import time, which decade of graphics hardware it has landed on — and they happen to name the exact two number formats this box does not have in silicon. By the end of the chapter those filenames should read as clearly as a sentence.
+
+<div class="callout truth"><span class="t">The one idea</span>
+<p><b>Precision is bits spent per number.</b> More bits mean a more faithful value, a larger file, and more traffic to move it. Fewer bits mean smaller and faster, right up until quality breaks. Self-hosting a large model on small cards is nothing but this trade, made deliberately — and the interesting part is knowing exactly where it stops paying.</p></div>
+
+## What a "format" actually is
+
+A single weight is a value like `0.0273`. A **format** is how that value is written down in memory. The same weight can occupy 32 bits or 8, and the difference is not rounding in the casual sense — it is a different set of representable values, laid out differently.
+
+There are two families, and they are built on genuinely different ideas.
+
+<div class="callout spec"><span class="t">Float vs integer — the core split</span>
+<table>
+<tr><th></th><th>Floating point</th><th>Integer, with a scale</th></tr>
+<tr><td>Structure</td><td>sign + <b>exponent</b> + mantissa</td><td>a whole number + one <b>shared scale factor</b></td></tr>
+<tr><td>The exponent buys</td><td><b>range</b> — the same 16 bits can hold 0.00001 and 60000</td><td>(no exponent; range is fixed by the scale)</td></tr>
+<tr><td>The mantissa buys</td><td><b>resolution</b> — how finely the range is divided</td><td>the integer itself is the resolution: 256 steps for 8 bits</td></tr>
+<tr><td>How it shrinks</td><td>spend fewer bits on exponent or mantissa</td><td>map a range of floats onto a grid of integers</td></tr>
+<tr><td>Examples</td><td>fp32, fp16, bf16, fp8</td><td>int8, int4, the GGUF Q-quants</td></tr>
+</table>
+<p>A float carries its own scale in every value, which is flexible and expensive. An integer format factors the scale out and shares it across a whole tensor or block, which is cheap — and is precisely what the word <b>quantization</b> means: <em>squeeze a range of floats onto a grid of integers plus one shared multiplier.</em></p></div>
+
+<svg viewBox="0 0 760 306" width="100%" style="max-width:920px" role="img" aria-label="Bit layouts drawn to scale: fp32 spends one sign bit, eight exponent bits and twenty-three mantissa bits; fp16 spends five and ten; bf16 keeps fp32's eight exponent bits but only seven of mantissa; fp8 in E4M3 form has four and three; and int8 is eight plain integer bits paired with one shared scale.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">DRAWN TO SCALE — ONE TICK IS ONE BIT</text>
+  <line x1="110" y1="26" x2="750" y2="26" stroke="#232c3b"/>
+  <text x="110" y="22" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">0</text>
+  <text x="270" y="22" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">8</text>
+  <text x="430" y="22" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">16</text>
+  <text x="590" y="22" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">24</text>
+  <text x="742" y="22" fill="#6f7b8f" font-size="9.5" font-family="SF Mono,monospace">32</text>
+  <text x="2" y="53" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">fp32</text>
+  <text x="2" y="66" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">4 bytes · the reference</text>
+  <rect x="110" y="42" width="20" height="26" fill="#12161f" stroke="#3a4a63"/>
+  <rect x="130" y="42" width="160" height="26" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="210" y="59" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">exponent · 8</text>
+  <rect x="290" y="42" width="460" height="26" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="520" y="59" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">mantissa · 23</text>
+  <text x="2" y="99" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">fp16</text>
+  <text x="2" y="112" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">2 bytes · narrow range</text>
+  <rect x="110" y="88" width="20" height="26" fill="#12161f" stroke="#3a4a63"/>
+  <rect x="130" y="88" width="100" height="26" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="180" y="105" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">exp · 5</text>
+  <rect x="230" y="88" width="200" height="26" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="330" y="105" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">mantissa · 10</text>
+  <text x="446" y="105" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">finer steps, but overflows where fp32 would not</text>
+  <text x="2" y="145" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">bf16</text>
+  <text x="2" y="158" fill="#8fd8c4" font-size="9.5" font-family="Inter,sans-serif">2 bytes · what H3 shipped as</text>
+  <rect x="110" y="134" width="20" height="26" fill="#12161f" stroke="#3a4a63"/>
+  <rect x="130" y="134" width="160" height="26" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="210" y="151" text-anchor="middle" fill="#9fb6e8" font-size="10.5" font-family="Inter,sans-serif">exponent · 8</text>
+  <rect x="290" y="134" width="140" height="26" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="360" y="151" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">mantissa · 7</text>
+  <text x="446" y="151" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">fp32's whole range in half the space — that is the trick</text>
+  <text x="2" y="191" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">fp8 (E4M3)</text>
+  <text x="2" y="204" fill="#6f7b8f" font-size="9.5" font-family="Inter,sans-serif">1 byte · not on this box</text>
+  <rect x="110" y="180" width="20" height="26" fill="#12161f" stroke="#3a4a63"/>
+  <rect x="130" y="180" width="80" height="26" fill="#12161f" stroke="#3a4a63"/>
+  <text x="170" y="197" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">exp · 4</text>
+  <rect x="210" y="180" width="60" height="26" fill="#12161f" stroke="#3a4a63"/>
+  <text x="240" y="197" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">m · 3</text>
+  <text x="286" y="197" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">a float small enough to be worth it — on Ada, Hopper or Blackwell silicon</text>
+  <text x="2" y="237" fill="#ffd9a0" font-size="11.5" font-family="Inter,sans-serif">int8</text>
+  <text x="2" y="250" fill="#c9a06a" font-size="9.5" font-family="Inter,sans-serif">1 byte · what we run</text>
+  <rect x="110" y="226" width="160" height="26" fill="#241a1a" stroke="#ffb454"/>
+  <text x="190" y="243" text-anchor="middle" fill="#ffd9a0" font-size="10.5" font-family="Inter,sans-serif">integer · 8</text>
+  <text x="278" y="243" fill="#c9a06a" font-size="11" font-family="Inter,sans-serif">×</text>
+  <rect x="292" y="226" width="150" height="26" rx="4" fill="#12161f" stroke="#7a5a30"/>
+  <text x="367" y="243" text-anchor="middle" fill="#c9a06a" font-size="10.5" font-family="Inter,sans-serif">one shared scale</text>
+  <text x="458" y="243" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">amortised over a whole block, so it costs almost nothing per weight</text>
+  <line x1="2" y1="268" x2="758" y2="268" stroke="#232c3b"/>
+  <text x="2" y="288" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">exponent = how wide a range of magnitudes fits</text>
+  <text x="400" y="288" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">mantissa = how finely that range is divided</text>
+  <text x="2" y="302" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">fp16 and bf16 are the same size and split those 15 bits differently — which is the entire difference between them.</text>
+</svg>
+
+<div class="callout spec"><span class="t">Why bf16 and not fp16, when both are 16 bits</span>
+<p><b>bf16 keeps all eight of fp32's exponent bits and sacrifices mantissa.</b> Its range is identical to fp32's, so a value that would not overflow in full precision will not overflow in bf16 — it will just be less finely resolved. fp16 does the opposite: more mantissa, far less range, and a real risk of numbers running off the top or bottom end.</p>
+<p>For training and for diffusion, range matters more than resolution, which is why large models are published in bf16 and why the H3 transformer arrives that way. Its ~66 GB is 33 billion numbers at two bytes each.</p></div>
+
+## How quantization actually works
+
+Take a tensor of weights, find the largest magnitude in it, and set a scale so that the largest value maps to the top of the integer range:
+
+$$s \;=\; \frac{\max |W|}{127}, \qquad q \;=\; \mathrm{round}\!\left(\frac{W}{s}\right), \qquad \hat{W} \;=\; q \cdot s$$
+
+That is the entire idea. Store $q$ as one byte per weight, store $s$ once, and reconstruct $\hat{W}$ when needed. The error is whatever rounding threw away — at most half a step of the grid.
+
+The catch is in $\max|W|$. **The single largest value in the tensor sets the spacing for every other value in it.** One extreme outlier stretches the grid, and the tightly clustered mass of ordinary weights near zero suddenly has far fewer distinct levels to land on. That is why real quantization schemes never use one scale for a whole tensor: they use one **per channel** or **per small block**, so an outlier only coarsens its own neighbourhood.
+
+<svg viewBox="0 0 760 296" width="100%" style="max-width:920px" role="img" aria-label="Two quantization schemes compared: with one scale for the whole tensor a single outlier stretches the grid so the cluster of ordinary weights near zero lands on very few distinct levels, while a scale per small block gives the cluster a tight grid and confines the outlier's cost to its own block.">
+  <defs>
+    <marker id="p1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE LARGEST WEIGHT DECIDES THE GRID SPACING FOR EVERY OTHER WEIGHT</text>
+  <text x="2" y="40" fill="#ffb1b1" font-size="12" font-family="Inter,sans-serif">one scale for the whole tensor</text>
+  <path d="M180,104 C210,104 216,58 246,58 C276,58 282,104 312,104" fill="none" stroke="#6f7b8f"/>
+  <text x="246" y="50" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">the mass of ordinary weights</text>
+  <line x1="40" y1="104" x2="740" y2="104" stroke="#3a4a63"/>
+  <line x1="140" y1="98" x2="140" y2="110" stroke="#3a4a63"/>
+  <line x1="240" y1="98" x2="240" y2="110" stroke="#3a4a63"/>
+  <line x1="340" y1="98" x2="340" y2="110" stroke="#3a4a63"/>
+  <line x1="440" y1="98" x2="440" y2="110" stroke="#3a4a63"/>
+  <line x1="540" y1="98" x2="540" y2="110" stroke="#3a4a63"/>
+  <line x1="640" y1="98" x2="640" y2="110" stroke="#3a4a63"/>
+  <line x1="740" y1="94" x2="740" y2="114" stroke="#ff6b6b"/>
+  <circle cx="740" cy="104" r="4" fill="#ff6b6b"/>
+  <text x="700" y="132" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif" text-anchor="middle">one outlier</text>
+  <circle cx="222" cy="104" r="3" fill="#5ee0c0"/>
+  <circle cx="238" cy="104" r="3" fill="#5ee0c0"/>
+  <circle cx="252" cy="104" r="3" fill="#5ee0c0"/>
+  <circle cx="266" cy="104" r="3" fill="#5ee0c0"/>
+  <text x="140" y="132" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">grid steps this far apart</text>
+  <text x="380" y="152" text-anchor="middle" fill="#ffb1b1" font-size="11" font-family="Inter,sans-serif">every green weight collapses onto the same two or three levels — the detail is gone</text>
+  <line x1="2" y1="166" x2="758" y2="166" stroke="#232c3b"/>
+  <text x="2" y="190" fill="#8fd8c4" font-size="12" font-family="Inter,sans-serif">a separate scale per small block</text>
+  <line x1="40" y1="248" x2="600" y2="248" stroke="#3a4a63"/>
+  <line x1="60" y1="242" x2="60" y2="254" stroke="#2f6b5c"/>
+  <line x1="80" y1="242" x2="80" y2="254" stroke="#2f6b5c"/>
+  <line x1="100" y1="242" x2="100" y2="254" stroke="#2f6b5c"/>
+  <line x1="120" y1="242" x2="120" y2="254" stroke="#2f6b5c"/>
+  <line x1="140" y1="242" x2="140" y2="254" stroke="#2f6b5c"/>
+  <line x1="160" y1="242" x2="160" y2="254" stroke="#2f6b5c"/>
+  <line x1="180" y1="242" x2="180" y2="254" stroke="#2f6b5c"/>
+  <line x1="200" y1="242" x2="200" y2="254" stroke="#2f6b5c"/>
+  <line x1="220" y1="242" x2="220" y2="254" stroke="#2f6b5c"/>
+  <line x1="240" y1="242" x2="240" y2="254" stroke="#2f6b5c"/>
+  <line x1="260" y1="242" x2="260" y2="254" stroke="#2f6b5c"/>
+  <line x1="280" y1="242" x2="280" y2="254" stroke="#2f6b5c"/>
+  <line x1="300" y1="242" x2="300" y2="254" stroke="#2f6b5c"/>
+  <line x1="320" y1="242" x2="320" y2="254" stroke="#2f6b5c"/>
+  <line x1="340" y1="242" x2="340" y2="254" stroke="#2f6b5c"/>
+  <line x1="360" y1="242" x2="360" y2="254" stroke="#2f6b5c"/>
+  <line x1="380" y1="242" x2="380" y2="254" stroke="#2f6b5c"/>
+  <line x1="400" y1="242" x2="400" y2="254" stroke="#2f6b5c"/>
+  <line x1="420" y1="242" x2="420" y2="254" stroke="#2f6b5c"/>
+  <line x1="440" y1="242" x2="440" y2="254" stroke="#2f6b5c"/>
+  <circle cx="222" cy="248" r="3" fill="#5ee0c0"/>
+  <circle cx="238" cy="248" r="3" fill="#5ee0c0"/>
+  <circle cx="252" cy="248" r="3" fill="#5ee0c0"/>
+  <circle cx="266" cy="248" r="3" fill="#5ee0c0"/>
+  <text x="240" y="216" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">this block's own scale — tight grid, every weight distinguishable</text>
+  <rect x="620" y="228" width="120" height="40" rx="6" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="680" y="244" text-anchor="middle" fill="#ffb1b1" font-size="10.5" font-family="Inter,sans-serif">the outlier's block</text>
+  <text x="680" y="260" text-anchor="middle" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif">pays alone</text>
+  <line x1="608" y1="248" x2="616" y2="248" stroke="#ff6b6b" marker-end="url(#p1)"/>
+  <text x="2" y="288" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">Per-block scales are why a 4-bit weight format can be nearly lossless and a naive one is not. The bit count is only half of the story.</text>
+</svg>
+
+## The ladder, and what it costs on this model
+
+<table>
+<tr><th>Format</th><th>Bits</th><th>Bytes / number</th><th>What it is</th><th>Where it belongs</th></tr>
+<tr><td><b>fp32</b></td><td>32</td><td>4</td><td>full single precision — the reference everything else is compared to</td><td>training maths, ground truth</td></tr>
+<tr><td>tf32</td><td>~19</td><td>(4 stored)</td><td>Ampere's fast tensor-core approximation of fp32</td><td>faster training on fp32 data</td></tr>
+<tr><td><b>bf16</b></td><td>16</td><td>2</td><td>fp32's range, less resolution</td><td><b>how H3 was published</b></td></tr>
+<tr><td>fp16</td><td>16</td><td>2</td><td>more resolution, much less range</td><td>inference where range is known safe</td></tr>
+<tr><td>fp8 (E4M3 / E5M2)</td><td>8</td><td>1</td><td>an 8-bit float</td><td>Ada, Hopper, Blackwell silicon</td></tr>
+<tr><td>fp4 / nvfp4</td><td>4</td><td>0.5</td><td>a 4-bit float with microscaling</td><td>Blackwell</td></tr>
+<tr><td><b>int8</b></td><td>8</td><td>1</td><td>8-bit integer + scale</td><td><b>what this build runs</b> — native on Ampere</td></tr>
+<tr><td>int4</td><td>4</td><td>0.5</td><td>4-bit integer + scale</td><td>aggressive; the practical floor for diffusion</td></tr>
+</table>
+
+Now put real weights behind those bytes. The measured sizes for this model's transformer:
+
+<div class="callout warn"><span class="t">The same transformer, four ways</span>
+<table>
+<tr><th>Format</th><th>Size</th><th>On this machine — 8 GB per card, 125 GB system RAM</th></tr>
+<tr><td>fp32</td><td><b>~132 GB</b></td><td>❌ larger than system RAM. There is nowhere to hold it, let alone compute on it</td></tr>
+<tr><td>bf16 — as published</td><td><b>~66 GB</b></td><td>⚠️ fits in RAM and streams through VRAM a slice at a time, at double the traffic</td></tr>
+<tr><td><b>int8, pruned — what we run</b></td><td><b>20 GB</b></td><td>✅ the working default</td></tr>
+<tr><td>fp8</td><td>~21 GB</td><td>⚠️ the same size, but <b>emulated in software</b> on Ampere — the file fits and the arithmetic crawls</td></tr>
+<tr><td>fp4 / nvfp4</td><td>~13 GB</td><td>❌ needs Blackwell hardware that does not exist in this box</td></tr>
+</table>
+<p>Two things in that table are worth reading twice. <b>fp8 is not smaller than int8 here</b> — it is the same byte count with worse hardware support, which is the clearest possible case against picking a format by size alone. And <b>20 GB is less than the 33 GB that 33 billion numbers at one byte would predict</b>, because the int8 build is also <b>pruned</b>: the transformer's own config gives about 395 million parameters per block across 50 blocks, roughly 20 billion numbers, one byte each.</p></div>
+
+<div class="callout truth"><span class="t">"Could it run in fp32?" — the exact answer</span>
+<p><b>The GPU can.</b> fp32 is every NVIDIA card's native baseline, on the CUDA cores. <b>This model cannot.</b> 132 GB of weights exceeds the 125 GB of system RAM, and fp32 activations are twice the size of bf16 ones, so the working set overruns 8 GB of VRAM immediately. It is a <b>memory</b> limit, not a capability limit — and it does not go away by summing the three cards, because no single card ever holds more than its own 8 GB.</p></div>
+
+## On a streaming design, the format *is* the clock
+
+This is the part that people who have only run models that fit in VRAM tend to miss. Here the weights live in system RAM and are copied to a card block by block, every block, every step ([ch.02](02-your-hardware.html)). So bytes per weight is not just a storage question — **it is the size of the traffic on the slowest link in the machine**, repeated tens of thousands of times.
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:920px" role="img" aria-label="How bytes per weight becomes wall-clock: about 0.4 gigabytes of int8 weights per block, times fifty blocks, times twenty-three steps, gives roughly 460 gigabytes crossing PCIe in one render — and the bf16 version of the same model would move roughly twice that.">
+  <defs>
+    <marker id="p2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">BYTES PER WEIGHT · MULTIPLIED BY EVERY BLOCK OF EVERY STEP</text>
+  <rect x="2" y="34" width="150" height="66" rx="8" fill="#241a1a" stroke="#ffb454"/>
+  <text x="77" y="58" text-anchor="middle" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">one block, int8</text>
+  <text x="77" y="80" text-anchor="middle" fill="#ffb454" font-size="14" font-family="SF Mono,monospace">~0.4 GB</text>
+  <text x="168" y="72" text-anchor="middle" fill="#aab4c5" font-size="14" font-family="Inter,sans-serif">×</text>
+  <rect x="184" y="34" width="150" height="66" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="259" y="58" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">blocks in the model</text>
+  <text x="259" y="80" text-anchor="middle" fill="#e7ecf3" font-size="14" font-family="SF Mono,monospace">50</text>
+  <text x="350" y="72" text-anchor="middle" fill="#aab4c5" font-size="14" font-family="Inter,sans-serif">×</text>
+  <rect x="366" y="34" width="150" height="66" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="441" y="58" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">steps in the schedule</text>
+  <text x="441" y="80" text-anchor="middle" fill="#e7ecf3" font-size="14" font-family="SF Mono,monospace">23</text>
+  <text x="532" y="72" text-anchor="middle" fill="#aab4c5" font-size="14" font-family="Inter,sans-serif">=</text>
+  <rect x="548" y="34" width="210" height="66" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="653" y="58" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">crossing PCIe, one render</text>
+  <text x="653" y="82" text-anchor="middle" fill="#5ee0c0" font-size="16" font-family="SF Mono,monospace">~460 GB</text>
+  <text x="2" y="132" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">the same render, if the weights had stayed bf16:</text>
+  <rect x="2" y="146" width="300" height="22" rx="3" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="152" y="162" text-anchor="middle" fill="#eafff8" font-size="11" font-family="Inter,sans-serif">int8 — 1 byte per weight</text>
+  <rect x="2" y="176" width="600" height="22" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="302" y="192" text-anchor="middle" fill="#eef3ff" font-size="11" font-family="Inter,sans-serif">bf16 — 2 bytes per weight, so roughly twice the bytes over the same wire</text>
+  <line x1="2" y1="214" x2="758" y2="214" stroke="#232c3b"/>
+  <text x="2" y="234" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">Halving the format did not just halve the download. It halved the traffic on the link the card spends its render waiting for.</text>
+  <line x1="620" y1="187" x2="644" y2="187" stroke="#5ee0c0" marker-end="url(#p2)"/>
+</svg>
+
+<div class="callout truth"><span class="t">Why the choice compounds</span>
+<p>A model that fits entirely in VRAM pays for its format <b>once</b>, at load. A model that streams pays for it <b>every block of every step</b>. That is the difference between "int8 saves disk space" and "int8 is the reason the render finishes this week" — and it is why on this build the format question is inseparable from the wall-clock question ([ch.30](30-the-render-live.html)).</p></div>
+
+## What this silicon actually implements
+
+A format existing in the world says nothing about whether a given chip runs it quickly. **Tensor cores** — the dedicated matrix units — accelerate a fixed menu, and that menu is locked to the GPU generation.
+
+<table>
+<tr><th>Precision</th><th>Tensor-core accelerated on Ampere sm_86?</th><th>Note</th></tr>
+<tr><td>fp32</td><td>❌ runs on the CUDA cores</td><td>correct, just without the fast path</td></tr>
+<tr><td>tf32</td><td>✅</td><td>a 19-bit stand-in for fp32</td></tr>
+<tr><td><b>fp16 / bf16</b></td><td>✅</td><td><b>the precision ceiling reachable here</b></td></tr>
+<tr><td><b>int8</b></td><td>✅ via IMMA</td><td><b>twice the throughput of fp16 at half the bytes</b> — the reason the build uses it</td></tr>
+<tr><td>int4</td><td>✅ limited</td><td>fast; lossy for diffusion</td></tr>
+<tr><td>fp8 / fp4</td><td>❌</td><td><b>Ada, Hopper and Blackwell only</b> — a newer-card feature entirely</td></tr>
+</table>
+
+<svg viewBox="0 0 760 292" width="100%" style="max-width:920px" role="img" aria-label="A generation ladder showing which number formats each NVIDIA architecture implements in silicon, with the two torchao kernels that fail to load on this box pinned to the Hopper and Blackwell columns they were built for.">
+  <defs>
+    <marker id="p3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">A FORMAT IS A PROPERTY OF THE SILICON, NOT OF THE LIBRARY</text>
+  <rect x="134" y="26" width="150" height="44" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="209" y="46" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">Ampere · sm_86</text>
+  <text x="209" y="62" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">3 × RTX 3060 Ti — this box</text>
+  <rect x="290" y="26" width="150" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="365" y="46" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">Ada</text>
+  <text x="365" y="62" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">40-series</text>
+  <rect x="446" y="26" width="150" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="521" y="46" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">Hopper · sm_90a</text>
+  <text x="521" y="62" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">datacentre</text>
+  <rect x="602" y="26" width="150" height="44" rx="6" fill="#151b26" stroke="#232c3b"/>
+  <text x="677" y="46" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">Blackwell</text>
+  <text x="677" y="62" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">newest</text>
+  <text x="2" y="98" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">fp16 / bf16</text>
+  <text x="209" y="98" text-anchor="middle" fill="#5ee0c0" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="365" y="98" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="521" y="98" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="677" y="98" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <line x1="2" y1="108" x2="752" y2="108" stroke="#232c3b"/>
+  <text x="2" y="130" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">int8 (IMMA)</text>
+  <text x="209" y="130" text-anchor="middle" fill="#5ee0c0" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="365" y="130" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="521" y="130" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="677" y="130" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <line x1="2" y1="140" x2="752" y2="140" stroke="#232c3b"/>
+  <text x="2" y="162" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">fp8</text>
+  <text x="209" y="162" text-anchor="middle" fill="#ff6b6b" font-size="13" font-family="Inter,sans-serif">✕</text>
+  <text x="365" y="162" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="521" y="162" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <text x="677" y="162" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <line x1="2" y1="172" x2="752" y2="172" stroke="#232c3b"/>
+  <text x="2" y="194" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">fp4 / mxfp8</text>
+  <text x="209" y="194" text-anchor="middle" fill="#ff6b6b" font-size="13" font-family="Inter,sans-serif">✕</text>
+  <text x="365" y="194" text-anchor="middle" fill="#ff6b6b" font-size="13" font-family="Inter,sans-serif">✕</text>
+  <text x="521" y="194" text-anchor="middle" fill="#ff6b6b" font-size="13" font-family="Inter,sans-serif">✕</text>
+  <text x="677" y="194" text-anchor="middle" fill="#6f7b8f" font-size="13" font-family="Inter,sans-serif">✓</text>
+  <line x1="2" y1="204" x2="752" y2="204" stroke="#232c3b"/>
+  <path d="M521,212 L521,240" fill="none" stroke="#ffb454" stroke-dasharray="3 3" marker-end="url(#p3)"/>
+  <path d="M677,212 L677,268" fill="none" stroke="#ffb454" stroke-dasharray="3 3" marker-end="url(#p3)"/>
+  <rect x="330" y="242" width="382" height="22" rx="4" fill="#241a1a" stroke="#7a5a30"/>
+  <text x="344" y="257" fill="#c9a06a" font-size="10.5" font-family="SF Mono,monospace">_C_cutlass_90a.abi3.so — built for sm_90a</text>
+  <rect x="330" y="270" width="382" height="22" rx="4" fill="#241a1a" stroke="#7a5a30"/>
+  <text x="344" y="285" fill="#c9a06a" font-size="10.5" font-family="SF Mono,monospace">_C_mxfp8…so — built for microscaling fp8</text>
+  <text x="2" y="257" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">the two kernels that fail</text>
+  <text x="2" y="285" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">at every import, harmlessly</text>
+</svg>
+
+### Reading the opening log lines
+
+Now the two failures at the top of the chapter decode themselves:
+
+- **`_C_cutlass_90a`** — `90a` is the compute capability **sm_90a**, which is **Hopper**. This box is **sm_86**.
+- **`_C_mxfp8`** — microscaling fp8, a **Blackwell**-era format with no Ampere implementation at all.
+
+torchao ships kernels for every generation and tries them all at import. Two of them are for silicon that is not present, they decline to load, they say so, and the library falls back to what Ampere does have — which is exactly the int8 path this build depends on. **Two error messages per render that are simply a library taking inventory of the hardware.**
+
+<div class="callout warn"><span class="t">The lesson underneath the log lines</span>
+<p>Smaller is not automatically better. A workflow that defaults to an fp4 or fp8 component <em>will run</em> on Ampere — by emulating the format in software, slowly — while a format the silicon genuinely implements runs at full speed. <b>Match the format to the GPU generation, not to the smallest file.</b> "Grab the smallest download" is how people end up with a model that fits and crawls.</p></div>
+
+## Why quantization works at all, and where it stops
+
+If fp32 is the faithful version, why does dropping to a quarter of the bits not ruin the output? Because of what the numbers look like in practice:
+
+- **Weights cluster tightly around zero.** A small integer grid plus a per-block scale captures that distribution well, which is why 4-bit *weights* can be close to lossless — the ViDiT-Q result, and consistent with the int8-versus-Q4 comparison measured on this box ([ch.13](13-int8-vs-q4.html)).
+- **Activations are spikier.** They carry occasional large outliers, and outliers are exactly what a shared scale handles worst. Activations are therefore far more sensitive to low bit counts than weights are.
+- Which is why the schemes that work are asymmetric: **W4A8** or **W8A8** — quantize the forgiving side hard, keep the touchy side softer.
+- **Diffusion breaks earlier than language models do.** An LLM can often be pushed to 2 or 3 bits and still read well, because a slightly different word choice is invisible. A diffusion model writes pixels, and a slightly different pixel is visible. Roughly 4 bits is the proven floor for image and video work.
+
+<div class="callout warn"><span class="t">The trap: fewer weight bits do not move the real wall</span>
+<p>The tempting move is "go lower and free VRAM". But the ceiling here was <b>measured</b>, and it is not the weights — the weights already stream from RAM a block at a time, so their format sets <em>traffic</em>, not <em>peak</em>. What sets peak VRAM is the <b>activations and matmul working buffers</b> ([ch.12](12-pushing-past-8gb.html)).</p>
+<p>The failure that proves it: the <code>g4k</code> render died with an out-of-memory error at <code>[vae] clip 14</code>, and the cause was not capacity at all — the decode path was appending every finished pixel chunk to a list that lived on the GPU, roughly 216 MB per chunk at 1280×704. An accumulation bug, fixed by moving finished chunks to the CPU on append. No weight quantization anywhere on the ladder would have saved that render.</p></div>
+
+## The history in this chapter, kept honest
+
+An earlier version of this chapter recommended a GGUF `Q4_K_M` file as the default, at **11.6 GB** for the unpruned transformer, alongside the rest of the GGUF ladder:
+
+<table>
+<tr><th>GGUF quant</th><th>~Bits</th><th>Size</th><th>Quality</th></tr>
+<tr><td>Q8_0</td><td>8</td><td>~23 GB</td><td>near-lossless</td></tr>
+<tr><td>Q6_K / Q5_K</td><td>6 / 5</td><td>~15–17 GB</td><td>very close</td></tr>
+<tr><td>Q4_K_M</td><td>~4.5</td><td>11.6 GB</td><td>≈ int8, no visible loss</td></tr>
+<tr><td>Q3_K</td><td>~3.5</td><td>~9 GB</td><td>starts softening</td></tr>
+<tr><td>Q2_K</td><td>~2.6</td><td>~7 GB</td><td>usually visibly breaks</td></tr>
+</table>
+
+That ladder is still an accurate picture of how the Q-quants behave, and the head-to-head against int8 is [ch.13](13-int8-vs-q4.html). What changed is the engine: GGUF is a container built for `llama.cpp`-family runtimes, and once the pipeline became diffusers plus torchao ([ch.48](48-the-pipeline-without-comfyui.html)), the format that mattered was the one torchao could quantize and stream — **int8 safetensors, 20 GB**. The measured verdict that Q4 and int8 look the same never changed. The path around it did.
+
+## Where each format lands on this build
+
+<table>
+<tr><th>Format</th><th>On this machine</th><th>Verdict</th></tr>
+<tr><td>fp32</td><td>~132 GB, larger than 125 GB of RAM</td><td>❌ unreachable — a memory limit, not a capability one</td></tr>
+<tr><td>bf16</td><td>~66 GB, streams from RAM at double the traffic</td><td>the precision ceiling; slow by construction</td></tr>
+<tr><td><b>int8</b></td><td><b>20 GB</b>, native tensor-core support</td><td>✅ <b>the default, and the reason renders finish</b></td></tr>
+<tr><td>fp8</td><td>~21 GB, emulated in software</td><td>❌ no smaller, and much slower here</td></tr>
+<tr><td>fp4 / nvfp4</td><td>~13 GB</td><td>❌ needs Blackwell</td></tr>
+<tr><td>int4 / Q4</td><td>smaller still</td><td>viable for weights; does not move the activation wall</td></tr>
+</table>
+
+<div class="callout truth"><span class="t">The five things worth keeping</span>
+<ol>
+<li><b>Format = size × speed × quality × fit</b>, all four decided by one choice of bits per number.</li>
+<li><b>The same 16 bits can be split two ways.</b> bf16 keeps range, fp16 keeps resolution — and for large models range wins.</li>
+<li><b>Quantization is an integer grid plus a shared scale</b>, so the biggest weight in a block sets the resolution of every other weight in it. Per-block scales are the whole craft.</li>
+<li><b>Ampere runs fp16, bf16 and int8 on tensor cores, and has no fp8 or fp4 at all</b> — which is what the two failed kernel loads announce at every import.</li>
+<li><b>On a streaming design, bytes per weight is a wall-clock number</b>, not a disk number: ~0.4 GB per block, 50 blocks, 23 steps, ~460 GB across PCIe.</li>
+</ol></div>
+
+Cross-references: the measured int8-versus-Q4 comparison is [ch.13](13-int8-vs-q4.html); the VRAM-wall profiling behind "the wall is activations" is [ch.12](12-pushing-past-8gb.html); the layer-by-layer view of the stack that loads these formats is [ch.04](04-software-stack.html); plain-word definitions are in the [glossary](11-glossary.html).
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">precision</span><span class="badge">bits per weight</span><span class="badge">sign / exponent / mantissa</span><span class="badge">dynamic range</span><span class="badge">fp32</span><span class="badge">bf16</span><span class="badge">fp16</span><span class="badge">fp8 / E4M3</span><span class="badge">fp4 / nvfp4</span><span class="badge">int8 / int4</span><span class="badge">scale factor</span><span class="badge">quantization</span><span class="badge">per-block scale</span><span class="badge">outlier</span><span class="badge">W4A8</span><span class="badge">tensor core / IMMA</span><span class="badge">compute capability</span><span class="badge">emulation</span><span class="badge">pruning</span><span class="badge">GGUF Q-quant</span></p>
+<p>If those feel solid, a model card's list of downloads stops being a guessing game and becomes a specification to check against the silicon.</p></div>
+
+Next: what a model actually is once the formats are stripped away — files, shapes, and the difference between the weights and the code that runs them.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

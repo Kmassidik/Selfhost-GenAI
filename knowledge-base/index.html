@@ -3,75 +3,123 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Self-Hosting GenAI — Field Guide</title>
+<title>Self-Hosting Generative AI — Field Guide</title>
+<meta name="description" content="Running a 33-billion-parameter video model on consumer GPUs. Forty-eight chapters, every number measured on real hardware, failures included.">
 <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
-<span class="kicker">Field Guide · Built from a real build</span>
+<span class="kicker">Field Guide · Every number measured, nothing rounded up</span>
 
 # Self-Hosting Generative AI
 
-<p class="lede">A from-scratch guide to running big AI models on your own machine — written from the exact build we did together on your box: a consumer GPU, an open-source video model, and every trap we hit along the way.</p>
+<p class="lede">It started with one graphics card that was too small for the job.</p>
 
-This is not a generic tutorial. Every number in here was **measured on your hardware**, every gotcha actually happened, and nothing is rounded up to look better than it is. If a thing was slow, it says slow. If 8 GB is small for the job, it says so.
+A single RTX 3060 Ti holds **8 GB**. MiniMax-H3 is a **33-billion-parameter** video model whose quantized weights come to roughly 46 GB — nearly six times too large to fit. The sensible move was to rent a bigger machine. We didn't. We spent months finding out exactly how far a consumer box could be pushed, and wrote down what happened.
 
-## The honest specs of what we built
+It ends with three cards rendering **fifteen seconds of native 720p video with sound** — a thing that should not fit on 24 GB, and does.
 
-<div class="callout truth"><span class="t">The machine — measured, not marketing</span>
-<table>
-<tr><th>Part</th><th>What it actually is</th></tr>
-<tr><td>GPU</td><td>NVIDIA GeForce RTX 3060 Ti — <b>8 GB VRAM</b>, Ampere (sm_86)</td></tr>
-<tr><td>Driver / CUDA</td><td>595.84 / CUDA 13.2</td></tr>
-<tr><td>CPU / RAM</td><td>24 cores / <b>60 GB RAM</b></td></tr>
-<tr><td>Disk</td><td>148 GB NVMe (≈100 GB free after models)</td></tr>
-<tr><td>OS</td><td>Ubuntu 26.04</td></tr>
-<tr><td>Model</td><td>MiniMax-H3 — a <b>33-billion-parameter</b> text/image→video+audio diffusion model</td></tr>
-<tr><td>Engine</td><td>ComfyUI 0.30 + PyTorch 2.11 (CUDA 12.8 build)</td></tr>
+<div class="callout truth"><span class="t">The arc, measured at both ends</span>
+<table class="arc">
+<tr><th></th><th>Where we started</th><th>Where we are now</th></tr>
+<tr><td>GPU</td><td>1× RTX 3060 Ti — 8 GB</td><td><b>3× RTX 3060 Ti — 24 GB</b></td></tr>
+<tr><td>CPU / RAM</td><td>24 cores / 60 GB</td><td>2× Xeon E5-2665, 32 threads / <b>125 GB</b></td></tr>
+<tr><td>Disk</td><td>148 GB</td><td>879 GB</td></tr>
+<tr><td>Engine</td><td>ComfyUI 0.30</td><td><b>Our own pipeline — no framework</b></td></tr>
+<tr><td>Longest render</td><td>3 s at 768×448</td><td><b>14.4 s at native 1280×704</b></td></tr>
+<tr><td>Time for that render</td><td>348 s</td><td>44 h</td></tr>
 </table>
 </div>
 
-<div class="callout warn"><span class="t">The reality of running a 33B model on 8 GB</span>
-<p>The model's weights total <b>~46 GB</b> (quantized). Your GPU has <b>8 GB</b>. It only works because we stream the weights from your 60 GB of system RAM through the GPU a slice at a time. It <b>works</b> — you have real clips with sound to prove it — but it is <b>not fast</b>: a 3-second clip took <b>348 seconds (≈5.8 minutes)</b> to render. That trade (cheap hardware, slow output) is the whole story of consumer self-hosting, and this guide explains exactly why.</p>
+Read that last row carefully, because it is the honest shape of this whole project: we became far **more capable** and far **slower**. Every wall we broke cost time on the other side. That trade — cheap hardware, patient output — is what self-hosting actually means, and nothing here pretends otherwise.
+
+## What makes this different
+
+Every number was measured on the machine described above. Every failure is written down next to the fix: the six hours lost to two tensors on different devices, the memory wall that turned out to be a bug, the LoRA that made the picture worse, the parallelism scheme that ran out of RAM. If a thing was slow, it says slow.
+
+<div class="callout spec"><span class="t">Three findings that cost the most to learn</span>
+<ol>
+<li><b>Step count is a property of the scene, not the model.</b> A close-up portrait resolves in 4 steps. A wide vista with a distant subject needs 49. Getting this wrong wasted a 5½-hour render.</li>
+<li><b>Cheap stages must never be able to destroy expensive ones.</b> Denoise costs hours, decode costs minutes — and for one night, a decode bug could delete a completed denoise.</li>
+<li><b>Most walls are bugs.</b> "It runs out of memory at 720p" sounded like hardware. It was finished data left in the wrong place.</li>
+</ol>
 </div>
 
 ## How to read this
 
-Go in order the first time — each page builds on the last. Come back to any page as a reference later.
+Go in order the first time — the foundations chapters assume nothing, and each one builds on the last. After that, use it as a reference; every chapter stands alone and links to what it depends on.
 
-```mermaid
-flowchart TD
-    A[00 · Start Here] --> B[01 · What Is Generative AI]
-    B --> C[02 · Your Hardware<br/>& the Offload Trick]
-    C --> D[03 · How MiniMax-H3 Works]
-    D --> E[04 · The Software Stack]
-    E --> F[05 · Our Build — The True Story]
-    F --> G[06 · Your Learning Roadmap]
-    G -.->|keep going| H((Build your<br/>own projects))
-    style A fill:#14342c,stroke:#5ee0c0,color:#eafff8
-    style G fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style H fill:#0d1017,stroke:#5ee0c0,color:#5ee0c0
-```
+If you want the day-by-day build story rather than the teaching, that lives in the [🧭 Journey](../history/index.html).
 
-## The six chapters
-
-<div class="cards">
-<a class="card" href="01-what-is-genai.html"><span class="n">01</span><b>What Is Generative AI</b><span>Neural nets, transformers, and how diffusion turns noise into video.</span></a>
-<a class="card" href="02-your-hardware.html"><span class="n">02</span><b>Your Hardware</b><span>GPU vs VRAM vs RAM, and the offload trick that fits 46 GB into 8 GB.</span></a>
-<a class="card" href="03-how-h3-works.html"><span class="n">03</span><b>How MiniMax-H3 Works</b><span>Encoder, the 33B transformer, and the two VAEs that make picture + sound.</span></a>
-<a class="card" href="04-software-stack.html"><span class="n">04</span><b>The Software Stack</b><span>Drivers, CUDA, PyTorch, ComfyUI, and what "quantization" really means.</span></a>
-<a class="card" href="05-our-build-story.html"><span class="n">05</span><b>Our Build — True Story</b><span>Every step, every failure, every fix — the unedited walkthrough.</span></a>
-<a class="card" href="06-learning-roadmap.html"><span class="n">06</span><b>Learning Roadmap</b><span>A staged path from zero to confident, with projects and free resources.</span></a>
-<a class="card" href="11-glossary.html"><span class="n">11</span><b>Glossary — Every Term</b><span>DiT, encoder, sampler, VAE, quantization, boil, pixels-per-face — plain words, tied to our build.</span></a>
-<a class="card" href="12-pushing-past-8gb.html"><span class="n">12</span><b>Pushing Past 8GB</b><span>What the real research (ViDiT-Q, QuantSparse, INT8 GEMM) says about breaking the ceiling — and the honest verdict.</span></a>
+<p class="part">🌱 Foundations</p>
+<p class="part-note">Start here. No prior knowledge assumed.</p>
+<div class="toc">
+<a href="01-what-is-genai.html"><span class="n">01</span><b>What Is Generative AI</b></a>
+<a href="02-your-hardware.html"><span class="n">02</span><b>Your Hardware &amp; the Offload Trick</b></a>
+<a href="03-how-h3-works.html"><span class="n">03</span><b>How MiniMax-H3 Works</b></a>
+<a href="04-software-stack.html"><span class="n">04</span><b>The Software Stack</b></a>
+<a href="08-how-a-prompt-becomes-video.html"><span class="n">08</span><b>How a Prompt Becomes a Video</b></a>
+<a href="09-from-2017-cv-to-genai.html"><span class="n">09</span><b>From 2017 CV to Modern GenAI</b></a>
+<a href="19-what-a-model-is.html"><span class="n">19</span><b>What a Model Actually Is</b></a>
+<a href="28-anatomy-of-h3.html"><span class="n">28</span><b>Anatomy of H3</b></a>
+<a href="06-learning-roadmap.html"><span class="n">06</span><b>Your Learning Roadmap</b></a>
 </div>
 
-<div class="callout spec"><span class="t">One promise</span>
-<p>By the end you'll understand not just <em>what</em> we ran, but <em>why each piece exists</em> — enough to swap in a different model, size a better GPU, or debug the next thing that breaks.</p>
+<p class="part">⚙️ Technical Deep-Dives</p>
+<p class="part-note">How the machine actually works, down to the kernel.</p>
+<div class="toc">
+<a href="07-optimization-720p.html"><span class="n">07</span><b>Optimizing for 720p</b></a>
+<a href="13-int8-vs-q4.html"><span class="n">13</span><b>int8 vs Q4 on This Box</b></a>
+<a href="14-the-math-behind-it.html"><span class="n">14</span><b>The Math Behind It All</b></a>
+<a href="15-vectors-matrices-signals.html"><span class="n">15</span><b>Vectors, Matrices, or Signals?</b></a>
+<a href="16-multi-gpu-and-nvlink.html"><span class="n">16</span><b>Multi-GPU &amp; NVLink</b></a>
+<a href="18-number-formats-precision.html"><span class="n">18</span><b>Number Formats &amp; Precision</b></a>
+<a href="22-pipeline-in-detail.html"><span class="n">22</span><b>The Pipeline in Full Detail</b></a>
+<a href="23-math-from-scratch.html"><span class="n">23</span><b>The Math, From Scratch</b></a>
+<a href="24-pcie-nvlink-interconnect.html"><span class="n">24</span><b>PCIe &amp; NVLink — The Interconnect</b></a>
+<a href="29-where-numbers-live.html"><span class="n">29</span><b>Where the Numbers Live</b></a>
+<a href="30-the-render-live.html"><span class="n">30</span><b>The Render, Live</b></a>
+<a href="31-what-the-gpu-does.html"><span class="n">31</span><b>What the GPU Is Actually Doing</b></a>
+<a href="32-thinking-like-a-circuit.html"><span class="n">32</span><b>Thinking Like a Circuit</b></a>
+<a href="34-open-use-close-flashattention.html"><span class="n">34</span><b>Open, Use, Close: FlashAttention</b></a>
+<a href="40-lora-how-it-works.html"><span class="n">40</span><b>LoRA — A Frozen Giant, a Tiny Nudge</b></a>
+<a href="41-python-is-the-glue.html"><span class="n">41</span><b>Python Is the Glue, CUDA Is the Engine</b></a>
+<a href="42-why-two-models.html"><span class="n">42</span><b>Why Two Models? Sharing the Recipe</b></a>
+<a href="48-the-pipeline-without-comfyui.html"><span class="n">48</span><b>The Pipeline, Without ComfyUI</b></a>
+</div>
+
+<p class="part">🧠 Ideas &amp; Strategy</p>
+<p class="part-note">What we built, what it cost, and what we got wrong.</p>
+<div class="toc">
+<a href="12-pushing-past-8gb.html"><span class="n">12</span><b>Pushing Past 8 GB</b></a>
+<a href="17-what-actually-improves-quality.html"><span class="n">17</span><b>What Actually Improves Quality</b></a>
+<a href="20-how-far-we-can-go.html"><span class="n">20</span><b>How Far We Can Go</b></a>
+<a href="21-build-vs-buy.html"><span class="n">21</span><b>Can We Beat the Hardware by Building?</b></a>
+<a href="25-inference-engine-landscape.html"><span class="n">25</span><b>The Inference Engine Landscape</b></a>
+<a href="26-serving-h3-real-world.html"><span class="n">26</span><b>Serving H3 in the Real World</b></a>
+<a href="27-hardware-budget-audit.html"><span class="n">27</span><b>Hardware &amp; Budget Audit</b></a>
+<a href="33-long-video-small-card.html"><span class="n">33</span><b>Long Video on a Small Card</b></a>
+<a href="35-is-it-really-ours.html"><span class="n">35</span><b>Is It Really Ours?</b></a>
+<a href="36-splitting-the-video-cp.html"><span class="n">36</span><b>Splitting the Video — Context Parallelism</b></a>
+<a href="37-the-production-line.html"><span class="n">37</span><b>The Production Line</b></a>
+<a href="38-making-the-movie.html"><span class="n">38</span><b>Making the Movie</b></a>
+<a href="39-choosing-the-next-card.html"><span class="n">39</span><b>Choosing the Next Card</b></a>
+<a href="43-the-dalang-engine.html"><span class="n">43</span><b>The Dalang Engine</b></a>
+<a href="44-building-dalang.html"><span class="n">44</span><b>Building Dalang — the Log</b></a>
+<a href="45-three-gpu-sequence-parallelism.html"><span class="n">45</span><b>Three GPUs, One Sequence</b></a>
+<a href="46-the-first-15-seconds.html"><span class="n">46</span><b>The First 15 Seconds</b></a>
+<a href="47-the-scorecard.html"><span class="n">47</span><b>The Scorecard</b></a>
+</div>
+
+<p class="part">📖 Glossary</p>
+<p class="part-note">Every term in plain words, tied to this build.</p>
+<div class="toc">
+<a href="11-glossary.html"><span class="n">11</span><b>Glossary — Every Term</b></a>
+<a href="glossary.html"><span class="n">A–Z</span><b>Master Glossary</b></a>
 </div>
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

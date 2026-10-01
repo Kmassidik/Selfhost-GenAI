@@ -1,0 +1,39 @@
+# 📊 Benchmark — int8 vs Q4 on 8GB (Scene 3 stress test)
+
+**Date:** 2026-08-11 · **Box:** RTX 3060 Ti 8GB · **Test:** Scene 3 "street musician singing + guitar", 10s, 720p output, same full pipeline (50-step euler · no Turbo · supersample→720p · CodeFormer · same prompt/seed number).
+
+![benchmark](scene3_benchmark.png)
+
+## The measured numbers
+
+| Metric | int8 (convrot + our patch) | Q4_K_M (GGUF) | Result |
+|---|---|---|---|
+| **Render time** | 6393 s (**107 min**) | 3122 s (**52 min**) | **Q4 — 2.05× faster** ✅ |
+| **Native resolution** | 576×320 (0.184 MP) | 704×384 (0.270 MP) | **Q4 — +47% pixels** ✅ |
+| **Peak VRAM** | 7.5 GB | 7.06 GB | **Q4 — lower** ✅ |
+| **Quality (eyeball)** | ~85 | ~85 | **TIE** — within noise |
+| **Singing teeth** | clean | clean | both held |
+
+## The honest, calibrated verdict
+
+**Q4 is the better *default* on this box — but it is NOT a quality win. Read each axis separately:**
+
+- **Speed — real, decisive.** 2× faster, and stronger than it looks: int8 ran at *lower* resolution and was *still* 2× slower. That's a genuine result.
+- **VRAM + resolution headroom — real.** Q4 fits ~50% more native pixels at lower VRAM.
+- **Quality — a TIE, not a Q4 win.** The earlier "84 vs 87" overstated it. That gap is inside eyeball noise **and confounded**: the two clips ran at *different native resolutions* and are *different generated images* (different weights → different face/framing/seed behavior). It was never a clean quality A/B. Honest read: **indistinguishable.** If anything, **int8 is the higher-fidelity reference** (bit-identical to un-patched int8; Q4 is 4-bit) — Q4 *matches* it, doesn't beat it.
+
+## Big caveats (so nobody over-reads this)
+
+1. **n = 1 scene, one seed.** This is a strong *signal*, not a proven verdict across crowds, fast motion, or other subjects.
+2. **The 2× is partly self-inflicted.** Our chunk-patch added loop overhead to int8. So it's "Q4 vs *our-patched* int8," not "Q4 vs raw int8." Raw int8 would be faster but use more VRAM (and couldn't fit the higher res).
+3. **Quality is a human eyeball, not a metric.** No PSNR/LPIPS here.
+
+## Why the speed gap exists (grounded in research — KB ch.12)
+
+Reproduces the [Native-INT8-GEMM paper (2606.14598)](https://arxiv.org/abs/2606.14598) on our own hardware: production **int8 convrot dequantizes back to bf16** and never engages the INT8 tensor cores — and our patch adds per-row loop overhead. **Q4-GGUF dequantizes to fp16 and runs one standard matmul** → ~2× faster, and it sidesteps the 2.24 GB `fast_int8_mm` buffer entirely (hence also fitting higher res at lower VRAM).
+
+## Consequence
+
+- **Default engine → Q4_K_M** (faster, fits more res, quality indistinguishable). The 60s frame-chain film runs on Q4.
+- **int8 stays as the max-fidelity reference + the profiling story** that *found* the bottleneck.
+- **Not "proven champion" — "better default pending more scenes."** To harden it: repeat on a crowd scene and a fast-motion scene, and add a real metric (LPIPS) if we ever publish.

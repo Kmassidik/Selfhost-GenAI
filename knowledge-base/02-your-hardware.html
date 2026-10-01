@@ -3,98 +3,305 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>02 · Your Hardware & the Offload Trick</title>
+<title>02 · Your Hardware &amp; the Offload Trick</title>
+<meta name="description" content="GPU, VRAM, RAM and disk: what each one does, why a 46 GB model does not fit in 8 GB of VRAM, and the streaming trick that runs it anyway.">
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
 </head>
 <body>
 <script type="text/markdown" id="md">
 <span class="kicker">Chapter 02 · Hardware</span>
 
-# Your Hardware & the Offload Trick
+# Your Hardware &amp; the Offload Trick
 
-<p class="lede">You asked the best question of the whole session: "you use VRAM, not GPU?" This chapter answers it properly — because understanding how the GPU, VRAM, and RAM cooperate is the difference between guessing and knowing.</p>
+<p class="lede">A graphics card is two separate things that get blurred into one word: a <b>processor</b> that does arithmetic, and a small pool of <b>memory</b> attached to it. Almost every confusion about running large models on small hardware comes from mixing those up.</p>
 
-## Three different things people blur together
+The model we run needs about 46 GB. The card this project started on had 8 GB. Understanding exactly which 8 GB, and what the other 38 were doing, is the whole chapter.
+
+## Four things people blur together
 
 <table>
-<tr><th>Component</th><th>What it is</th><th>Yours</th><th>Analogy</th></tr>
-<tr><td><b>GPU</b> (the chip)</td><td>The processor that does the math — thousands of small cores multiplying numbers in parallel</td><td>RTX 3060 Ti</td><td>The <b>chef</b> doing the cooking</td></tr>
-<tr><td><b>VRAM</b></td><td>Memory <em>on</em> the GPU board. Extremely fast, but small. Holds only what the GPU is working on right now</td><td><b>8 GB</b></td><td>The <b>countertop</b> — small, right next to the chef</td></tr>
-<tr><td><b>System RAM</b></td><td>Your computer's main memory. Bigger, slower, further from the GPU</td><td><b>60 GB</b></td><td>The <b>pantry</b> in the next room</td></tr>
-<tr><td><b>Disk</b> (NVMe)</td><td>Permanent storage. Huge, slowest. Where model files live</td><td>148 GB</td><td>The <b>delivery truck</b> outside</td></tr>
+<tr><th>Component</th><th>What it is</th><th>The starting machine</th><th>Analogy</th></tr>
+<tr><td><b>GPU</b> (the chip)</td><td>The processor that does the math — thousands of small cores multiplying numbers in parallel</td><td>RTX 3060 Ti</td><td>The <b>chef</b></td></tr>
+<tr><td><b>VRAM</b></td><td>Memory <em>on</em> the graphics board. Extremely fast, physically close to the chip, and small</td><td><b>8 GB</b></td><td>The <b>countertop</b> — small, right next to the chef</td></tr>
+<tr><td><b>System RAM</b></td><td>The computer's main memory. Much bigger, several times slower, and on the far side of a cable</td><td><b>60 GB</b></td><td>The <b>pantry</b> next door</td></tr>
+<tr><td><b>Disk</b> (NVMe)</td><td>Permanent storage. Huge, slowest by far. Where model files sit at rest</td><td>148 GB</td><td>The <b>delivery truck</b> outside</td></tr>
 </table>
 
-<div class="callout truth"><span class="t">So — VRAM or GPU?</span>
-<p>Both, always, together. <b>VRAM is the GPU's own memory.</b> The GPU chip does <b>all</b> the computing; VRAM is just the workbench it computes on. When we measured your live render it read <b>100% GPU utilization, 198.5 W of 200 W, SM clock 1770 MHz</b> — that is the chip flat-out doing math. A CPU-only run would show the GPU at 0%. The 5 GB of VRAM in use is simply the working set sitting on that workbench.</p></div>
+<div class="callout truth"><span class="t">"Is it the VRAM doing the work, or the GPU?"</span>
+<p>Both, always, together — but they do different jobs. <b>The GPU chip does all the computing. VRAM is the workbench it computes on.</b> Nothing is calculated "in" VRAM; numbers are simply kept there because the chip can reach them fast.</p>
+<p>Measured on a live render: <b>100% GPU utilisation, 198.5 W of a 200 W limit, SM clock 1770 MHz</b>. That is the chip flat out. A CPU-only run would show the GPU at 0%. The 5 GB of VRAM in use was just the working set sitting on the bench.</p></div>
 
-## The problem: the model doesn't fit
+<svg viewBox="0 0 760 262" width="100%" style="max-width:900px" role="img" aria-label="Division of labour: VRAM holds numbers passively while the GPU chip reads them, performs multiply-accumulate arithmetic across thousands of cores, and writes results back. No arithmetic happens inside memory.">
+  <defs>
+    <marker id="v1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="v2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#7aa2ff"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">VRAM STORES  ·  THE CHIP COMPUTES  ·  NOTHING IS CALCULATED INSIDE MEMORY</text>
+  <rect x="2" y="30" width="286" height="176" rx="10" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="145" y="52" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">VRAM — 8 GB</text>
+  <text x="145" y="69" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">just numbers, sitting still</text>
+  <rect x="22" y="82" width="58" height="30" rx="4" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="51" y="102" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="SF Mono,monospace">0.31</text>
+  <rect x="88" y="82" width="58" height="30" rx="4" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="117" y="102" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="SF Mono,monospace">-1.24</text>
+  <rect x="154" y="82" width="58" height="30" rx="4" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="183" y="102" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="SF Mono,monospace">0.07</text>
+  <rect x="220" y="82" width="48" height="30" rx="4" fill="#0d1017" stroke="#2f6b5c"/>
+  <text x="244" y="102" text-anchor="middle" fill="#6f7b8f" font-size="11.5" font-family="SF Mono,monospace">…</text>
+  <text x="22" y="132" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.2">WEIGHTS — THE MODEL</text>
+  <rect x="22" y="140" width="58" height="30" rx="4" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="51" y="160" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="SF Mono,monospace">1.88</text>
+  <rect x="88" y="140" width="58" height="30" rx="4" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="117" y="160" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="SF Mono,monospace">-0.42</text>
+  <rect x="154" y="140" width="58" height="30" rx="4" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="183" y="160" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="SF Mono,monospace">0.95</text>
+  <rect x="220" y="140" width="48" height="30" rx="4" fill="#0d1017" stroke="#2b3f5e"/>
+  <text x="244" y="160" text-anchor="middle" fill="#6f7b8f" font-size="11.5" font-family="SF Mono,monospace">…</text>
+  <text x="22" y="190" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.2">THE VIDEO BEING DENOISED</text>
+  <line x1="292" y1="88" x2="432" y2="88" stroke="#5ee0c0" marker-end="url(#v1)"/>
+  <text x="362" y="80" text-anchor="middle" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">read</text>
+  <line x1="432" y1="164" x2="292" y2="164" stroke="#7aa2ff" marker-end="url(#v2)"/>
+  <text x="362" y="182" text-anchor="middle" fill="#7aa2ff" font-size="11" font-family="Inter,sans-serif">write the answer back</text>
+  <rect x="436" y="30" width="322" height="176" rx="10" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="597" y="52" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">GPU chip</text>
+  <text x="597" y="69" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">thousands of tiny cores, all multiplying at once</text>
+  <rect x="456" y="82" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="502" y="82" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="548" y="82" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="594" y="82" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="640" y="82" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="686" y="82" width="52" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <text x="712" y="100" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="SF Mono,monospace">…</text>
+  <rect x="456" y="116" width="282" height="34" rx="5" fill="#0d1017" stroke="#5ee0c0"/>
+  <text x="597" y="138" text-anchor="middle" fill="#eafff8" font-size="13" font-family="SF Mono,monospace">0.31 × 1.88  +  (-1.24) × (-0.42)  …</text>
+  <rect x="456" y="158" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="502" y="158" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="548" y="158" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="594" y="158" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="640" y="158" width="40" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <rect x="686" y="158" width="52" height="26" rx="3" fill="#0d1017" stroke="#3a4a63"/>
+  <text x="712" y="176" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="SF Mono,monospace">…</text>
+  <rect x="120" y="218" width="520" height="40" rx="8" fill="#0f141d" stroke="#232c3b"/>
+  <text x="380" y="234" text-anchor="middle" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">Measured mid-render: 100% utilisation · 198.5 W of 200 W · 1770 MHz</text>
+  <text x="380" y="250" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">that is the right-hand box working. The left-hand box just holds things.</text>
+</svg>
 
-Here's the squeeze in one picture. The quantized model is ~46 GB. Your countertop (VRAM) is 8 GB.
+### Why the difference matters
 
-```mermaid
-flowchart TB
-    subgraph GPU["🟩 GPU card"]
-      CHIP["GPU chip<br/>(the compute)"]
-      VRAM["VRAM · 8 GB<br/>the workbench"]
-      CHIP <--> VRAM
-    end
-    RAM["System RAM · 60 GB<br/>holds the other ~40 GB of weights"]
-    DISK["NVMe disk · 148 GB<br/>model files at rest"]
-    DISK -->|load once at startup| RAM
-    RAM <==>|stream a slice at a time| VRAM
-    style GPU fill:#0f141d,stroke:#5ee0c0,color:#eafff8
-    style VRAM fill:#14342c,stroke:#5ee0c0,color:#eafff8
-    style CHIP fill:#1a2440,stroke:#7aa2ff,color:#eef3ff
-    style RAM fill:#151b26,stroke:#7aa2ff,color:#eef3ff
-    style DISK fill:#12161f,stroke:#3a4a63,color:#aab4c5
-```
+Speed and distance are the whole story. VRAM sits millimetres from the chip on the same board, and on this card delivers roughly **448 GB/s**. System RAM is across a PCIe cable and an order of magnitude slower to reach. Disk is slower again.
 
-## The fix: dynamic VRAM offload
+So the design goal is never "get everything into VRAM" — it is **make sure whatever the chip needs next is already on the bench.**
 
-ComfyUI does something clever it calls **DynamicVRAM offloading**. Instead of demanding the whole model sit in VRAM, it keeps the bulk of the weights in your 60 GB of RAM and **feeds them to the GPU one layer at a time**, just before that layer is needed. In our logs you can literally see it:
+## The problem: the model does not fit
+
+The quantized model is about **46 GB**. The countertop is **8 GB**. There is no arrangement of those numbers that works directly.
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:900px" role="img" aria-label="Memory hierarchy: a 148 GB disk loads weights once into 60 GB of system RAM, which streams slices across PCIe into 8 GB of VRAM, where the GPU chip computes on them.">
+  <defs>
+    <marker id="h1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="h2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="h3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <rect x="2" y="86" width="150" height="72" rx="8" fill="#12161f" stroke="#3a4a63"/>
+  <text x="77" y="112" text-anchor="middle" fill="#aab4c5" font-size="13" font-family="Inter,sans-serif">NVMe disk</text>
+  <text x="77" y="130" text-anchor="middle" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">148 GB · at rest</text>
+  <text x="77" y="147" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">slowest</text>
+  <line x1="154" y1="122" x2="196" y2="122" stroke="#6f7b8f" marker-end="url(#h1)"/>
+  <text x="175" y="112" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">once</text>
+  <rect x="200" y="76" width="182" height="92" rx="8" fill="#151b26" stroke="#7aa2ff"/>
+  <text x="291" y="104" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">System RAM</text>
+  <text x="291" y="123" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">60 GB</text>
+  <text x="291" y="141" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">holds all ~46 GB</text>
+  <text x="291" y="157" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">of weights</text>
+  <line x1="386" y1="112" x2="450" y2="112" stroke="#5ee0c0" marker-end="url(#h2)"/>
+  <line x1="450" y1="134" x2="386" y2="134" stroke="#5ee0c0" marker-end="url(#h3)"/>
+  <text x="418" y="104" text-anchor="middle" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif">one slice</text>
+  <text x="418" y="152" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">free it</text>
+  <text x="418" y="176" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">PCIe</text>
+  <rect x="454" y="30" width="302" height="190" rx="10" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="605" y="52" text-anchor="middle" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif" letter-spacing="1.4">THE GRAPHICS CARD</text>
+  <rect x="474" y="66" width="262" height="62" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="605" y="90" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">VRAM — 8 GB</text>
+  <text x="605" y="110" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">the workbench · 448 GB/s</text>
+  <line x1="605" y1="132" x2="605" y2="150" stroke="#7aa2ff"/>
+  <line x1="605" y1="150" x2="605" y2="132" stroke="#7aa2ff"/>
+  <rect x="474" y="152" width="262" height="54" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="605" y="175" text-anchor="middle" fill="#eef3ff" font-size="13" font-family="Inter,sans-serif">GPU chip</text>
+  <text x="605" y="194" text-anchor="middle" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">does 100% of the arithmetic</text>
+  <text x="2" y="18" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">FAR AND SLOW  →  NEAR AND FAST</text>
+</svg>
+
+## The fix: stream the weights
+
+The trick is to stop insisting the model lives in VRAM. Keep all the weights in system RAM, and copy each **layer** onto the card just before it is needed. Compute that layer, free the space, fetch the next.
+
+The GPU never holds more than a slice, so peak VRAM depends on the size of one layer — not the size of the model.
+
+<svg viewBox="0 0 760 210" width="100%" style="max-width:900px" role="img" aria-label="The streaming loop: for each layer, copy its weights from RAM into VRAM, compute, write the result, free the slice, and fetch the next layer.">
+  <defs>
+    <marker id="s1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">REPEATED FOR EVERY LAYER — 50 BLOCKS, EVERY STEP</text>
+  <rect x="2" y="30" width="168" height="58" rx="8" fill="#151b26" stroke="#7aa2ff"/>
+  <text x="86" y="54" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">1 · copy in</text>
+  <text x="86" y="72" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">RAM → VRAM</text>
+  <rect x="200" y="30" width="168" height="58" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="284" y="54" text-anchor="middle" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">2 · compute</text>
+  <text x="284" y="72" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">100% util, 198 W</text>
+  <rect x="398" y="30" width="168" height="58" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="482" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">3 · keep result</text>
+  <text x="482" y="72" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">stays in VRAM</text>
+  <rect x="596" y="30" width="162" height="58" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="677" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">4 · free the slice</text>
+  <text x="677" y="72" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">make room</text>
+  <line x1="172" y1="59" x2="196" y2="59" stroke="#5ee0c0" marker-end="url(#s1)"/>
+  <line x1="370" y1="59" x2="394" y2="59" stroke="#5ee0c0" marker-end="url(#s1)"/>
+  <line x1="568" y1="59" x2="592" y2="59" stroke="#5ee0c0" marker-end="url(#s1)"/>
+  <path d="M677,92 L677,124 L86,124 L86,94" fill="none" stroke="#5ee0c0" stroke-dasharray="4 3" marker-end="url(#s1)"/>
+  <text x="380" y="140" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">next layer</text>
+  <rect x="180" y="158" width="400" height="44" rx="8" fill="#241a1a" stroke="#ffb454"/>
+  <text x="380" y="177" text-anchor="middle" fill="#ffd9a0" font-size="12" font-family="Inter,sans-serif">Peak VRAM is set by the biggest single layer</text>
+  <text x="380" y="194" text-anchor="middle" fill="#c9a06a" font-size="11.5" font-family="Inter,sans-serif">not by the size of the model</text>
+</svg>
+
+In the early days of this project that streaming was done by ComfyUI, which called it *DynamicVRAM offloading*. Its logs showed the weights parked in RAM waiting their turn:
 
 ```
 Model MiniMaxH3     ... 19995 MB Staged   (the 20 GB transformer)
 Model MiniMaxH3TE   ... 25882 MB Staged   (the 26 GB text encoder)
 ```
 
-"Staged" means *parked in RAM, ready to stream*. The GPU never holds more than a slice at once — which is why VRAM stayed around 5 GB even though the models total 46 GB.
+*Staged* meant "in RAM, ready to stream". VRAM stayed near 5 GB while 46 GB of model sat behind it. We later dropped ComfyUI entirely and did the streaming ourselves ([ch.48](48-the-pipeline-without-comfyui.html)) — but the mechanism is the same one, and it is the single idea that makes any of this possible.
 
-```mermaid
-sequenceDiagram
-    participant RAM as RAM (60 GB)
-    participant VRAM as VRAM (8 GB)
-    participant GPU as GPU chip
-    loop for each layer of the network
-        RAM->>VRAM: copy layer's weights in
-        VRAM->>GPU: feed weights + data
-        GPU->>GPU: compute (this is the 100% / 198 W)
-        GPU->>VRAM: write result
-        VRAM-->>RAM: free the slice, fetch next
-    end
+<div class="callout warn"><span class="t">Why it works, and why it is slow</span>
+<p>Copying weights across PCIe before every layer is traffic the chip has to wait on. That is the bargain: you trade <b>speed</b> for the ability to run a model far larger than your VRAM. When you see the card sitting at low utilisation mid-render, it is usually not idle — it is waiting for the next slice to arrive.</p></div>
+
+## Following one render, from launch
+
+The mechanism above is easier to believe once you watch it happen. These are real log lines from one of our renders, in order, with what is physically happening at each point.
+
+### Phase 1 — loading, about 3½ minutes
+
+You start the program. Nothing touches the GPU yet.
+
+```
+Loading checkpoint shards: 100%|██████████| 14/14 [02:00<00:00,  8.61s/it]
+[h3den] transformer int8 em RAM em 121s
+[h3den] restante carregado: ['scheduler','audio_scheduler','vae','video_processor','audio_vae']
+[h3den] fase B pronta em 206s
 ```
 
-<div class="callout warn"><span class="t">Why it works but is slow</span>
-<p>Copying weights RAM→VRAM every step is extra traffic the GPU has to wait on. That's the price of the trick: you trade <b>speed</b> for the ability to run a model far bigger than your VRAM. It's the core bargain of budget self-hosting — and it's genuinely impressive that a 33B video model runs on an 8 GB gaming card at all.</p></div>
+Read those carefully, because the important word is in the third line: **`em RAM`** — *in RAM*.
 
-## What this predicts about clip length
+The 46 GB of weights are read from disk in fourteen chunks and placed in **system memory**. Not on the graphics card. If you ran `nvidia-smi` during these two minutes you would see the GPU sitting at roughly **35 MiB used, 0% utilisation** — completely idle while the machine does nothing but shovel files into RAM.
 
-Two things fill VRAM: the model slice being streamed (roughly fixed) and the **video latent** being denoised (grows with resolution × frames, and can't be offloaded as easily). Our measured points:
+<div class="callout spec"><span class="t">Where the model is at each moment</span>
+<table>
+<tr><th>Moment</th><th>Disk</th><th>System RAM</th><th>VRAM</th></tr>
+<tr><td>Before launch</td><td>all 46 GB</td><td>—</td><td>—</td></tr>
+<tr><td>After ~2 min</td><td>all 46 GB (still there)</td><td><b>all 46 GB</b></td><td>~35 MiB (empty)</td></tr>
+<tr><td>During the render</td><td>unchanged</td><td>all 46 GB</td><td><b>one layer at a time</b></td></tr>
+</table>
+<p>The weights are never <em>moved</em> to the GPU. They are <b>copied</b> there in slices, over and over, for the entire render — and the copy is thrown away each time.</p></div>
+
+### Phase 2 — the loop, about 44 hours
+
+Now the card finally does something. This is the whole rest of the render:
+
+```
+[g4]   block 0/50
+[g4]   block 10/50
+[g4]   block 20/50
+```
+
+Fifty blocks make up the model. For each one: copy its weights from RAM to VRAM, compute, discard, fetch the next. When block 49 finishes, that is **one step** — and the whole thing starts again at block 0 for the next step.
+
+Measured on this build: **138 seconds per block**, so about **115 minutes per step**, and 23 steps comes to roughly **44 hours**.
+
+<svg viewBox="0 0 760 150" width="100%" style="max-width:900px" role="img" aria-label="Timeline: loading the model takes about three and a half minutes, while the render loop takes about forty-four hours. Loading is a rounding error by comparison.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE RENDER, TO SCALE</text>
+  <rect x="2" y="30" width="6" height="40" rx="2" fill="#7aa2ff"/>
+  <rect x="10" y="30" width="748" height="40" rx="2" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="384" y="55" text-anchor="middle" fill="#eafff8" font-size="13" font-family="Inter,sans-serif">the denoising loop — 23 steps × 50 blocks — about 44 hours</text>
+  <line x1="5" y1="76" x2="5" y2="96" stroke="#7aa2ff"/>
+  <text x="5" y="112" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">loading: 3½ min</text>
+  <text x="5" y="128" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">(the thin blue sliver on the left)</text>
+  <text x="756" y="112" text-anchor="end" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">then decode: ~2 h</text>
+  <text x="756" y="128" text-anchor="end" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">latent → pixels, once</text>
+</svg>
+
+That picture is the point. **Loading the model is a rounding error.** It happens once and takes minutes; the streaming happens 50 times per step, 23 steps in a row, for two days. Which is why nobody optimises the load and everybody optimises the loop.
+
+### Phase 3 — decode, then the file
+
+When the last step ends, the video decoder runs — once — turning the finished latent into pixels, a chunk of frames at a time:
+
+```
+[vae] clip 1
+[vae] clip 2
+...
+[h3den] audio salvo (32000Hz)
+[h3den] saida: h3-lab/render.mp4
+```
+
+Then an `.mp4` and a `.wav` exist on disk, and the GPU goes back to 35 MiB.
+
+<div class="callout truth"><span class="t">The whole run in four lines</span>
+<ol>
+<li><b>Load</b> — 46 GB of weights from disk into system RAM. Minutes. GPU idle.</li>
+<li><b>Loop</b> — for every step, for every one of 50 blocks: copy a slice to VRAM, compute, throw it away. Hours to days. GPU pinned.</li>
+<li><b>Decode</b> — expand the finished latent into real pixels. Once.</li>
+<li><b>Write</b> — save the video and audio files.</li>
+</ol>
+<p>If you remember one thing: <b>the model lives in RAM and only visits VRAM.</b> The graphics card never holds it.</p></div>
+
+## What this chapter originally predicted — and what actually happened
+
+Written when this project ran on one card, this chapter made a forecast. It is worth keeping, because it turned out to be wrong in an instructive way.
+
+> *"15 s (H3's max) — likely near/over 8 GB, may not fit. On this card, short clips are the sweet spot. Long, high-res video is where you'd want a 24 GB+ GPU."*
+
+<div class="callout truth"><span class="t">The verdict, measured later</span>
+<table>
+<tr><th></th><th>Predicted here</th><th>What actually happened</th></tr>
+<tr><td>15 s at high resolution</td><td>"may not fit"</td><td><b>Rendered at native 1280×704</b></td></tr>
+<tr><td>Hardware needed</td><td>"a 24 GB+ GPU"</td><td><b>Three 8 GB cards</b></td></tr>
+<tr><td>Cost</td><td>—</td><td>44 hours</td></tr>
+</table>
+<p>The prediction was right that <b>8 GB of VRAM cannot hold it</b>, and wrong that this made it impossible. What changed was not the hardware's capacity but how the work was divided across it — splitting one video's activations across three cards (<a href="45-three-gpu-sequence-parallelism.html">ch.45</a>). The reasoning was sound; the assumption that one card must hold one render was not.</p></div>
+
+This is the pattern worth taking from the chapter: **memory limits are usually about arrangement, not capacity.** Twice more in this guide something looked like a hardware wall and turned out to be a question of where data was being kept ([ch.46](46-the-first-15-seconds.html)).
+
+## What fills VRAM during a render
+
+Two things, and only one of them can be streamed away.
+
+1. **The model slice** — roughly fixed, because it is one layer at a time.
+2. **The video latent** — the thing being denoised. It grows with resolution × frames, must stay resident for the whole step, and **cannot be offloaded the way weights can.**
+
+That second item is the real ceiling. Measured points from this build:
 
 <table>
-<tr><th>Clip</th><th>Resolution × frames</th><th>VRAM used</th><th>Render time</th></tr>
-<tr><td>Smoke test</td><td>512×320 × 5 frames (0.2 s)</td><td>~7 GB</td><td>~57 s (warm)</td></tr>
-<tr><td>Ocean demo</td><td>768×448 × 73 frames (3.0 s)</td><td>~5–7 GB</td><td><b>348 s (5.8 min)</b></td></tr>
-<tr><td>15 s (H3's max)</td><td>~768p × ~360 frames</td><td>likely near/over 8 GB</td><td>much longer — may not fit</td></tr>
+<tr><th>Clip</th><th>Resolution × frames</th><th>Render time</th></tr>
+<tr><td>Smoke test</td><td>512×320 × 5 frames (0.2 s)</td><td>~57 s</td></tr>
+<tr><td>Ocean demo</td><td>768×448 × 73 frames (3.0 s)</td><td>348 s (5.8 min)</td></tr>
+<tr><td>Short 720p</td><td>1280×704 × 124 frames (5.2 s)</td><td>55 min</td></tr>
+<tr><td>Long 720p</td><td>1280×704 × 345 frames (14.4 s)</td><td><b>44 h</b></td></tr>
 </table>
 
-<div class="callout danger"><span class="t">The honest ceiling of this box</span>
-<p>Remember attention's quadratic cost from Chapter 1. Going from 73 frames to ~360 frames (15 s) isn't 5× harder — it's closer to <b>25× harder</b> for the attention layers, and the latent may exceed 8 GB VRAM. On this card, <b>short clips (a few seconds) are the sweet spot.</b> Long, high-res video is where you'd want a 24 GB+ GPU or a rented cloud one.</p></div>
+Compare the last two rows: 2.8× the frames cost **48× the time**. That is attention's quadratic cost from [Chapter 1](01-what-is-genai.html) showing up as wall-clock, plus the overhead of splitting across cards. It is why the honest advice on this hardware is still *short clips, or long clips at lower resolution then upscaled* — not because longer is impossible, but because of what it costs ([ch.47](47-the-scorecard.html)).
 
-Next: what the model itself is actually made of — the encoder, the 33B transformer, and the two VAEs that separately produce your picture and your sound.
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">GPU chip</span><span class="badge">VRAM</span><span class="badge">system RAM</span><span class="badge">NVMe</span><span class="badge">PCIe</span><span class="badge">bandwidth</span><span class="badge">offloading</span><span class="badge">streaming</span><span class="badge">staged</span><span class="badge">utilisation</span><span class="badge">working set</span><span class="badge">peak VRAM</span></p>
+<p>If those feel solid, the model itself will make sense.</p></div>
+
+Next: what the model itself is made of — the encoder, the 33B transformer, and the two separate decoders that produce picture and sound.
 </script>
 <script src="assets/marked.min.js"></script>
-<script src="assets/mermaid.min.js"></script>
+<script src="assets/katex.min.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

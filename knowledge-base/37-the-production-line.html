@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>37 · The Production Line</title>
+<meta name="description" content="Three 8 GB cards are not three copies of one worker — they are three stations on a line: two write the picture, one polishes it in parallel, and the cut is a human step.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 37 · Three cards, one music video — render, filter, edit</span>
+
+# The Production Line
+
+<p class="lede">A production line means no single card does the whole job: two cards write the picture, the third polishes each finished clip while the first two are already rendering the next one, and a final station cuts the polished shots to a song. One prompt in, one finished music-video shot out — an assembly line, not a magic button.</p>
+
+The design comes out of a single ratio. Denoising one 15-second clip at 832×480 costs about **2.6 hours** at 49 steps ([ch.47](47-the-scorecard.html)). Grading it, cutting it and laying a soundtrack under it costs **minutes**. Rendering is roughly **99% of the wall-clock** ([ch.30](30-the-render-live.html)), and everything downstream of it is nearly free.
+
+That ratio is not a curiosity, it is the whole architecture. On any assembly line, throughput is set by the slowest station and nothing else. A station that runs faster than the one feeding it is invisible — its work disappears into time that was already being spent. So the correct question is never "how do we make each stage fast," it is **"which stage is the bottleneck, and can everything else be hidden behind it?"**
+
+<svg viewBox="0 0 760 250" width="100%" style="max-width:920px" role="img" aria-label="A four-station production line. A prompt enters an encode station measured in minutes, then a render station on GPU zero and one measured in hours which is the bottleneck, then a filter station on GPU two measured in minutes, then an edit station on the CPU measured in minutes, producing the finished shot. The render station is highlighted as the only station that sets throughput.">
+  <defs>
+    <marker id="pl1" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">FOUR STATIONS  ·  ONE OF THEM SETS THE CLOCK</text>
+  <rect x="4" y="72" width="112" height="68" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="60" y="98" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">the prompt</text>
+  <text x="60" y="118" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">a text file</text>
+  <line x1="118" y1="106" x2="142" y2="106" stroke="#6f7b8f" marker-end="url(#pl1)"/>
+  <rect x="146" y="72" width="128" height="68" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="210" y="96" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">encode</text>
+  <text x="210" y="114" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">26 GB, its own process</text>
+  <text x="210" y="132" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">minutes, once per prompt</text>
+  <line x1="276" y1="106" x2="300" y2="106" stroke="#6f7b8f" marker-end="url(#pl1)"/>
+  <rect x="304" y="56" width="164" height="100" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="386" y="82" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">render — GPU 0 + 1</text>
+  <text x="386" y="102" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">denoise, 50 blocks a step</text>
+  <text x="386" y="120" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">single-card or ring-2</text>
+  <text x="386" y="142" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">HOURS — the bottleneck</text>
+  <line x1="470" y1="106" x2="494" y2="106" stroke="#6f7b8f" marker-end="url(#pl1)"/>
+  <rect x="498" y="72" width="128" height="68" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="562" y="96" text-anchor="middle" fill="#eef3ff" font-size="12" font-family="Inter,sans-serif">filter — GPU 2</text>
+  <text x="562" y="114" text-anchor="middle" fill="#9fb6e8" font-size="11" font-family="Inter,sans-serif">upscale, face restore</text>
+  <text x="562" y="132" text-anchor="middle" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif">minutes — hidden</text>
+  <line x1="628" y1="106" x2="652" y2="106" stroke="#6f7b8f" marker-end="url(#pl1)"/>
+  <rect x="656" y="72" width="100" height="68" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="706" y="96" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">edit</text>
+  <text x="706" y="114" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">cut + song</text>
+  <text x="706" y="132" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">minutes</text>
+  <rect x="4" y="180" width="752" height="48" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="6" y="182" width="4" height="44" fill="#232c3b"/>
+  <rect x="304" y="182" width="164" height="44" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="386" y="209" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">99% of the wall-clock</text>
+  <text x="20" y="209" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">everything else</text>
+  <text x="500" y="209" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">everything else</text>
+</svg>
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p>No single card does the whole job. <b>GPU 0 and 1 write the picture, GPU 2 polishes it, and the polished clips get cut to a real song.</b> One prompt in, one finished shot out. The two cheap stations are free because they hide behind the expensive one.</p></div>
+
+## Each card's job
+
+The three 8 GB cards are not three copies of the same worker — they are three stations with different jobs. Rendering is the expensive stage, so it gets two cards when a shot is long. The third card runs the finishing filter in parallel, so it is never idle. Then a human, or a script, does the cut.
+
+| Station | Card(s) | The job | Why here |
+|---|---|---|---|
+| **The renderer** | **GPU 0 + 1** | Denoise the clip. **Single-card** for shots up to about **8.7 s** (209 frames); **ring-2 context parallelism** for longer takes, up to roughly **14 s**. The engine picks which, from the requested duration. | Rendering is 99% of the wall-clock ([ch.30](30-the-render-live.html)), and ring-2 is the one multi-card configuration that actually ran end to end on a box with no NVLink ([ch.36](36-splitting-the-video-cp.html)). |
+| **The filter** | **GPU 2** | Every finished clip passes through an upscale and face-restore pass. An inline conditioning stage, not an afterthought. | The third card would otherwise sit idle through a ring-2 render. Given the buffer job, the line has no dead station. |
+| **The editor** | CPU / ffmpeg | Cut the polished clips together and lay a real song over them, muting the model's own generated audio. | A music video is an *edit* with a soundtrack. The model produces shots; the timeline and the song are the human half. |
+
+## Why the renderer needs two cards, and only sometimes
+
+The split between "one card" and "two cards" is not a preference, it is a memory threshold, and it is worth understanding because it is the only decision the line makes on its own.
+
+Activation memory scales with the number of tokens in the packed sequence, and tokens scale with $H \times W \times \text{frames}$. On one 8 GB card the measured ceiling is about **209 frames**, which at 24 fps is **8.7 seconds**. Past that the card runs out — not of weights, which stream in one block at a time, but of the linear transients that grow with sequence length ([ch.34](34-open-use-close-flashattention.html)).
+
+Ring-2 splits that sequence across two cards, halving what each has to hold ([ch.36](36-splitting-the-video-cp.html)). Two cards therefore do not render *faster*; they render *longer*. This is the distinction the whole multi-card story turns on, and it is easy to state backwards:
+
+<div class="callout spec"><span class="t">Capacity, not speed</span>
+<p>Ring-2 is a <b>capacity</b> mechanism. Two cards holding half a sequence each buy a take that no single card can hold; they do not shorten the clock. Meanwhile two cards rendering two <em>different</em> shots side by side is a <b>throughput</b> mechanism, and that one really does halve the wall-clock for a batch. Same hardware, two completely different wins, and the right choice depends entirely on whether the job is one long take or many short ones.</p></div>
+
+## The renderer picks its own configuration
+
+The line takes a duration and derives everything else. The path is fixed arithmetic, with no hand-set parameters anywhere.
+
+**Duration → frames → configuration.** Frames follow H3's schedule $F = 17n + 5$, giving 5, 22, 39, 56 and so on, capped at **360 frames**, or about 15 seconds. The 17 in that formula is not arbitrary: it is the same 17 that appears in the video VAE's configuration as `clip_length`, the number of frames the decoder handles as one temporal clip ([ch.03](03-how-h3-works.html)). The frame schedule is the decoder's own granularity, surfacing at the top of the pipeline.
+
+<svg viewBox="0 0 760 236" width="100%" style="max-width:920px" role="img" aria-label="A ladder converting a requested duration into a configuration. Durations up to eight point seven seconds, or 209 frames, map to a single card with no NCCL. Durations from there to about fourteen seconds map to ring-2 across GPU zero and one. Beyond 360 frames, about fifteen seconds, is the model's trained ceiling and nothing maps there.">
+  <defs>
+    <marker id="pl2" markerWidth="8" markerHeight="8" refX="7" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">DURATION IN  ·  CONFIGURATION OUT  ·  NOTHING HAND-SET</text>
+  <rect x="4" y="34" width="180" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="94" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">a duration is asked for</text>
+  <text x="94" y="72" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">3 s, 5 s, 10 s, 15 s</text>
+  <line x1="186" y1="57" x2="212" y2="57" stroke="#5ee0c0" marker-end="url(#pl2)"/>
+  <rect x="216" y="34" width="180" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="306" y="54" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">frames: F = 17n + 5</text>
+  <text x="306" y="72" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">5, 22, 39, 56, ... max 360</text>
+  <line x1="398" y1="57" x2="424" y2="57" stroke="#5ee0c0" marker-end="url(#pl2)"/>
+  <rect x="428" y="34" width="180" height="46" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="518" y="61" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">tokens, then a config</text>
+  <rect x="4" y="106" width="368" height="60" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="24" y="130" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">up to 209 frames — about 8.7 s</text>
+  <text x="24" y="152" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">SINGLE CARD. No NCCL, no ring, no second process.</text>
+  <rect x="388" y="106" width="368" height="60" rx="8" fill="#1a2440" stroke="#7aa2ff"/>
+  <text x="408" y="130" fill="#eef3ff" font-size="12.5" font-family="Inter,sans-serif">209 to about 14 s</text>
+  <text x="408" y="152" fill="#9fb6e8" font-size="11.5" font-family="Inter,sans-serif">RING-2 across GPU 0 + 1. The sequence splits in half.</text>
+  <rect x="4" y="180" width="752" height="48" rx="8" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="24" y="204" fill="#ffdede" font-size="12.5" font-family="Inter,sans-serif">past 360 frames — about 15 s</text>
+  <text x="24" y="222" fill="#c98f8f" font-size="11.5" font-family="Inter,sans-serif">Nothing maps here. This is the model's trained range, not a memory limit — no hardware changes it.</text>
+</svg>
+
+<div class="callout warn"><span class="t">The ceiling at the bottom of that diagram is a different kind of wall</span>
+<p>Every other limit in this project turned out to be an engineering wall that eventually moved. This one does not. H3 was trained on <b>4 to 15 second</b> clips, and asking for thirty seconds does not fail on memory — it fails because the model never learned what thirty seconds looks like ([ch.03](03-how-h3-works.html)). It drifts, loops, or quietly loses the thread. Longer films are made by cutting clips together, never by asking for longer clips.</p></div>
+
+## The filter station, and why it is free
+
+Station three is where this line stops being a script and becomes a design. The idle card is given a **filter stage** — the same role a buffer amplifier plays in a circuit ([ch.16](16-multi-gpu-and-nvlink.html), [ch.32](32-thinking-like-a-circuit.html)): a stage that every signal passes through to come out cleaner, running at whatever rate the previous stage produces.
+
+The word "buffer" is doing real work in that sentence. A buffer's defining property is not that it improves the signal, it is that it *keeps up*. If the filter took longer than the render, it would become the new bottleneck and the whole gain would evaporate. It does not: a finished clip streams from the renderer into GPU 2 for an upscale and refine pass while the renderer has already started the next shot. The polish costs minutes against hours, so it costs nothing at all.
+
+<svg viewBox="0 0 760 216" width="100%" style="max-width:920px" role="img" aria-label="A timeline showing three shots rendering back to back on GPU zero and one, each taking hours, while GPU two filters each finished shot in minutes during the following render. The total wall-clock equals the render time alone, because the filter work always fits inside the next render.">
+  <text x="4" y="16" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE FILTER HIDES INSIDE THE NEXT RENDER</text>
+  <text x="4" y="62" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">GPU 0 + 1</text>
+  <rect x="96" y="44" width="204" height="42" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="304" y="44" width="204" height="42" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <rect x="512" y="44" width="204" height="42" rx="5" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="198" y="70" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">render shot 1</text>
+  <text x="406" y="70" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">render shot 2</text>
+  <text x="614" y="70" text-anchor="middle" fill="#eafff8" font-size="11.5" font-family="Inter,sans-serif">render shot 3</text>
+  <text x="4" y="130" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">GPU 2</text>
+  <rect x="96" y="112" width="204" height="42" rx="5" fill="#12161f" stroke="#232c3b" stroke-dasharray="4 3"/>
+  <rect x="304" y="112" width="52" height="42" rx="5" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="356" y="112" width="152" height="42" rx="5" fill="#12161f" stroke="#232c3b" stroke-dasharray="4 3"/>
+  <rect x="512" y="112" width="52" height="42" rx="5" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="564" y="112" width="152" height="42" rx="5" fill="#12161f" stroke="#232c3b" stroke-dasharray="4 3"/>
+  <text x="198" y="138" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">nothing to filter yet</text>
+  <text x="330" y="138" text-anchor="middle" fill="#eef3ff" font-size="10.5" font-family="Inter,sans-serif">filter 1</text>
+  <text x="538" y="138" text-anchor="middle" fill="#eef3ff" font-size="10.5" font-family="Inter,sans-serif">filter 2</text>
+  <text x="432" y="138" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">idle</text>
+  <text x="640" y="138" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">idle</text>
+  <line x1="96" y1="178" x2="716" y2="178" stroke="#5ee0c0"/>
+  <line x1="96" y1="172" x2="96" y2="184" stroke="#5ee0c0"/>
+  <line x1="716" y1="172" x2="716" y2="184" stroke="#5ee0c0"/>
+  <text x="406" y="200" text-anchor="middle" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">total wall-clock = render time. The polish is invisible.</text>
+</svg>
+
+It is also a real production step with a measurable output — sharper faces, higher effective resolution — and not a cosmetic afterthought. It matters because framing and face size are the levers that actually move perceived quality on this box ([ch.17](17-what-actually-improves-quality.html)), and an upscale pass is the cheapest way to buy back pixels on a face that was rendered small.
+
+<div class="callout warn"><span class="t">A modest upscale, not a heroic one</span>
+<p>The filter's value falls off with its own ambition. A 1.54× lift from 832×480 to 720p preserves detail; a 2.5× lift starts inventing it and goes soft ([ch.17](17-what-actually-improves-quality.html)). The station's job is to finish a well-sampled render, not to rescue an under-sampled one — no filter can add sampling that was never paid for.</p></div>
+
+## Long video is editing, not generation
+
+The tempting mental model is to ask the model for a two-minute video. No model does that in one pass — not H3, not any of them. The frame cap limits **shot length** and says nothing at all about **final length**.
+
+<div class="callout truth"><span class="t">A two-minute video is an edit of short clips</span>
+<p>A finished two-minute music video is not one generation. It is <b>a montage of many short shots, cut on a timeline.</b> That is what every "long video" pipeline has ever been: generate short, then edit. The 360-frame ceiling limits how long <em>one continuous take</em> can run, and nothing about the length of the film assembled from those takes.</p>
+<p>So the edge this line has is not "longer generations." It is <b>cleaner shots</b>, from the filter station, and <b>up to roughly 14-second continuous takes</b>, from ring-2 — longer unbroken motion than a montage of 3-second clips can fake, then cut to the beat.</p></div>
+
+The counterpart to this is the honest limitation. Chaining clips holds a *scene* together well, but a photoreal human face visibly drifts between clips, because nothing anchors identity across independent renders ([ch.33](33-long-video-small-card.html)). Stylised characters hold far better. The line does not solve continuity; it just makes the seams the only place continuity has to be managed.
+
+## When the line collapses into one station
+
+There is an honest update to make, because the engine that came after this chapter changes the picture for one class of job.
+
+When the shot is a hero shot — native **1280×704 at 345 frames**, the full 15 seconds at 720p — the render no longer fits on one card or two. It takes **all three**, through hand-built sequence parallelism ([ch.45](45-three-gpu-sequence-parallelism.html)), and it is slow: about **6600 seconds per step**, which is roughly **44 hours** at 23 steps ([ch.47](47-the-scorecard.html)).
+
+<div class="callout danger"><span class="t">Three stations become one</span>
+<p>With all three cards committed to a single sequence, there is no spare card to run the filter and no next shot to overlap with. The line degenerates into a single station running for two days. Nothing is broken — the job simply stopped being a <em>line</em> job. Batch work wants a line; one enormous take wants the whole machine.</p>
+<p>This is also the practical argument for not doing it. The same 15 seconds rendered at 832×480 with 49 steps costs about <b>2.6 hours</b> of denoise, and a 1.54× upscale takes it to 720p — roughly <b>35× cheaper</b> for a difference most viewers cannot see ([ch.47](47-the-scorecard.html)). Native 720p × 15 s is a proven capability, not a workflow.</p></div>
+
+## What each station actually costs
+
+Every row measured on the box, denoise only, excluding VAE decode:
+
+| Configuration | s/step | 23 steps | 49 steps |
+|---|---|---|---|
+| 512×288 × 345 frames | 81 s | 0.5 h | 1.1 h |
+| 1280×704 × 124 frames | 143 s | 0.9 h | 1.9 h |
+| 832×480 × 345 frames | 193 s | 1.2 h | **2.6 h** |
+| 1280×704 × 345 frames, three cards sharded | **6600 s** | **42 h** | **90 h** |
+
+Add roughly 25 to 50 minutes of VAE decode to each. Then add the filter and the edit, which are minutes, and which the line hides anyway.
+
+<div class="callout spec"><span class="t">Read the last row against the third</span>
+<p>Going from 832×480×345 to 1280×704×345 is <b>2.26× the tokens</b>. Attention is $O(S^2)$, so quadratic scaling alone predicts about <b>5×</b> the time. The measured figure is <b>34×</b>. The three-card sharded path therefore carries roughly a <b>7× overhead beyond the mathematics</b> — hand-rolled ring attention in Python loops, plus a copy of every block to every card on every step. It buys memory and sells speed, deliberately ([ch.45](45-three-gpu-sequence-parallelism.html)).</p></div>
+
+<div class="callout truth"><span class="t">The takeaways</span>
+<ol>
+<li><b>Three cards, three jobs.</b> GPU 0 and 1 render, GPU 2 filters, the CPU edits. A production line, not one large GPU.</li>
+<li><b>The bottleneck sets the clock.</b> Rendering is about 99% of the wall-clock, so every downstream station is free as long as it keeps up.</li>
+<li><b>The renderer picks its own configuration.</b> Up to about 8.7 s runs on a single card; longer takes switch to ring-2 automatically, decided by the requested duration.</li>
+<li><b>Duration derives everything.</b> Duration to frames via $17n+5$, capped at 360 — and the 17 is the video VAE's own <code>clip_length</code>.</li>
+<li><b>Ring-2 is capacity, not speed.</b> Two cards render <em>longer</em> takes, not faster ones. Two cards rendering two different shots is the throughput win instead.</li>
+<li><b>Long video is editing, not generation.</b> The cap limits the shot, never the film. The unsolved part is identity drift across cuts.</li>
+<li><b>The idle card earns its keep</b> as an inline buffer stage — a modest upscale and face restore, hidden inside the next render.</li>
+<li><b>One hero shot collapses the line.</b> Native 720p × 15 s takes all three cards for about 44 hours, and the 832×480 route with an upscale is roughly 35× cheaper for a difference most viewers cannot see.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">production line</span><span class="badge">station</span><span class="badge">bottleneck</span><span class="badge">throughput vs capacity</span><span class="badge">buffer / filter stage</span><span class="badge">ring-2</span><span class="badge">frame schedule 17n+5</span><span class="badge">clip_length</span><span class="badge">shot length vs film length</span><span class="badge">identity drift</span></p>
+<p>If those feel solid, the next chapter runs the whole line for real.</p></div>
+
+Next: one prompt file, sixteen shots, and every step from encode to a graded, scored film — with the measured cost of each.
+
+<p class="small">The ring-2 configuration behind the long takes is <a href="36-splitting-the-video-cp.html">ch.36</a>; chunk-and-chain, the other way past the shot-length wall, is <a href="33-long-video-small-card.html">ch.33</a>; the relay of a single render, and why it is the expensive station, is <a href="30-the-render-live.html">ch.30</a>; why three cards do not make one fast render, and the buffer-stage lens, is <a href="16-multi-gpu-and-nvlink.html">ch.16</a>; the three-card sharded path that collapses the line is <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; the full measured ledger is <a href="47-the-scorecard.html">ch.47</a>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>44 · Building Dalang</title>
+<meta name="description" content="The build log of our own inference engine: a golden reference, an online softmax proven exact, a two-GPU ring that renders identical video, and six memory walls knocked down until a full 15-second clip fits on one 8 GB card.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 44 · The build log — proving the engine one measured brick at a time</span>
+
+# Building Dalang — the Log
+
+<p class="lede">Chapter 43 designed the engine. This is the log of actually building it — every stage a real experiment with a real number, checked against a golden reference before we scale. No hand-waving: where it passes, there's a measurement; where it broke, we say what broke and why.</p>
+
+<div class="callout truth"><span class="t">The method</span>
+<p><b>Correctness before speed.</b> We captured a <em>golden reference</em> — the exact tensor H3's transformer outputs for a fixed input — and every stage of Dalang must reproduce it before we're allowed to move on. And we build the hard part (the ring) <b>in isolation first</b>: online softmax alone, then the 2-GPU ring alone, each proven on tiny tensors. So when integration breaks, we already know the bug is in the <em>wiring</em>, not the <em>math</em>. The plan lives in <code>planning/DALANG-ENGINE-BUILD.md</code>; the running tracker is <code>source/dalang/TASKS.md</code>.</p></div>
+
+## Phase A — foundations
+
+**A1 · One CPU process holds the int8 model.** We loaded the int8 H3 transformer in a single process and watched system RAM go from **2.6 → 33.5 GB** — a **one-copy footprint of 30.8 GB** (33.1 B parameters, 50 blocks, 139 s to load). This is the whole Dalang RAM thesis, measured:
+
+<div class="callout spec"><span class="t">Why 30.8 GB is the number that matters</span>
+<p>One shared copy costs ~31&nbsp;GB <em>regardless of how many GPUs use it</em>. Compare that to <code>torchrun</code>, which spawns one process per GPU and therefore replicates the model: <b>2× ≈ 66&nbsp;GB, 3× ≈ 99&nbsp;GB</b> — and 99&nbsp;GB is exactly the ring-3 RAM wall that SIGKILL'd us ([ch.42](42-why-two-models.html)). A single dalang process makes ring-3 <em>RAM-feasible</em>. <br><em>Footnote:</em> the process's RSS read 90&nbsp;GB, but that's inflated by the mmap'd fp16 <em>source</em> safetensors — file-backed, reclaimable, not real added RAM. The honest footprint is the 30.8&nbsp;GB system-used delta.</p></div>
+
+**A2 / A3 · The golden reference.** We hooked the transformer's first forward and captured both its inputs and its output. The forward signature — the exact 12 keyword arguments H3's transformer is called with — is:
+
+```
+hidden_states, audio_hidden_states, encoder_hidden_states, timestep, timestep_indices,
+attention_kwargs, return_dict, position_ids, token_tags, video_indices, audio_indices, text_indices
+```
+
+and the saved reference output `ref_out.pt` is a tensor of shape **[1, 14430, 96], float32**. That tensor is now the truth every later stage is measured against.
+
+## Stage 1 (Phase B) — we own the forward
+
+We wrote our own script that loads the model and calls the transformer *ourselves* — outside diffusers' pipeline wrapper, feeding it the captured `ref_in` — and compared the output to `ref_out.pt`.
+
+<div class="callout truth"><span class="t">Bit-for-bit: max diff 0.000e+00</span>
+<p>Not "close." <b>Identical.</b> Our own code, driving H3's transformer directly, produced the exact same tensor. We now genuinely own the forward path — and that exact zero becomes a <b>strict correctness anchor</b>: from here on, any stage whose output isn't ~0 against the reference has a <em>real</em> bug, hunted on this tiny case with no full render needed.</p></div>
+
+## Phase C — the ring, built in isolation
+
+**C1 · Read H3's attention.** The flow inside each block: QKV projection → split into heads → RMSNorm on q and k → rotary on q and k → attention ($\text{softmax}(QK^\top/\sqrt{d})\,V$, **non-causal, no mask, full**) → out-projection.
+
+<div class="callout spec"><span class="t">The finding that makes the ring tractable</span>
+<p><b>Only the softmax step needs cross-GPU communication.</b> QKV projection, the norms, rotary, and the out-projection are all <em>per-sequence-slice local</em> — each card does them on its own chunk with zero talk. So the entire parallelization job is: replace <em>one</em> function (the attention) with a ring. And because H3's attention is full and non-causal, there's no causal-masking headache — it's the clean Ring Attention case. (Aside: diffusers' own CP rings the attention too, but via multi-<em>process</em> <code>torch.distributed</code> — which is what forces the weight replication and the RAM wall. Dalang is single-process, so we write our own device→device ring.)</p></div>
+
+**C2 · Online softmax, proven exact.** Before touching two GPUs, we proved the one piece of real math — a blockwise attention carrying a running maximum and running denominator — matches PyTorch's own SDPA on random tensors:
+
+- **fp32: max diff 8.9e-7** — exact, across three block sizes including a non-divisible sequence length.
+- **bf16: max diff 7.8e-3** — which is *exactly* one bf16 ULP.
+
+<div class="callout warn"><span class="t">The bf16 lesson (and the fix)</span>
+<p>bf16's representable spacing at magnitude ~1 is $2^{-7}\approx 0.0078$ — so a 7.8e-3 difference is <b>one rounding step of the output format</b>, the physical floor, not a math error. But we also learned the right way to build it: <b>accumulate the running max, denominator, and output in fp32 internally</b> (exactly what FlashAttention does), and cast back to the input dtype only at the very end. Chase the "why," don't just loosen the tolerance.</p></div>
+
+**C3 · The 2-GPU ring, on real silicon.** We split the sequence across `cuda:0` and `cuda:1`, rotated the K/V slices **device→device over PCIe**, accumulated the online softmax over two passes, and reassembled — then compared to full-sequence SDPA:
+
+<div class="callout truth"><span class="t">fp32 2.4e-6 · bf16 4.9e-3 (1 ULP) · PASS</span>
+<p>Two cards computing <b>one</b> attention together — the sequence split, the K/V ringed between devices, the result identical to computing it whole. This is context parallelism <b>in a single process</b>: no <code>torchrun</code>, no weight replication. The core mechanism of the Dalang engine, working, ours.</p></div>
+
+**C4 · Wiring the ring into the real model.** We monkey-patched H3's attention to route through our ring and ran the *full* 50-block transformer, to diff against `ref_out.pt`.
+
+<div class="callout warn"><span class="t">We rediscovered why FlashAttention exists</span>
+<p>The first attempt <b>OOM'd</b> — our naive ring tried to form the whole score matrix: query-half × key-half × 56 heads ≈ a <b>~6&nbsp;GB</b> tensor. That is precisely the thing FlashAttention was invented to avoid: never materialize the full $QK^\top$. Our online softmax already <em>is</em> that mechanism — we'd simply fed it the whole half-slice as one block. The fix: <b>tile the keys</b> (512 at a time), so the scores are $(S_q, 512)$ instead of $(S_q, 7215)$. With that, the forward ran end-to-end — but the diff was **max 0.34, mean 0.030: <em>close, not bit-for-bit</em>.** Something was off. And by our own method, we knew the ring <em>math</em> was already proven (C2/C3) — so the bug had to be in the wiring.</p></div>
+
+**C4b · Isolate the bug on one real block.** We compared our ring against H3's *original* attention for a single real block — the small text-refiner, sequence length 186. Diff: **max 0.625, mean 0.018** — far above one bf16 ULP (7.8e-3). So it was a genuine bug, not harmless rounding. Small mean + huge max is the fingerprint of a *precision* outlier: a handful of elements catastrophically wrong.
+
+**C4c · Pin the cause — a 3-way precision test.** On that same block we compared four things:
+
+- bf16-ring vs original: **max 0.625**
+- **fp32-ring vs original: max 0.25, mean 0.001** — computing the scores in fp32 fixed the mean **18×**
+- plain PyTorch SDPA vs original: **exactly 0.000** — so H3's attention *is* plain scaled-dot-product; no custom kernel to chase.
+
+<div class="callout spec"><span class="t">Root cause: bf16 QKᵀ; and what the residual 0.25 actually is</span>
+<p>Our ring did the $QK^\top$ matmul in <b>bf16</b>; FlashAttention accumulates that same matmul in <b>fp32</b>. On well-behaved random tensors (C3) the difference was 1 ULP, but real activations have wide dynamic range, so bf16 score rounding blows up on outliers. <b>Fix: compute the scores in fp32.</b> And the <em>remaining</em> 0.25 max on the fp32 ring? That is <b>one bf16 ULP at magnitude ~32</b> — because bf16's spacing scales with the value ($2^{-7}$ of the magnitude), one rounding step of a large output element <em>is</em> 0.25. mean 0.001 confirms nearly every element is exact. The fp32-score ring is correct.</p></div>
+
+<div class="callout truth"><span class="t">Why it can never be bit-for-bit against flash — and the right yardstick</span>
+<p>Stage 1 hit an exact <b>0.000</b> because it called the <em>same</em> flash kernel. Our ring is a <b>different, equally valid</b> bf16 attention — it matches flash to ~1 ULP <em>per block</em>, but those 1-ULP differences <b>compound over 50 residual layers</b> to an end-to-end mean of ~0.017. That is not a bug; it is inherent to bf16 plus a different implementation. So a raw-tensor tolerance is the <em>wrong</em> yardstick for a new implementation. The right one is: <b>does the rendered video look the same?</b> — exactly the int8≈fp16 plateau, where sub-0.02 tensor differences are visually invisible.</p></div>
+
+**C5 · Render validation — the real Stage-2 sign-off.** We rendered the same scene with the ring vs the normal engine (same seed, same steps). It needed the *other* half of flash tiling: in the full-denoise context GPU&nbsp;0 also holds the VAE, latents, and audio (~6.9&nbsp;GB), so we had to **tile the queries too** — scores as $(1024, 512)$ tiles — bringing peak VRAM to **5.7&nbsp;GB, which fits.** During the render, **GPU&nbsp;1 held 1.4&nbsp;GB — the ring's far sequence-slice, live**: H3's attention genuinely running split across two cards in a real render.
+
+<div class="callout truth"><span class="t">Perceptually identical · PSNR 37.6 dB · STAGE 2 DONE</span>
+<p>The two clips — one rendered by our 2-GPU ring, one by the normal flash engine — are <b>indistinguishable to the eye</b>. PSNR 37.6&nbsp;dB, with the only measurable differences confined to imperceptible background neon-bokeh noise (the ~0.017 velocity difference washing out through the denoise — the plateau, exactly). <b>We built a single-process, two-GPU, context-parallel inference engine — our own code — and proved it renders correct video.</b></p></div>
+
+## Phase D: the RAM win was free — but the frame wall wasn't (yet)
+
+With the ring proven, the next target was the memory payoff: fit clips a single card can't. Phase&nbsp;D was meant to be the hard part — sharing one model across the cards so ring-3 wouldn't blow up RAM. It turned out to be free.
+
+<div class="callout truth"><span class="t">Phase D was won by architecture, not work</span>
+<p>Our engine is <b>single-process</b>, so the model loads <b>once</b> — 31&nbsp;GB, exactly what A1 measured. The per-process weight replication that killed <code>torchrun</code> ring-3 (3×31 ≈ 93&nbsp;GB → OOM) <b>simply doesn't exist for us</b>: one process, one copy, no matter how many GPUs the ring uses. So ring-3 is RAM-feasible <em>by construction</em> — Phase D is a property of the design, not a task to grind.</p></div>
+
+So we went straight for the payoff test: render `cp10` — **243 frames @ 832×480**, a clip that OOMs a single card — through the ring. It should have fit if the ring saved activation memory. It didn't.
+
+<div class="callout warn"><span class="t">The honest failure: the attention-only ring gives ~0 frame headroom</span>
+<p>The 243-frame render <b>OOM'd at 7.30&nbsp;GB</b> — and a single card OOM'd at <b>~7.28&nbsp;GB</b> for the same clip. The ring moved the wall by <em>nothing</em>. Root cause: our Stage-2 ring splits only the <b>attention</b>. GPU&nbsp;0 still runs the <b>QKV projection and the FFN on the <em>full</em> sequence</b>, so its activations and its int8 GEMM buffers still scale with frame count — the same wall a single card hits. <b>Stage&nbsp;2 proved correctness (identical video), not the memory win.</b> The attention-only ring is a stepping stone, not the summit — and the measurement that says so plainly is the valuable part.</p></div>
+
+<div class="callout spec"><span class="t">The different, simpler way: single-GPU DiT tiling</span>
+<p>Here's the reframe. A transformer block is <b>per-token everywhere except attention</b> — QKV projection, the FFN, the norms, rotary all treat each token independently, so they're freely <b>chunkable</b>. Only attention is cross-token — and <b>we already tile that</b> (C4/C5). So the cleaner path than a multi-GPU full-context-parallel rewrite is <b>single-GPU DiT tiling</b> (WanGP's approach, self-built): stream the sequence through the per-token ops in <b>chunks</b>, keeping only one chunk's activation resident plus the attention tiles. The GPU never holds the full-sequence activation, so <b>any frame count fits on one card</b>. The trade is speed for fit — it's sequential, with no multi-GPU comms — and we're most of the way there because the hard part (tiling the cross-token attention) is done. The multi-GPU ring can layer on top later, for speed.</p></div>
+
+## Phase E — breaking the frame wall (single-GPU DiT tiling)
+
+The reframe from Phase&nbsp;D said it: a block is **per-token everywhere except attention**, so chunk the per-token ops over the sequence and no card ever holds the full-sequence activation. The target: render a **full 15-second clip — 345 frames @ 832×480, a 41,153-token sequence** — on **one** 8&nbsp;GB card, something that flatly OOM'd (~10&nbsp;GB) before. What actually happened is the most instructive part: the wall didn't fall in one blow. It **moved**, one transient at a time, and each move was a measurement that told us exactly where to aim next.
+
+<div class="callout warn"><span class="t">Six walls, knocked down in sequence</span>
+<ol>
+<li><b>E1 — chunk each linear individually → NO change.</b> This <em>disproved our own premise</em>. We'd assumed a ~2.2&nbsp;GB int8 activation scratch buffer (that was ComfyUI's old convrot int8, <a href="13-int8-vs-q4.html">ch.13</a>) — but our engine is torchao <code>Int8WeightOnlyConfig</code>: weight-only, dequantize→bf16, <b>no activation scratch buffer at all</b>. The real wall is <b>resident activations</b>, chiefly the FFN's 14336-dim intermediate. Being wrong here, measurably, is what pointed us right.</li>
+<li><b>E1b — chunk the FFN as a <em>unit</em></b> (up→activation→down over token-chunks, so the 14336-wide intermediate is chunk-sized, never full-sequence) → peak <b>5.09 → 4.34&nbsp;GB at 124f</b>, and the saving <b>scales with frame count</b>. The right lever, proven.</li>
+<li><b>E1c — render 345f, FFN-chunked → OOM, but the wall MOVED</b> — it no longer died in the FFN; it died in <code>_apply_rotary_emb</code>, which builds ~3 full-sequence copies of the query. FFN wall cleared; attention front-end now the peak.</li>
+<li><b>E1d — chunk the rotary</b> over the sequence → freed ~300&nbsp;MB; OOM moved again, to the <b>int8 linear dequant</b>. Weight-only int8 makes <em>two</em> full-sequence bf16 transients per linear: $m = XW^\top$, then $y = m\cdot s$ — ~430&nbsp;MB each at 345f, for the attention projections.</li>
+<li><b>E1e — chunk the attention linears too</b> (<code>to_q/k/v/out</code>) → OOM'd on <b>our own <code>torch.cat</code></b>: reassembling the chunks holds the chunk list <em>and</em> allocates a second full-sequence contiguous tensor — ~2× the output, the exact straw.</li>
+<li><b>E1f — preallocate the output buffer</b> and write chunks into it (no <code>cat</code> doubling) → the tipping allocation shrank <b>422&nbsp;MB → 84&nbsp;MB</b>. Now we hit the <b>irreducible resident floor</b>: <b>7.52&nbsp;GB</b> resident (block weights + full-sequence residual stream + CUDA context), ~0.14&nbsp;GB headroom — and it OOM'd on an 84&nbsp;MB alloc with 98&nbsp;MB <em>free</em>: pure fragmentation at the edge.</li>
+<li><b>E1g — smaller chunks + anti-fragmentation allocator → FIT.</b> Attn 2048 / FFN 1024 / rotary 4096 (tipping alloc ~21&nbsp;MB) plus <code>PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.9,max_split_size_mb:128</code>. The last 0.14&nbsp;GB closed.</li>
+</ol></div>
+
+Drawn as a track, the shape of the fight is clearer than any list: the failure point walks *down the block*, from the feed-forward network to the rotary, to the int8 dequant, to our own reassembly, and finally to nothing at all.
+
+<svg viewBox="0 0 760 318" width="100%" style="max-width:920px" role="img" aria-label="Seven experiments in which the out-of-memory failure moves down the transformer block: chunking each linear changes nothing, chunking the feed-forward network as a unit works, then the failure moves to the rotary embedding, to the int8 dequantisation, to our own tensor concatenation, to allocator fragmentation, and finally the render fits.">
+  <text x="2" y="14" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHERE THE RUN DIED, EXPERIMENT BY EXPERIMENT</text>
+  <text x="2" y="38" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">step</text>
+  <text x="80" y="38" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">what changed</text>
+  <text x="404" y="38" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">where the peak allocation failed</text>
+  <text x="690" y="38" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">result</text>
+  <line x1="2" y1="46" x2="758" y2="46" stroke="#232c3b"/>
+  <text x="2" y="70" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">E1</text>
+  <text x="80" y="70" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">chunk each linear individually</text>
+  <rect x="400" y="56" width="264" height="20" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="412" y="70" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">unchanged — the premise was wrong</text>
+  <text x="690" y="70" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">no change</text>
+  <text x="2" y="102" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">E1b</text>
+  <text x="80" y="102" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">chunk the FFN as a unit</text>
+  <rect x="400" y="88" width="264" height="20" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="412" y="102" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">FFN intermediate — cleared</text>
+  <text x="690" y="102" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">5.09→4.34</text>
+  <text x="2" y="134" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">E1c</text>
+  <text x="80" y="134" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">same recipe at 345 frames</text>
+  <rect x="400" y="120" width="264" height="20" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="412" y="134" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">_apply_rotary_emb — 3 full-S copies</text>
+  <text x="690" y="134" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">OOM</text>
+  <text x="2" y="166" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">E1d</text>
+  <text x="80" y="166" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">chunk the rotary</text>
+  <rect x="400" y="152" width="264" height="20" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="412" y="166" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">int8 dequant — 2 transients, ~430 MB</text>
+  <text x="690" y="166" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">OOM</text>
+  <text x="2" y="198" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">E1e</text>
+  <text x="80" y="198" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">chunk the attention linears</text>
+  <rect x="400" y="184" width="264" height="20" rx="4" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="412" y="198" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">our own torch.cat — 2× the output</text>
+  <text x="690" y="198" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">OOM</text>
+  <text x="2" y="230" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">E1f</text>
+  <text x="80" y="230" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">preallocate the output buffer</text>
+  <rect x="400" y="216" width="264" height="20" rx="4" fill="#241a1a" stroke="#ffb454"/>
+  <text x="412" y="230" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">84 MB alloc, 98 MB free — fragmentation</text>
+  <text x="690" y="230" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">0.14 GB off</text>
+  <text x="2" y="262" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">E1g</text>
+  <text x="80" y="262" fill="#e7ecf3" font-size="11.5" font-family="Inter,sans-serif">smaller chunks + anti-frag allocator</text>
+  <rect x="400" y="248" width="264" height="20" rx="4" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="412" y="262" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">nowhere — tipping alloc ~21 MB</text>
+  <text x="690" y="262" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">FIT</text>
+  <line x1="2" y1="280" x2="758" y2="280" stroke="#232c3b"/>
+  <text x="2" y="302" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Each row is a measurement, and each measurement named the next target. The wall never fell — it walked, and we followed it out of the block.</text>
+</svg>
+
+<div class="callout truth"><span class="t">🎉 The full 15-second denoise ran on ONE 8&nbsp;GB card</span>
+<p><b>seq = 41,153 tokens</b> (345 frames @ 832×480) · all <b>50 blocks × 3 steps</b> in <b>9m31s</b> · allocated held steady at <b>4.36&nbsp;GB</b> · peak <b>7.71&nbsp;GB</b> · <b>no OOM</b>. The thing the box "couldn't do" just happened — and it happened because six separate walls were each measured, named, and knocked down, not because of one lucky flag.</p></div>
+
+<div class="callout spec"><span class="t">The recipe (single-card native-15s DiT denoise)</span>
+<p>int8 weight-only + block-offload (1&nbsp;block/group) + <b>FFN chunked as a unit</b> + <b>rotary chunked</b> + <b>attention-linear chunked</b>, <b>all preallocating outputs (never <code>torch.cat</code>)</b> + anti-fragmentation allocator. Correct by construction: every chunked op is <b>per-token</b> (independent per row), so chunking changes nothing mathematically; only attention is cross-token, and it stays full/flash. The winning engine is <code>source/dalang/10_render_tiled.py</code>; the FFN-unit chunk was first proven in <code>06b_chunk_ffn.py</code>.</p></div>
+
+### How the flow works
+
+One picture is worth the six walls. Here's the whole path a 15-second clip takes through the engine, then a zoom into the single block where all the chunking lives, then the memory arithmetic that makes it fit.
+
+**The big picture — one 15s clip through the machine:**
+
+<svg viewBox="0 0 760 398" width="100%" style="max-width:920px" role="img" aria-label="The path of a 15-second clip through the engine: the prompt is encoded, becomes a 41153-token latent, passes through a denoise loop that streams each of 50 transformer blocks onto the card one at a time, and the clean latent is decoded by the video and audio VAEs and muxed into an mp4.">
+  <defs>
+    <marker id="d1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="d2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <rect x="140" y="10" width="480" height="38" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="380" y="34" text-anchor="middle" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">PROMPT — "a lone figure on a neon street…"</text>
+  <line x1="380" y1="48" x2="380" y2="66" stroke="#6f7b8f" marker-end="url(#d1)"/>
+  <rect x="140" y="70" width="480" height="56" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="92" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">TEXT + AUDIO ENCODE</text>
+  <text x="380" y="112" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">latent noise [1, 41153 tokens, 5376] — the whole 15 s = 345 frames</text>
+  <line x1="380" y1="126" x2="380" y2="144" stroke="#6f7b8f" marker-end="url(#d1)"/>
+  <rect x="140" y="148" width="480" height="112" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="380" y="172" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">DENOISE LOOP — repeated N steps</text>
+  <text x="380" y="194" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">for each of 50 transformer blocks:</text>
+  <text x="380" y="214" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">stream the block's weights in, compute, stream them out</text>
+  <text x="380" y="236" text-anchor="middle" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">33 B model on an 8 GB card ⇒ one block resident at a time</text>
+  <text x="380" y="254" text-anchor="middle" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">the frame-wall fight happens in here, one block at a time</text>
+  <rect x="10" y="168" width="112" height="72" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="66" y="192" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">system RAM</text>
+  <text x="66" y="210" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">31 GB, one copy</text>
+  <text x="66" y="228" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">all 50 blocks</text>
+  <line x1="122" y1="192" x2="136" y2="192" stroke="#5ee0c0" marker-end="url(#d2)"/>
+  <line x1="136" y1="220" x2="122" y2="220" stroke="#5ee0c0" marker-end="url(#d2)"/>
+  <rect x="638" y="180" width="112" height="48" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="694" y="200" text-anchor="middle" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">clean latent</text>
+  <text x="694" y="218" text-anchor="middle" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">[1, 41153, 5376]</text>
+  <line x1="620" y1="204" x2="634" y2="204" stroke="#6f7b8f" marker-end="url(#d1)"/>
+  <line x1="380" y1="260" x2="380" y2="278" stroke="#6f7b8f" marker-end="url(#d1)"/>
+  <rect x="140" y="282" width="480" height="56" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="380" y="304" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">VAE DECODE + audio VAE</text>
+  <text x="380" y="324" text-anchor="middle" fill="#ffb454" font-size="11" font-family="Inter,sans-serif">a separate memory regime — moved on-GPU only at decode time</text>
+  <line x1="380" y1="338" x2="380" y2="356" stroke="#6f7b8f" marker-end="url(#d1)"/>
+  <rect x="140" y="360" width="480" height="34" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="380" y="382" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">345 frames + audio → mux → a 15-second .mp4</text>
+</svg>
+
+<p class="small">Only <b>one</b> block's weights sit on the card at any instant — that's how a 33&nbsp;B model runs on 8&nbsp;GB at all. The frame-wall fight happens <em>inside</em> the denoise loop, one block at a time.</p>
+
+**Inside ONE block — per-token ops get SLICED, attention stays WHOLE:**
+
+<svg viewBox="0 0 760 430" width="100%" style="max-width:920px" role="img" aria-label="Inside one transformer block: the norms, the query key and value projections and the rotary embedding are per-token and are fed the sequence in chunks; attention is the only cross-token operation and stays whole but is flash-tiled; the output projection and the feed-forward network are per-token again and are chunked, with results written into a preallocated buffer instead of concatenated.">
+  <defs>
+    <marker id="d3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+  </defs>
+  <text x="2" y="16" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">hidden_states [1, S = 41153, 5376]</text>
+  <line x1="380" y1="22" x2="380" y2="38" stroke="#6f7b8f" marker-end="url(#d3)"/>
+  <rect x="2" y="42" width="756" height="104" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="64" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.3">PER-TOKEN ZONE — SAFE TO SLICE, EACH ROW IS INDEPENDENT</text>
+  <text x="20" y="88" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">norms → to_q / to_k / to_v</text>
+  <text x="330" y="88" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">fed in token-chunks of 2048</text>
+  <text x="20" y="110" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">rotary position embedding</text>
+  <text x="330" y="110" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">fed in chunks of 4096</text>
+  <text x="20" y="134" fill="#5ee0c0" font-size="11.5" font-family="Inter,sans-serif">each chunk's scratch ≈ 21 MB — the full-sequence version was ≈ 430 MB</text>
+  <rect x="560" y="72" width="180" height="56" rx="6" fill="#12161f" stroke="#232c3b"/>
+  <rect x="570" y="82" width="30" height="36" rx="3" fill="#1a2440" stroke="#7aa2ff"/>
+  <rect x="606" y="82" width="30" height="36" rx="3" fill="#12161f" stroke="#232c3b"/>
+  <rect x="642" y="82" width="30" height="36" rx="3" fill="#12161f" stroke="#232c3b"/>
+  <rect x="678" y="82" width="30" height="36" rx="3" fill="#12161f" stroke="#232c3b"/>
+  <text x="716" y="104" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">…</text>
+  <text x="650" y="144" text-anchor="middle" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">one chunk resident at a time</text>
+  <line x1="380" y1="146" x2="380" y2="166" stroke="#6f7b8f" marker-end="url(#d3)"/>
+  <text x="392" y="162" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">Q, K, V</text>
+  <rect x="2" y="170" width="756" height="104" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="20" y="192" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.3">ATTENTION — THE ONLY CROSS-TOKEN OP, SO IT STAYS WHOLE</text>
+  <text x="20" y="216" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">every token must see every other token, so the sequence cannot be sliced here</text>
+  <text x="20" y="238" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">flash-tiled instead: small (Q-tile × K-tile) score blocks + online softmax</text>
+  <text x="20" y="260" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">the full S × S score matrix is never built — that is the whole trick</text>
+  <line x1="380" y1="274" x2="380" y2="292" stroke="#6f7b8f" marker-end="url(#d3)"/>
+  <rect x="2" y="296" width="756" height="104" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="20" y="318" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.3">PER-TOKEN ZONE AGAIN</text>
+  <text x="20" y="342" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">to_out</text>
+  <text x="330" y="342" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">chunks of 2048</text>
+  <text x="20" y="364" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">FFN as a UNIT — up → activation → down</text>
+  <text x="330" y="364" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">chunks of 1024 — the 14336-wide intermediate is never full-sequence</text>
+  <text x="20" y="388" fill="#ffb454" font-size="11.5" font-family="Inter,sans-serif">reassemble into a PREALLOCATED buffer, never torch.cat</text>
+  <line x1="380" y1="400" x2="380" y2="416" stroke="#6f7b8f" marker-end="url(#d3)"/>
+  <text x="2" y="424" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">hidden_states [1, 41153, 5376] → next block</text>
+</svg>
+
+<p class="small">The whole trick in one frame: if an op is <b>per-token</b>, feed it the sequence in slices so its scratch is chunk-sized; the one <b>cross-token</b> op (attention) can't be sliced, so it's flash-tiled to avoid the S×S matrix instead.</p>
+
+**Why it fits — the memory arithmetic:**
+
+<svg viewBox="0 0 760 288" width="100%" style="max-width:920px" role="img" aria-label="Two bars comparing peak VRAM before and after tiling. The naive full-sequence run peaks near 10 gigabytes and overruns the card, while the tiled run peaks at 7.71 gigabytes and fits; the CUDA context, the resident block weights and the full-sequence residual stream are identical in both, and only the transients shrink.">
+  <text x="2" y="14" fill="#7aa2ff" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">PEAK VRAM = FIXED FLOOR + BIGGEST LIVE SCRATCH — 345 FRAMES AT 832 × 480</text>
+  <line x1="564" y1="34" x2="564" y2="208" stroke="#ff6b6b" stroke-dasharray="4 4"/>
+  <text x="570" y="46" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">8 GB card</text>
+  <text x="2" y="74" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">BEFORE</text>
+  <text x="2" y="92" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">naive, full-sequence</text>
+  <rect x="180" y="58" width="58" height="42" fill="#12161f" stroke="#232c3b"/>
+  <rect x="238" y="58" width="34" height="42" fill="#12161f" stroke="#232c3b"/>
+  <rect x="272" y="58" width="212" height="42" fill="#151b26" stroke="#232c3b"/>
+  <rect x="484" y="58" width="176" height="42" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="572" y="84" text-anchor="middle" fill="#ff6b6b" font-size="11" font-family="Inter,sans-serif">full-S FFN + transients</text>
+  <text x="666" y="84" fill="#ff6b6b" font-size="12" font-family="Inter,sans-serif">≈10 GB · OOM</text>
+  <text x="2" y="150" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">AFTER</text>
+  <text x="2" y="168" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif">Dalang tiling</text>
+  <rect x="180" y="134" width="58" height="42" fill="#12161f" stroke="#232c3b"/>
+  <text x="209" y="160" text-anchor="middle" fill="#aab4c5" font-size="10" font-family="Inter,sans-serif">ctx</text>
+  <rect x="238" y="134" width="34" height="42" fill="#12161f" stroke="#232c3b"/>
+  <text x="255" y="160" text-anchor="middle" fill="#aab4c5" font-size="10" font-family="Inter,sans-serif">wts</text>
+  <rect x="272" y="134" width="212" height="42" fill="#151b26" stroke="#232c3b"/>
+  <text x="378" y="160" text-anchor="middle" fill="#e7ecf3" font-size="11" font-family="Inter,sans-serif">full-S residual stream</text>
+  <rect x="484" y="134" width="68" height="42" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="518" y="160" text-anchor="middle" fill="#5ee0c0" font-size="10" font-family="Inter,sans-serif">chunks</text>
+  <text x="666" y="160" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">7.71 GB · fits</text>
+  <text x="180" y="120" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">~1.2 GB</text>
+  <text x="240" y="120" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">~0.7 GB</text>
+  <text x="274" y="120" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">~4.4 GB</text>
+  <text x="486" y="120" fill="#6f7b8f" font-size="10" font-family="Inter,sans-serif">~21 MB each</text>
+  <line x1="272" y1="192" x2="272" y2="204" stroke="#6f7b8f"/>
+  <line x1="484" y1="192" x2="484" y2="204" stroke="#6f7b8f"/>
+  <line x1="272" y1="198" x2="484" y2="198" stroke="#6f7b8f"/>
+  <text x="378" y="222" text-anchor="middle" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">the irreducible floor — the residual stream must stay whole</text>
+  <text x="2" y="250" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">Chunking changed nothing on the left of the bar. It shrank everything on the right of it to near nothing, and that was</text>
+  <text x="2" y="268" fill="#aab4c5" font-size="11" font-family="Inter,sans-serif">the whole difference between an OOM and a file. Component sizes are approximate; the two peaks are measured.</text>
+</svg>
+
+<div class="callout spec"><span class="t">The whole engine in four lines</span>
+<p>per-token op → <b>SLICE IT</b> (chunk-sized scratch) · cross-token op / attention → <b>FLASH-TILE IT</b> (never the full S×S) · reassemble → <b>PREALLOCATE, never <code>cat</code></b> · allocator → <b>anti-fragment</b>. &nbsp;=&nbsp; a 10&nbsp;GB job squeezed into 7.7&nbsp;GB on one card.</p></div>
+
+### E1h — the finish: the full file, end to end
+
+The denoise fit — but a clip isn't a file until the **VAE decodes** those latents back into 345 pixel frames, a *separate* memory regime. The first attempt looked hung: zero visible progress for 20+&nbsp;minutes. It wasn't OOM'ing — it was **crawling**.
+
+<div class="callout warn"><span class="t">The VAE wasn't the wall — the offload strategy was</span>
+<p>The VAE had been set to <code>leaf_level</code> offload, which streams <em>every layer</em> CPU↔GPU — across the thousands of tile/clip forwards a 345-frame decode makes, that's death by a million transfers. And reading the VAE source settled it: the decoder <b>already chunks temporally</b> (<code>_decode_clip</code> decodes latent frames in overlapping clips with cross-fade) and <b>tiles spatially</b> (256&nbsp;px) by design — so it's <em>small</em>. The fix was <b>not</b> "chunk the VAE"; it was to stop the thrash.</p></div>
+
+<div class="callout spec"><span class="t">The fix: defer the VAE onto the GPU until decode time</span>
+<p>At <em>setup</em>, moving the VAE onto the card OOM'd — the transformer still owns the 8&nbsp;GB there. But by <em>decode</em> time the transformer's weights are offloaded to CPU, so the room exists. So we <b>defer</b>: leave the VAE on CPU through the denoise, then move it onto <code>cuda</code> at the <b>first decode clip</b> (and log each clip, so the decode is visible instead of blind). 20 clips decoded, GPU ~6.4&nbsp;GB, then cat&nbsp;+&nbsp;export. The engine is <code>source/dalang/11_render.py</code>.</p></div>
+
+<div class="callout truth"><span class="t">🎬 e1h-15s.mp4 — the full clip, on one 8&nbsp;GB card, rc=0</span>
+<p><b>832×480 · 345 frames · 14.375&nbsp;s · with audio (32&nbsp;kHz)</b>, clean exit, verified with <code>ffprobe</code>. The whole pipeline — denoise + VAE decode + audio + mux — ran end-to-end on a single RTX&nbsp;3060&nbsp;Ti and wrote a real file. <b>Total ≈ 57&nbsp;minutes</b> (<code>gerado em 3432s</code>). The frame wall is broken not just at the transformer but <em>all the way to the <code>.mp4</code></em>.</p></div>
+
+<div class="callout warn"><span class="t">Honest caveats — what this does and doesn't change</span>
+<ul>
+<li><b>Same model, same quality.</b> We changed <em>what hardware can run</em> H3 at 832×480 — not the model, not its output. The quality levers of <a href="17-what-actually-improves-quality.html">ch.17</a> (framing, faces) are unchanged; this is a <em>fit</em> win, not a quality one.</li>
+<li><b>Not bit-exact.</b> The chunked int8 matmuls round differently by tile size — a tiny bf16 difference, the same imperceptible class as the ring's ~0.017 mean (C4c/C5). The yardstick is the render, not the raw tensor — exactly the int8≈fp16 plateau (<a href="17-what-actually-improves-quality.html">ch.17</a>).</li>
+<li><b>It's slow — fitting ≠ fast.</b> ~57&nbsp;min for the full 15&nbsp;s, because block-offload streams the 33B model one block at a time, sequentially (9m31s for the denoise's 3 steps, plus the VAE after). Fit and speed are different problems — and <b>we deliberately don't chase speed</b> ("we not charge the speed… it's not our style"). The goal is capability on cheap hardware, not throughput.</li>
+</ul></div>
+
+## Phase E3 — native 720p (the same recipe, one resolution up)
+
+The 15-second run proved the recipe against **frame count**. E3 asks the other question: does it carry a jump in **resolution**? Same engine (<code>source/dalang/11_render.py</code>), a new scene <code>cp720</code>, one thing to render — **1280×704**, H3's "720p-class" bucket.
+
+<div class="callout warn"><span class="t">A hard model constraint, not a memory wall</span>
+<p>The first 720p attempt died instantly at the denoise: <code>ValueError: height and width must be multiples of 32, got 720x1280</code>. H3 requires both dimensions divisible by <b>32</b>, and 720 isn't ($720/32 = 22.5$). The fix is <b>1280×704</b> ($704/32 = 22$) — near-identical framing, valid bucket. Worth noting <em>where</em> the error surfaced: the text-encode (prompt embeds) doesn't care about resolution, so nothing complained until the denoise/decode tried to shape the latents.</p></div>
+
+<div class="callout truth"><span class="t">🎬 e720-5s.mp4 — native 720p, end-to-end, one 8&nbsp;GB card, rc=0</span>
+<p><b>1280×704 · 124 frames · 5.17&nbsp;s · with audio</b>, verified with <code>ffprobe</code>. Same tiling engine, one resolution up. <b>seq = 33,193 tokens · allocated steady 4.10&nbsp;GB · peak 6.81&nbsp;GB · no OOM</b> · ≈41&nbsp;min (<code>gerado em 2476s</code>). The recipe carried the resolution jump untouched — HD on a card that costs ~$200.</p></div>
+
+<div class="callout spec"><span class="t">The counter-intuitive part: 720p peaked LOWER than the 15s clip</span>
+<p>720p peaked <b>6.81&nbsp;GB</b> — <em>below</em> the 15-second 480p run's <b>7.71&nbsp;GB</b>. That's not a fluke: what the engine holds scales with <b>total tokens</b>, and tokens $\propto H \times W \times \text{frames}$. A 720p×124f clip (33,193 tokens) is simply <em>fewer</em> tokens than a 480p×345f clip (41,153) — bigger frames, but far fewer of them. So there's <b>headroom at 720p</b>: a <em>longer</em> 720p clip fits within the same budget we've already proven. Resolution and duration trade against one another through one number — the sequence length — and the recipe fits whatever lands under the ceiling.</p></div>
+
+## What's proven so far
+
+<div class="callout truth"><span class="t">The ledger, measured</span>
+<ol>
+<li><b>One process holds the model</b> — 30.8&nbsp;GB, one copy (ring-3's RAM wall is beatable). ✅</li>
+<li><b>We own the forward</b> — our code reproduces the reference bit-for-bit (0.000e+00). ✅</li>
+<li><b>The ring is correct</b> — online softmax exact (C2), 2-GPU device→device ring matches full attention (C3). ✅</li>
+<li><b>The ring renders correct video</b> — wired into the real model, per-block-correct (C4c), and a real render is perceptually identical to flash at PSNR 37.6&nbsp;dB across two live GPUs (C5). <b>Stage 2 done.</b> ✅</li>
+<li><b>The RAM win is free</b> — single-process means one 31&nbsp;GB copy, so ring-3's RAM wall never applies to us (Phase&nbsp;D, by construction). ✅</li>
+<li><b>The frame wall is BROKEN end-to-end (Phase&nbsp;E)</b> — single-GPU DiT tiling (FFN + rotary + attention-linear chunked, preallocated) fit the full <b>15-second, 41,153-token</b> denoise on <b>one</b> 8&nbsp;GB card (peak 7.71&nbsp;GB, no OOM), and with the deferred-VAE fix (E1h) the whole pipeline rendered a real <b><code>e1h-15s.mp4</code></b> — 832×480, 345f, 14.375&nbsp;s, +audio, rc=0. Six transient walls, each measured and knocked down. ✅</li>
+<li><b>Native 720p renders end-to-end (Phase&nbsp;E3)</b> — the same tiling engine, one resolution up, produced <b><code>e720-5s.mp4</code></b> (1280×704, 124f, 5.17&nbsp;s, +audio, rc=0) at peak <b>6.81&nbsp;GB</b> — <em>below</em> the 15s@480p run, because 720p×124f is fewer total tokens (33,193 vs 41,153). HD on a ~$200 card, with headroom for a longer 720p clip. ✅</li>
+<li><b>What's left — capability, not speed:</b> we deliberately don't chase throughput. Next is a <em>longer</em> 720p clip within the token budget; later a custom int8 kernel (Phase&nbsp;F). The multi-GPU ring (C5) could layer on for speed, but that's explicitly not the priority.</li>
+</ol>
+<p>The engine is real, it renders correct video, and it now fits a full 15-second clip on a single 8&nbsp;GB card. Every step here — including the premise we <em>disproved</em> (E1) and the wall that moved six times — is a measurement, so each build aimed at the true bottleneck instead of a hopeful guess.</p></div>
+
+## The ceilings this chapter set — and what later broke them
+
+Two of the sentences above were written with more confidence than they had earned. Both were later contradicted by measurements on the same box, and both are more useful kept than corrected.
+
+<div class="callout warn"><span class="t">"The GPU never holds the full-sequence activation, so <em>any frame count fits on one card</em>"</span>
+<p>False, and the diagram above says why: chunking shrinks the <em>scratch</em>, not the <b>residual stream</b>, and the residual stream must stay whole. At 41,153 tokens it is the ~4.4&nbsp;GB slab in the middle of the bar — and it scales with the token count. [Ch.45](45-three-gpu-sequence-parallelism.html) put a real number on the ceiling that creates: about <b>41,000 tokens</b> on one card. Native 720p at 15 seconds is $1280 \times 704 \times 345\text{f} \approx 93{,}000$ tokens, roughly <b>2.3×</b> that — and 2.3 residual streams is already more than an 8&nbsp;GB card holds before a single scratch tensor is allocated. What this chapter actually proved is narrower and still remarkable: <b>any frame count fits, up to the token budget the residual stream leaves.</b></p></div>
+
+<div class="callout warn"><span class="t">"The ring moved the wall by <em>nothing</em>"</span>
+<p>True as measured, and wrong as a verdict on the ring. The reason was named correctly right here — the Stage-2 ring split <b>only the attention</b>, so GPU&nbsp;0 still ran the projections and the FFN on the full sequence. [Ch.45](45-three-gpu-sequence-parallelism.html) removed exactly that limitation: shard the sequence for <em>every</em> per-token op as well, keep the hidden state sharded through all 50 blocks, and use the ring only for the one cross-token line. That version does move the wall — it ran the ~93,000-token forward that no single card can hold, at roughly 7.1 / 5.0 / 6.3&nbsp;GB across the three cards.</p></div>
+
+<div class="callout truth"><span class="t">And the prediction that held</span>
+<p>"There's <b>headroom at 720p</b>: a <em>longer</em> 720p clip fits within the same budget we've already proven." That one was right, and it was the correct thing to chase next. The full-length version needed all three cards rather than one, but it exists: <b>1280×704, 345 frames, 14.375&nbsp;s</b>, decoded and muxed — [ch.46](46-the-first-15-seconds.html). The two halves compose. Chunking <em>within</em> a card (this chapter) and sharding <em>across</em> cards ([ch.45](45-three-gpu-sequence-parallelism.html)) are not rivals; neither alone fits 93k tokens on 8&nbsp;GB cards, and together they do.</p></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">golden reference</span><span class="badge">online softmax</span><span class="badge">ring attention</span><span class="badge">ULP</span><span class="badge">PSNR</span><span class="badge">per-token op</span><span class="badge">cross-token op</span><span class="badge">flash tiling</span><span class="badge">FFN chunking</span><span class="badge">rotary embedding</span><span class="badge">weight-only int8</span><span class="badge">block offload</span><span class="badge">preallocated buffer</span><span class="badge">fragmentation</span><span class="badge">deferred VAE</span><span class="badge">sequence length</span></p>
+<p>If those feel solid, the next chapter needs only one new idea on top of them — that the sequence itself can be cut in three.</p></div>
+
+Next: [ch.45](45-three-gpu-sequence-parallelism.html) takes the same block apart along the other axis — sharding the sequence across all three cards, so a forward too large for any single card runs on all of them at once.
+
+<p class="small">The design and the "why" behind this build are <a href="43-the-dalang-engine.html">ch.43</a>; the online-softmax / no-full-matrix idea we rediscovered is <a href="34-open-use-close-flashattention.html">ch.34</a>; the context-parallel split it realizes is <a href="36-splitting-the-video-cp.html">ch.36</a>; why one process shares the model where <code>torchrun</code> replicates it is <a href="42-why-two-models.html">ch.42</a>. Live plan &amp; tracker: <code>planning/DALANG-ENGINE-BUILD.md</code> and <code>source/dalang/TASKS.md</code>.</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

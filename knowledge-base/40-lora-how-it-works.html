@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>40 · LoRA — A Frozen Giant, a Tiny Nudge</title>
+<meta name="description" content="What a LoRA is, the low-rank maths that makes a 126 MB file able to re-style a 20 GB model, how it attaches, how to merge one into a quantized engine — and the test where adding one made the picture worse.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 40 · How a 126 MB file re-styles a 20 GB model — and when it shouldn't</span>
+
+# LoRA — A Frozen Giant, a Tiny Nudge
+
+<p class="lede"><b>A LoRA is a small trained correction — here a 126 MB file — that gets added to a frozen model's weights, letting a 20 GB transformer take on a new look without anyone retraining it or redistributing it.</b> It is one of the most elegant ideas in the open-model world, the reason a public library of thousands of styles exists at all, and it is also the subject of the most useful negative result in this guide: the one we tested at 480p made the image <em>softer</em> than the base model.</p>
+
+Both halves of that sentence are the chapter. The mechanism is beautiful and worth understanding in full. The measurement says it did not help here, and the reason it did not help is a property of the *pipeline*, not of the adapter — which makes it a much more interesting failure than a bad file would have been.
+
+<div class="callout truth"><span class="t">The one-line version</span>
+<p><b>Freeze the giant model; learn a small, low-rank nudge that is added on top.</b> The base transformer never changes — only the nudge is trained and shipped. That is why an adapter teaching H3 "realistic faces" is <b>126 MB</b> rather than the 20 GB of the int8 transformer, or the ~66 GB it occupies in its original bf16.</p></div>
+
+## 1 · The problem it solves
+
+Suppose the goal is more convincing human faces. The brute-force route is a **full fine-tune**: keep training every weight in the transformer on new footage. Three things make that impossible outside a lab.
+
+The first is compute — updating a model this size requires holding weights, gradients and optimizer state simultaneously, several times the memory of inference. The second is distribution: the result is *a whole new model*, tens of gigabytes, shipped in full for every variation. The third is combinatorial. If there are a thousand desirable styles, full fine-tuning produces a thousand complete models, and no shared base to reason about.
+
+LoRA — **Lo**w-**R**ank **A**daptation — dissolves all three at once, and it does so by asking a sharper question than "how do we make training cheaper?" The question it asks is: **how much of a model actually needs to change to teach it one new thing?**
+
+The answer, empirically, is: a startlingly thin slice.
+
+## 2 · The idea
+
+Freeze the entire base model. Beside each weight matrix worth influencing, bolt on a **small parallel path** that is trained while the base sits perfectly still. At inference the layer's output is the frozen path **plus** the small learned path.
+
+<svg viewBox="0 0 760 292" width="100%" style="max-width:920px" role="img" aria-label="A layer's input feeding two paths in parallel: the frozen weight matrix W of size 5,376 by 16,128 holding about 86 million numbers, and beside it the trained adapter where matrix A projects the input down to only 32 channels and matrix B expands those 32 channels back out, the two paths summing into the output.">
+  <defs>
+    <marker id="l1" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#6f7b8f"/></marker>
+    <marker id="l2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">ONE ATTENTION PROJECTION, WITH AN ADAPTER BOLTED ON</text>
+  <rect x="2" y="112" width="96" height="56" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="50" y="145" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">input</text>
+  <line x1="100" y1="128" x2="146" y2="76" stroke="#6f7b8f" marker-end="url(#l1)"/>
+  <line x1="100" y1="152" x2="146" y2="196" stroke="#5ee0c0" marker-end="url(#l2)"/>
+  <rect x="150" y="40" width="330" height="72" rx="8" fill="#12161f" stroke="#3a4a63"/>
+  <text x="315" y="68" text-anchor="middle" fill="#aab4c5" font-size="13" font-family="Inter,sans-serif">W — frozen, 5,376 × 16,128</text>
+  <text x="315" y="90" text-anchor="middle" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">~86,000,000 numbers · never touched by training</text>
+  <rect x="150" y="170" width="120" height="72" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="210" y="198" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">A — trained</text>
+  <text x="210" y="218" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">32 × 16,128</text>
+  <text x="210" y="234" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">projects down</text>
+  <line x1="272" y1="206" x2="304" y2="206" stroke="#5ee0c0" marker-end="url(#l2)"/>
+  <rect x="308" y="186" width="52" height="40" rx="6" fill="#0f141d" stroke="#5ee0c0"/>
+  <text x="334" y="211" text-anchor="middle" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">r = 32</text>
+  <text x="334" y="250" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">the whole nudge</text>
+  <text x="334" y="266" text-anchor="middle" fill="#8fd8c4" font-size="10.5" font-family="Inter,sans-serif">fits through here</text>
+  <line x1="362" y1="206" x2="394" y2="206" stroke="#5ee0c0" marker-end="url(#l2)"/>
+  <rect x="398" y="170" width="120" height="72" rx="8" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="458" y="198" text-anchor="middle" fill="#eafff8" font-size="12.5" font-family="Inter,sans-serif">B — trained</text>
+  <text x="458" y="218" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">5,376 × 32</text>
+  <text x="458" y="234" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">expands back</text>
+  <line x1="482" y1="76" x2="596" y2="132" stroke="#6f7b8f" marker-end="url(#l1)"/>
+  <line x1="520" y1="200" x2="596" y2="160" stroke="#5ee0c0" marker-end="url(#l2)"/>
+  <circle cx="614" cy="146" r="18" fill="#151b26" stroke="#232c3b"/>
+  <text x="614" y="152" text-anchor="middle" fill="#e7ecf3" font-size="16" font-family="Inter,sans-serif">+</text>
+  <line x1="634" y1="146" x2="666" y2="146" stroke="#6f7b8f" marker-end="url(#l1)"/>
+  <rect x="670" y="118" width="88" height="56" rx="8" fill="#151b26" stroke="#232c3b"/>
+  <text x="714" y="151" text-anchor="middle" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">output</text>
+  <text x="2" y="282" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">Only A and B are ever trained. W is read-only for the entire life of the adapter.</text>
+</svg>
+
+Only `A` and `B` are ever learned. The giant `W` never moves — not during training, not at inference. That single constraint is what makes everything else cheap.
+
+## 3 · The maths — why the nudge is so small
+
+Take one weight matrix $W$ of size $d \times k$. In H3 a large attention projection is roughly $5376 \times 16128$ — about **86 million** numbers. A full fine-tune would learn a change $\Delta W$ of that *same* 86-million size, which is exactly the problem.
+
+LoRA forces the change to be **low-rank** — expressible as a product of two skinny matrices:
+
+$$\Delta W = B\,A, \qquad B \in \mathbb{R}^{d \times r},\; A \in \mathbb{R}^{r \times k},\; r \ll d,k$$
+
+So instead of $d \times k$ free numbers there are only $r\,(d+k)$. At rank $r = 32$:
+
+$$32 \times (5376 + 16128) \;\approx\; 688{,}000 \text{ numbers} \;\;\Longrightarrow\;\; \text{about } 125\times \text{ smaller than 86 M.}$$
+
+At inference the effective weight is the frozen one plus the scaled nudge:
+
+$$W_{\text{eff}} \;=\; W + \frac{\alpha}{r}\, B A$$
+
+### What the rank actually constrains
+
+The rank is not a size setting. It is a **bandwidth limit on what the adapter is allowed to say.**
+
+The clearest way to see it: $A$ takes the layer's full 16,128-dimensional input and squeezes it into **32 numbers**. $B$ takes those 32 numbers and sprays them back across 5,376 outputs. Everything the adapter has learned about this layer — every correction to every one of 86 million weights — must pass through that 32-wide waist.
+
+The structural picture is a switchboard between two cities. One city has 16,128 residents, the other 5,376. Between them run exactly 32 trunk lines. Any pattern of communication is possible, but only 32 independent conversations can be in flight; everything else has to be expressed as a combination of those 32. Raise the rank and more trunk lines open. Lower it and the adapter has to be more general — and generality is exactly what stops it from overwriting the base model's own competence.
+
+<div class="callout spec"><span class="t">What each symbol controls</span>
+<ul>
+<li><b>$r$ — the rank.</b> How much the adapter is <em>permitted</em> to change. Small $r$ is a thin nudge with little capacity to override the original; large $r$ is a fat one that can.</li>
+<li><b>$\alpha$ — the scale, fixed at training time.</b> The $\alpha/r$ factor normalizes strength so that changing the rank does not silently change how loud the adapter is.</li>
+<li><b>The strength knob set at load time</b> multiplies the whole $BA$ term. It turns the effect up or down without retraining — and, as section 6 shows, its correct value is sometimes zero.</li>
+</ul></div>
+
+<div class="callout warn"><span class="t">Why low rank is <em>enough</em> — the non-obvious part</span>
+<p>The result that makes LoRA work is not the compression; it is that the compression costs almost nothing in practice. A new skill — "keep skin texture", "ink the outlines" — turns out not to require moving 86 million numbers independently. It is a <b>systematic bias applied across many inputs</b>, not 86 million separate facts, and a systematic bias has low <em>intrinsic dimension</em>. A rank-32 sketch of <em>which direction to push</em> captures it.</p>
+<p>This is also the honest boundary of the technique. Anything that genuinely <em>is</em> 86 million independent facts — a new language, a new physics — will not fit through 32 trunk lines, and no amount of training will make it.</p></div>
+
+## 4 · Where the adapters attach, and what that reveals
+
+Open the realism adapter — 208 tensors — and the maths is on disk in plain sight:
+
+```
+diffusion_model.blocks.0.attn.qkv_proj.lora_A.weight   ← the A  (r × k)
+diffusion_model.blocks.0.attn.qkv_proj.lora_B.weight   ← the B  (d × r)
+diffusion_model.blocks.0.attn.out_proj.lora_A.weight
+diffusion_model.blocks.0.attn.out_proj.lora_B.weight
+... one A/B pair per adapted matrix, across all 50 blocks
+```
+
+Two facts fall out of that listing.
+
+The first is that every entry is literally an `A` or a `B`. The $\Delta W = BA$ decomposition is not a training-time convenience that gets collapsed before shipping — it *is* the shipped artefact. The file never contains a weight; it contains the two factors of a change to a weight.
+
+The second is more interesting: it adapts **only the attention projections** — `qkv_proj` and `out_proj` — and leaves the feed-forward network untouched. In a 50-block transformer where the feed-forward inflates every token through a 14,336-wide intermediate ([ch.34](34-open-use-close-flashattention.html)), that is a deliberate omission. "Realism" is being taught as a change in **how the model attends** — which regions of the frame inform which others — rather than as a change in what the model knows. Detail and coherence are attention-side properties, so that is where the lever was placed.
+
+<svg viewBox="0 0 760 280" width="100%" style="max-width:920px" role="img" aria-label="Fifty transformer blocks in a column with the adapter attaching only to the attention projections in each block and skipping the feed-forward network, alongside a size comparison showing 86 million frozen numbers per matrix against 688 thousand trained numbers, about 125 times smaller.">
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHERE THE 208 TENSORS ATTACH</text>
+  <rect x="2" y="28" width="330" height="238" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="20" y="52" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">one block, ×50</text>
+  <rect x="20" y="66" width="180" height="38" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="110" y="90" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">attn.qkv_proj</text>
+  <text x="214" y="90" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">← A / B pair</text>
+  <rect x="20" y="112" width="180" height="38" rx="6" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="110" y="136" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">attn.out_proj</text>
+  <text x="214" y="136" fill="#5ee0c0" font-size="11" font-family="Inter,sans-serif">← A / B pair</text>
+  <rect x="20" y="158" width="180" height="38" rx="6" fill="#151b26" stroke="#232c3b" stroke-dasharray="4 3"/>
+  <text x="110" y="182" text-anchor="middle" fill="#6f7b8f" font-size="12" font-family="Inter,sans-serif">feed-forward, 14,336</text>
+  <text x="214" y="182" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">← untouched</text>
+  <rect x="20" y="204" width="180" height="38" rx="6" fill="#151b26" stroke="#232c3b" stroke-dasharray="4 3"/>
+  <text x="110" y="228" text-anchor="middle" fill="#6f7b8f" font-size="12" font-family="Inter,sans-serif">norms, gates</text>
+  <text x="214" y="228" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">← untouched</text>
+  <text x="354" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">AND HOW MUCH OF IT IS TRAINED</text>
+  <rect x="354" y="28" width="404" height="238" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="374" y="62" fill="#aab4c5" font-size="12" font-family="Inter,sans-serif">frozen, per matrix — 86,000,000 numbers</text>
+  <rect x="374" y="74" width="364" height="46" rx="4" fill="#151b26" stroke="#3a4a63"/>
+  <text x="374" y="150" fill="#5ee0c0" font-size="12" font-family="Inter,sans-serif">trained, per matrix — 688,000 numbers</text>
+  <rect x="374" y="162" width="3" height="24" rx="1" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="392" y="180" fill="#8fd8c4" font-size="11.5" font-family="Inter,sans-serif">drawn to the same scale — that sliver is the entire adapter</text>
+  <line x1="374" y1="208" x2="738" y2="208" stroke="#232c3b"/>
+  <text x="374" y="234" fill="#e7ecf3" font-size="13" font-family="Inter,sans-serif">about 125× fewer numbers · 126 MB on disk</text>
+  <text x="374" y="254" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">against a 20 GB int8 transformer, or ~66 GB in original bf16</text>
+</svg>
+
+## 5 · The rank knob, in three real files
+
+Three H3 adapters were pulled onto the box. Rank maps straight onto strength — the same $r$ that appears in the maths:
+
+| Adapter | Trigger | Rank $r$ | Effect | Size |
+|---|---|---|---|---|
+| **Realism-People** | `r34l1sm` | **32** | photoreal faces, natural skin, film lighting | 126 MB |
+| **Studio-1939** (light) | `gulliv3r,` | **16** | subtle painterly storybook texture | ~tens of MB |
+| **Studio-1939** (strong) | `gulliv3r,` | **64** | bold cel-shaded, inked outlines | larger |
+
+The same style shipped at $r=16$ *and* $r=64$ tells the whole story: **rank 16 whispers the look, rank 64 shouts it** and can override H3's photoreal default outright. The rank is a real, tunable dial, not an abstraction — and the file size follows it linearly, because $r(d+k)$ is linear in $r$.
+
+<div class="callout warn"><span class="t">Two adapters can fight</span>
+<p>These two pull in opposite directions — <code>r34l1sm</code> toward photoreal, <code>gulliv3r</code> toward hand-painted cartoon. Stacked, their $\Delta W$ terms add, and adding two corrections that point opposite ways produces something closer to neither than to either. <b>Choose one per project.</b></p></div>
+
+## 6 · The measurement: at 480p, the base model was sharper
+
+Now the part that matters more than any of the above.
+
+The realism adapter was tested on this box against the same scene with the adapter off. The result went the wrong way:
+
+<div class="callout danger"><span class="t">The result</span>
+<p><b>At 480p, the LoRA softened the image. The base model was sharper.</b> Not a subtle preference — a visible loss of detail in the direction the adapter was supposed to add it. The adapter was set aside, and the base model is what renders.</p></div>
+
+It would be easy to record that as "bad file" and move on. That reading is wrong, and the adapter's own authors said so before we ever ran it. From its training notes:
+
+> *"Skin texture, pores, fine hair live in **high spatial frequencies**, and at a lower [resolution] the latents barely carry them."*
+
+That sentence is the whole explanation, and it is worth unpacking rather than quoting.
+
+### Why resolution is a hard floor on what a LoRA can deliver
+
+The transformer never touches pixels. It works on a **latent** — a compressed grid, spatially **16× smaller** in each direction than the frame ([ch.03](03-how-h3-works.html)). So:
+
+| Frame | Latent grid per frame | Latent cells |
+|---|---|---|
+| 832 × 480 | **52 × 30** | 1,560 |
+| 1280 × 704 | **80 × 44** | 3,520 |
+
+Every latent cell stands in for a **16 × 16 block of pixels**. Pore-level skin texture, individual strands of hair, the fine structure of an iris — these vary over one to three pixels. In a representation whose smallest unit spans sixteen, there is simply **nowhere for that variation to be written down.** It is not that the model declines to draw it; the canvas has no place to put it.
+
+That is a sampling limit, not a modelling limit, and it applies identically to the base model and to any adapter. What differs is how each one *behaves* when asked for detail the canvas cannot hold.
+
+<svg viewBox="0 0 760 340" width="100%" style="max-width:920px" role="img" aria-label="Top: the 832 by 480 latent grid of 52 by 30 cells beside the 1280 by 704 grid of 80 by 44 cells, 2.26 times as many cells, each cell standing for a 16 by 16 pixel block. Bottom: a fine detail signal sampled by widely spaced latent cells reconstructing as a flat line, which is what softening looks like.">
+  <defs>
+    <marker id="l3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ffb454"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">THE CANVAS THE ADAPTER HAS TO PAINT ON — ONE FRAME, IN LATENT SPACE</text>
+  <rect x="2" y="28" width="366" height="140" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="20" y="52" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">832 × 480 → latent 52 × 30</text>
+  <text x="20" y="70" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">1,560 cells · each cell = a 16 × 16 pixel block</text>
+  <g stroke="#2a3446" fill="none">
+    <rect x="20" y="82" width="312" height="72"/>
+    <line x1="20" y1="106" x2="332" y2="106"/>
+    <line x1="20" y1="130" x2="332" y2="130"/>
+    <line x1="72" y1="82" x2="72" y2="154"/>
+    <line x1="124" y1="82" x2="124" y2="154"/>
+    <line x1="176" y1="82" x2="176" y2="154"/>
+    <line x1="228" y1="82" x2="228" y2="154"/>
+    <line x1="280" y1="82" x2="280" y2="154"/>
+  </g>
+  <rect x="392" y="28" width="366" height="140" rx="8" fill="#12161f" stroke="#5ee0c0"/>
+  <text x="410" y="52" fill="#e7ecf3" font-size="12.5" font-family="Inter,sans-serif">1280 × 704 → latent 80 × 44</text>
+  <text x="410" y="70" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">3,520 cells · 2.26× as many places to put detail</text>
+  <g stroke="#2f5a52" fill="none">
+    <rect x="410" y="82" width="312" height="72"/>
+    <line x1="410" y1="94" x2="722" y2="94"/>
+    <line x1="410" y1="106" x2="722" y2="106"/>
+    <line x1="410" y1="118" x2="722" y2="118"/>
+    <line x1="410" y1="130" x2="722" y2="130"/>
+    <line x1="410" y1="142" x2="722" y2="142"/>
+    <line x1="436" y1="82" x2="436" y2="154"/>
+    <line x1="462" y1="82" x2="462" y2="154"/>
+    <line x1="488" y1="82" x2="488" y2="154"/>
+    <line x1="514" y1="82" x2="514" y2="154"/>
+    <line x1="540" y1="82" x2="540" y2="154"/>
+    <line x1="566" y1="82" x2="566" y2="154"/>
+    <line x1="592" y1="82" x2="592" y2="154"/>
+    <line x1="618" y1="82" x2="618" y2="154"/>
+    <line x1="644" y1="82" x2="644" y2="154"/>
+    <line x1="670" y1="82" x2="670" y2="154"/>
+    <line x1="696" y1="82" x2="696" y2="154"/>
+  </g>
+  <text x="2" y="200" fill="#6f7b8f" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WHAT HAPPENS TO DETAIL FINER THAN ONE CELL</text>
+  <rect x="2" y="212" width="756" height="118" rx="8" fill="#12161f" stroke="#232c3b"/>
+  <text x="20" y="234" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">what the adapter was trained to produce — pores, strands, iris structure</text>
+  <path d="M20,268 L32,250 L44,286 L56,250 L68,286 L80,250 L92,286 L104,250 L116,286 L128,250 L140,286 L152,250 L164,286 L176,250 L188,286 L200,250 L212,286 L224,250 L236,268" fill="none" stroke="#ffb454"/>
+  <circle cx="20" cy="268" r="3" fill="#ffb454"/>
+  <circle cx="128" cy="268" r="3" fill="#ffb454"/>
+  <circle cx="236" cy="268" r="3" fill="#ffb454"/>
+  <text x="20" y="308" fill="#a6875c" font-size="11" font-family="Inter,sans-serif">the dots are where the latent grid can actually store a value</text>
+  <line x1="264" y1="268" x2="308" y2="268" stroke="#ffb454" marker-end="url(#l3)"/>
+  <text x="286" y="252" text-anchor="middle" fill="#a6875c" font-size="10.5" font-family="Inter,sans-serif">decode</text>
+  <text x="336" y="234" fill="#aab4c5" font-size="11.5" font-family="Inter,sans-serif">what survives at 52 × 30</text>
+  <line x1="336" y1="268" x2="620" y2="268" stroke="#6f7b8f"/>
+  <circle cx="336" cy="268" r="3" fill="#6f7b8f"/>
+  <circle cx="478" cy="268" r="3" fill="#6f7b8f"/>
+  <circle cx="620" cy="268" r="3" fill="#6f7b8f"/>
+  <text x="336" y="308" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">a smooth surface — which is what "softened" looked like on screen</text>
+</svg>
+
+### The honest mechanism
+
+Here the record has to be careful about what was measured and what is inference. **The measurement is the softening.** The explanation below is the best account of it, and it rests on the adapter authors' own statement of the resolution dependence.
+
+The adapter shifts the attention projections toward the statistics of its training data — footage where skin has visible texture and light behaves like a film set. At a resolution where those statistics cannot be represented, the model is being pushed toward an output the latent cannot encode. The nearest representable thing to "finely textured skin" on a grid that cannot resolve texture is **evenly lit, smooth skin**. The base model, carrying no such pull, keeps whatever local contrast the grid *can* carry. So the adapter's push, correct at the resolution it was trained for, becomes a smoothing operator at 480p.
+
+The compounding version of this is the point the original research note made: more resolution and a face-tuned adapter are **two levers that multiply**. Resolution supplies the places to put detail; the adapter fills them coherently. Neither alone is the fix, and applied in the wrong order the adapter is worse than nothing.
+
+<div class="callout warn"><span class="t">Caveats, stated as plainly as the result</span>
+<p>This is <b>one scene, one adapter, one resolution, judged by eye</b> — the same class of evidence as the int8-versus-Q4 comparison, with the same limits (<a href="13-int8-vs-q4.html">ch.13</a>). No perceptual metric was computed. It is a strong signal about <em>this</em> adapter in <em>this</em> pipeline, not a verdict on realism adapters generally. The prediction it makes is testable and has not yet been tested: at native 1280×704 — where the latent has 2.26× the cells — the same adapter should stop softening and start helping. That render has not been run.</p></div>
+
+## 7 · The same file format, a completely different job
+
+There is a second adapter in this project's history that behaves nothing like a style, and it is the clearest evidence that "LoRA" names a *mechanism*, not a *kind of effect*.
+
+The **Turbo** adapter for H3 does not change how anything looks. It changes how many steps the sampler needs: from a base of about 20 down to **4–8**, roughly a 5× reduction in sampling cost. It does this by **distillation** — retraining the velocity field so that the trajectory from noise to image is *straight enough* that a coarse 4-step Euler integration lands accurately, where the base field would need many small steps to follow its curve ([ch.23](23-math-from-scratch.html)).
+
+$$\frac{d\mathbf{z}_t}{dt} = v_\theta(\mathbf{z}_t, t, \mathbf{c}) \qquad\longrightarrow\qquad v_\theta' \text{ such that } S = 4\text{–}6 \text{ suffices}$$
+
+Same $\Delta W = BA$ decomposition, same file format, same load path. Entirely different target: not the look of the output but the **geometry of the path** used to reach it.
+
+<div class="callout truth"><span class="t">And it too is a trade, not an upgrade</span>
+<p>Measured on this project: Turbo is about <b>5× faster and trades away fine detail</b> — teeth and small features were where it showed. The standing rule that came out of it: <b>Turbo for drafts and motion tests, full-step sampling for hero shots.</b></p>
+<p>There was also a second-order lesson. At 1080p, once Turbo had removed most of the sampling cost, the <b>4× upscale of 362 frames became the new bottleneck</b> — the fixed tail of the pipeline dominated what was left. Amdahl's law arriving in person: killing the largest cost promotes the next one, and a 5× lever on 80% of the work is not a 5× lever on the job.</p></div>
+
+Two adapters, two directions, one shape. Whatever a LoRA is doing, it is spending its 32 trunk lines on *something*, and something else pays.
+
+## 8 · How they are made, and why there are thousands
+
+The recipe every one of these followed:
+
+1. **Curate a focused dataset.** The realism adapter used 176 hand-picked live-action clips of people, captioned. Studio-1939 used public-domain frames from a 1939 animated feature.
+2. **Freeze the base; attach empty `A`/`B` adapters** to the chosen matrices and pick a rank.
+3. **Bind a trigger word** — `r34l1sm`, `gulliv3r,` — so the style activates only when typed. The adapter learns to key its behaviour off that token, which is what makes it a switch rather than a permanent change of personality.
+4. **Train only `A` and `B`** with the ordinary diffusion loss on the clips — around 1,500 steps for the realism one.
+5. Ship the `.safetensors`.
+
+<div class="callout truth"><span class="t">Why the ecosystem overflows with them</span>
+<p>Training one costs a <b>few hours on a rented 4090 or A100 — a couple of dollars</b> (<a href="39-choosing-the-next-card.html">ch.39</a>). Anyone with a small dataset and one cloud GPU can teach a very large model a new trick <em>without owning it, retraining it, or shipping it.</em> Step 2 is why: the frozen base is a shared public good, and everyone's contribution is a 126 MB diff against it.</p>
+<p>The realism card records one finding worth more than the rest of the recipe: <b>training resolution mattered more than rank or step count</b> for fine detail. The data, not the knob, is usually the lever — and that is the same fact that section 6 met from the other side.</p></div>
+
+## 9 · Wiring one into this engine
+
+The pipeline here is not the stock `pipe.load_lora_weights()` path; phase B assembles a partial pipeline and runs a custom denoise ([ch.48](48-the-pipeline-without-comfyui.html)). Adding an adapter therefore means merging the nudge into the transformer weights directly. Two details decide whether that works.
+
+<div class="callout spec"><span class="t">The two things to get right</span>
+<ol>
+<li><b>Key remap.</b> The file names its layers <code>diffusion_model.blocks.N.attn.*</code>, the native / ComfyUI convention. The <code>diffusers</code> transformer calls the same layers <code>transformer_blocks.N.attn.*</code>. A small name-translation table has to bridge the two before anything is merged — the classic ComfyUI-versus-diffusers mismatch, and a silent one: mismatched keys are usually skipped rather than raised, so a botched remap produces a render that simply ignores the adapter.</li>
+<li><b>Merge before quantizing.</b> Compute $W_{\text{eff}} = W + \frac{\alpha}{r}BA$ on the <b>bf16</b> weights first, <em>then</em> quantize to int8 and offload. Merging a bf16 delta into weights that are already int8 means dequantizing, adding, and re-quantizing every matrix — lossy, fiddly, and done at exactly the moment the memory budget is tightest.</li>
+</ol></div>
+
+There is a cost the order makes explicit. Merging rewrites the transformer, so the 20 GB int8 file has to be **regenerated and re-saved** — a one-time expense per adapter and per strength setting. This is not a knob that can be turned at render time in a streaming engine: the weights are streamed block by block from RAM during the forward pass ([ch.29](29-where-numbers-live.html)), and applying a delta per block per step would pay the cost fifty times a step. Bake it in once, or do not use it.
+
+<svg viewBox="0 0 760 232" width="100%" style="max-width:920px" role="img" aria-label="Two merge orders compared: the correct path adds the low-rank delta to the bf16 weights and then quantizes once to int8 for streaming, while the wrong path quantizes first and then must dequantize, add and re-quantize every matrix, losing precision at the tightest moment of the memory budget.">
+  <defs>
+    <marker id="l4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#5ee0c0"/></marker>
+    <marker id="l5" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#ff6b6b"/></marker>
+  </defs>
+  <text x="2" y="14" fill="#5ee0c0" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">CORRECT ORDER — MERGE, THEN QUANTIZE, ONCE</text>
+  <rect x="2" y="26" width="150" height="52" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="77" y="48" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">bf16 weights</text>
+  <text x="77" y="66" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">~66 GB</text>
+  <line x1="154" y1="52" x2="190" y2="52" stroke="#5ee0c0" marker-end="url(#l4)"/>
+  <rect x="194" y="26" width="170" height="52" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="279" y="48" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">add (α/r)·BA</text>
+  <text x="279" y="66" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">full precision, exact</text>
+  <line x1="366" y1="52" x2="402" y2="52" stroke="#5ee0c0" marker-end="url(#l4)"/>
+  <rect x="406" y="26" width="150" height="52" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="481" y="48" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">quantize to int8</text>
+  <text x="481" y="66" text-anchor="middle" fill="#6f7b8f" font-size="11" font-family="Inter,sans-serif">once</text>
+  <line x1="558" y1="52" x2="594" y2="52" stroke="#5ee0c0" marker-end="url(#l4)"/>
+  <rect x="598" y="26" width="160" height="52" rx="7" fill="#14342c" stroke="#5ee0c0"/>
+  <text x="678" y="48" text-anchor="middle" fill="#eafff8" font-size="12" font-family="Inter,sans-serif">20 GB, adapter baked in</text>
+  <text x="678" y="66" text-anchor="middle" fill="#8fd8c4" font-size="11" font-family="Inter,sans-serif">free at render time</text>
+  <text x="2" y="126" fill="#ff6b6b" font-size="10.5" font-family="Inter,sans-serif" letter-spacing="1.4">WRONG ORDER — QUANTIZE, THEN TRY TO MERGE</text>
+  <rect x="2" y="138" width="150" height="52" rx="7" fill="#151b26" stroke="#232c3b"/>
+  <text x="77" y="170" text-anchor="middle" fill="#e7ecf3" font-size="12" font-family="Inter,sans-serif">int8 weights</text>
+  <line x1="154" y1="164" x2="190" y2="164" stroke="#ff6b6b" marker-end="url(#l5)"/>
+  <rect x="194" y="138" width="362" height="52" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="375" y="160" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">dequantize → add bf16 delta → re-quantize, per matrix</text>
+  <text x="375" y="178" text-anchor="middle" fill="#c98f8f" font-size="11" font-family="Inter,sans-serif">precision lost twice, at the tightest point of the budget</text>
+  <line x1="558" y1="164" x2="594" y2="164" stroke="#ff6b6b" marker-end="url(#l5)"/>
+  <rect x="598" y="138" width="160" height="52" rx="7" fill="#241a1a" stroke="#ff6b6b"/>
+  <text x="678" y="170" text-anchor="middle" fill="#ffdede" font-size="12" font-family="Inter,sans-serif">lossy and fiddly</text>
+  <text x="2" y="220" fill="#6f7b8f" font-size="11.5" font-family="Inter,sans-serif">Either way the 20 GB file is rewritten once per adapter and per strength — this is not a render-time knob in a streaming engine.</text>
+</svg>
+
+## 10 · The honest limits
+
+<div class="callout danger"><span class="t">A LoRA changes <em>style</em>, not the machine</span>
+<p>It can push faces toward photoreal or the whole frame toward ink. It <b>cannot</b> add resolution, extend the 15-second trained range of the model, reduce VRAM, or make a render faster (except the Turbo case, which buys speed by spending detail). Those ceilings belong to the model and the hardware (<a href="20-how-far-we-can-go.html">ch.20</a>, <a href="39-choosing-the-next-card.html">ch.39</a>).</p>
+<p>And it will not rescue bad framing. Step count is a property of the <em>scene</em> — a tight close-up settles in 4 steps, a wide vista with a small distant subject needs 49 — and a subject too small in frame is short of pixels before any adapter is loaded. Framing remains the master lever (<a href="17-what-actually-improves-quality.html">ch.17</a>). A LoRA is a taste adjustment on a fixed engine: powerful, cheap, bounded, and — as section 6 records — occasionally negative.</p></div>
+
+<div class="callout spec"><span class="t">The chapter in seven lines</span>
+<ol>
+<li><b>Freeze the giant, learn a tiny nudge.</b> The base never changes; only $BA$ ships — 126 MB against a 20 GB transformer.</li>
+<li><b>The maths is low-rank:</b> $\Delta W = BA$, so $W_{\text{eff}} = W + \frac{\alpha}{r}BA$. Rank 32 cuts 86 M numbers to 688 K, about 125×.</li>
+<li><b>Rank is a bandwidth limit,</b> not a size setting — every correction squeezes through a 32-wide waist. Rank 16 whispers, rank 64 shouts.</li>
+<li><b>It is visible in the file</b> — <code>lora_A</code> / <code>lora_B</code> pairs, here on the attention projections only, with the feed-forward untouched.</li>
+<li><b>At 480p it made the picture softer than the base model.</b> The latent grid is 52 × 30 and cannot carry the high-frequency detail the adapter was trained to add, so the push toward texture resolves as smoothing.</li>
+<li><b>The same format carries entirely different jobs</b> — the Turbo adapter re-shapes the sampling trajectory for 4–8 steps instead of ~20, and pays for it in fine detail.</li>
+<li><b>In this engine:</b> remap the keys, merge on bf16 <em>before</em> quantizing, and accept that the 20 GB file is rewritten once per adapter.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">LoRA / adapter</span><span class="badge">fine-tuning</span><span class="badge">frozen base</span><span class="badge">low-rank decomposition</span><span class="badge">rank r</span><span class="badge">alpha / scale</span><span class="badge">ΔW = BA</span><span class="badge">intrinsic dimension</span><span class="badge">trigger word</span><span class="badge">strength</span><span class="badge">high spatial frequency</span><span class="badge">latent grid</span><span class="badge">distillation</span><span class="badge">merge order</span><span class="badge">key remap</span></p>
+<p>If those feel solid, the difference between "the model learned something" and "the pipeline can express it" is now a distinction rather than a blur.</p></div>
+
+<p class="small">The precision story an adapter has to be merged around is <a href="13-int8-vs-q4.html">ch.13</a> and <a href="18-number-formats-precision.html">ch.18</a>; what actually moves quality, and why framing outranks everything, is <a href="17-what-actually-improves-quality.html">ch.17</a>; the sampling mathematics the Turbo adapter re-shapes is <a href="23-math-from-scratch.html">ch.23</a>; the rented-GPU economics that make training one cheap are <a href="39-choosing-the-next-card.html">ch.39</a>; the ceilings no adapter lifts are <a href="20-how-far-we-can-go.html">ch.20</a>.</p>
+
+Next: why all of this is written in Python when the render spends eighty minutes somewhere Python never goes.
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

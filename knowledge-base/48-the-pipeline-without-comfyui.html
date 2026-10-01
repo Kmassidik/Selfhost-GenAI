@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>48 · The Pipeline, Without ComfyUI</title>
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 48 · The standalone stack — what actually runs, end to end, with no engine underneath it</span>
+
+# The Pipeline, Without ComfyUI
+
+<p class="lede">Here is a thing worth noticing: <b>ComfyUI is already gone.</b> There is no <code>~/ComfyUI</code> on the box, the service is inactive, and every render in [ch.46](46-the-first-15-seconds.html) and [ch.47](47-the-scorecard.html) was produced without it — including the post-processing. We left the framework somewhere around [ch.43](43-the-dalang-engine.html) and never wrote it down. This chapter is that missing page: the standalone pipeline, what each piece does, and why it is shaped the way it is.</p>
+
+<div class="callout truth"><span class="t">Where we actually are</span>
+<p>The goal "build our own pipeline without relying on ComfyUI" is <b>already achieved</b>. What was missing was documentation, not code. ComfyUI was the <em>first</em> engine ([ch.04](04-software-stack.html)) — it taught us the graph, the loaders and the node vocabulary, and then we outgrew it. Nothing below imports it.</p></div>
+
+## The one technique that makes it possible
+
+Everything here rests on a single idea from `diffusers`' modular pipelines, and the lesson was learned the expensive way. From the phase-A source, translated:
+
+> *Lesson from v1: `output=` chooses what to return — but the entire graph still runs. The modular way is to assemble a `SequentialPipelineBlocks` containing only the blocks you actually need.*
+
+Asking a full pipeline for just the text embeddings still executes the whole thing, DiT included. The fix is to build a **partial pipeline**:
+
+```python
+base = ModularPipeline.from_pretrained(ROOT)
+sub  = {k: v for k, v in base.blocks.sub_blocks.items() if k in ["denoise", "decode"]}
+pipe = SequentialPipelineBlocks.from_blocks_dict(sub).init_pipeline(ROOT)
+```
+
+That two-line move is the whole architecture. Once you can slice the graph, you can **split the render across separate processes** — and that is what buys the memory.
+
+## Why two phases
+
+H3 is really two large models: a **32B text/vision encoder** and a **33B DiT**. Running them in one process means both live in RAM at once. So we don't.
+
+<div class="callout spec"><span class="t">The split</span>
+<p><b>Phase A</b> runs <em>only</em> the encoder blocks and writes its output to disk. <b>Phase B</b> starts a fresh process, loads <em>only</em> the DiT, and reads that file. The 32B encoder never enters phase B's memory — the source says so in as many words: <em>"o encoder de 32B nunca entra na RAM aqui."</em></p></div>
+
+There is a second payoff that turned out to matter more day to day: **encode once, render many.** The embeddings for a scene are fixed; steps, resolution, engine and seed are not. Forty-plus `.pt` files sit in `h3-lab/embeds/` and get re-rendered constantly without ever paying the encoder again.
+
+## Phase A — encode
+
+`runtime/h3-consumer-bench/h3_encode_local.py`
+
+Takes **no arguments**. It walks every scene in `h3_cenas.py`, builds a partial pipeline of `before_encode + text_encoder [+ vae_encoder]` with the int8 encoder, and saves the complete intermediate state per scene:
+
+```
+h3-lab/embeds/<scene>.pt
+  → prompt_embeds, text_token_tags, height, width, num_frames
+```
+
+Every scene is wrapped in its own `try/except`, so one bad prompt logs a traceback and the batch continues. Scenes themselves live in `h3_cenas.py` as a plain dict — prompt text plus `frames`, `height`, `width`. **Adding a shot means adding a dict entry**, which is the entire "UI".
+
+## Phase B — denoise and decode
+
+`runtime/h3-consumer-bench/h3_denoise_local.py <scene> [--steps N] [--saida out.mp4]`
+
+Loads `embeds/<scene>.pt`, assembles a partial pipeline of `["denoise", "decode"]`, loads the 33B DiT with `TorchAoConfig(Int8WeightOnlyConfig)`, applies block-level group offloading, renders, and writes `.mp4` plus `.wav`.
+
+Two details worth keeping:
+
+- **`modules_to_not_convert`** — the projections, embedders and norms stay in bf16 while the big linears go int8. Quantizing those small layers costs quality and saves almost nothing.
+- **`use_stream=False`** on the offload. Streaming pins tens of GB and the kernel OOM-kills the process *without a traceback*. Slower transfer, but it survives.
+
+## The driver layer
+
+Phase B is the engine; drivers wrap it to change *how* the forward runs. Each monkeypatches the transformer and then calls straight into `h3_denoise_local.main()`.
+
+| Driver | What it does | Chapter |
+|---|---|---|
+| `05_render_ring.py` | Ring / context parallelism across 2 cards | [ch.36](36-splitting-the-video-cp.html) |
+| `08–10_render_tiled.py` | Single-card tiling — 15 s @ 480p or 5 s @ 720p | [ch.44](44-building-dalang.html) |
+| `16_render_3gpu.py` | 3-GPU sequence parallelism — fits what no card holds | [ch.45](45-three-gpu-sequence-parallelism.html) |
+
+<div class="callout truth"><span class="t">Why this layering is the good part</span>
+<p>The engine never changed. Every parallelism strategy we built is a <b>patch applied before the same entry point</b> — swap the driver, keep the pipeline. That is why [ch.45](45-three-gpu-sequence-parallelism.html)'s sharded forward could be validated against a golden reference and then dropped into production unchanged.</p></div>
+
+## The safety layer
+
+Added after a decode bug destroyed six hours of denoise ([ch.46](46-the-first-15-seconds.html)). All three are monkeypatches installed from the driver, **never edits to `site-packages`**, so a `pip install` cannot silently revert them.
+
+| File | Job |
+|---|---|
+| `h3_decode_fix.py` | Device alignment + dumps latents to disk before decode can fail |
+| `h3_vae_cpu_accum.py` | Keeps finished pixel chunks off the GPU during decode |
+| `17_decode_from_latents.py` | Rebuilds mp4/wav from a dump — GPU or pure-CPU, `--audio-only` |
+
+## Post-processing, without nodes
+
+The upscale and interpolation that used to be ComfyUI nodes are now **standalone binaries** in `upscale/`, driven by ordinary subprocess calls:
+
+- `realesrgan-ncnn-vulkan` — upscaling
+- `rife-ncnn-vulkan` — frame interpolation
+- `ffmpeg` — mux, concat, format
+
+These need no Python, no torch, and no model server. They are Vulkan binaries you can call from a shell script — which is precisely why they survived the migration.
+
+## What ComfyUI gave us, and what replaced it
+
+| ComfyUI provided | Replacement |
+|---|---|
+| Graph execution | `SequentialPipelineBlocks` partial pipelines |
+| Model loaders | `from_pretrained` + `TorchAoConfig` |
+| VRAM management | Explicit `enable_group_offload` / `apply_group_offloading` |
+| Node-based upscale / face restore | `realesrgan-ncnn-vulkan`, `rife-ncnn-vulkan`, ffmpeg |
+| Prompt UI | `h3_cenas.py` — a Python dict |
+| Node caching | Phase-A `.pt` embeds on disk |
+
+<div class="callout warn"><span class="t">What we gave up, honestly</span>
+<p>The visual graph, and the ability to rewire a pipeline without editing code. That is a real loss for exploration. What we bought is the ability to <b>patch the forward pass itself</b> — ring attention, sequence sharding, custom offload — which no node graph would ever have let us do. The trade only makes sense because we're doing R&D below the framework, not assembling shots.</p></div>
+
+## Running it, end to end
+
+```bash
+cd runtime/h3-consumer-bench
+
+# Phase A — once per scene set (no args; walks h3_cenas.py)
+../../.venv/bin/python h3_encode_local.py
+
+# Phase B — pick a driver for the parallelism you need
+../../.venv/bin/python ../../dalang/16_render_3gpu.py <scene> \
+    --steps 23 --n 3 --saida h3-lab/<scene>.mp4
+
+# Recovery — if decode ever fails, the denoise is still on disk
+../../.venv/bin/python ../../dalang/17_decode_from_latents.py \
+    --video docs/<run>.video.pt --saida h3-lab/<scene>.mp4
+```
+
+Set `H3_LATENT_BACKUP=docs/<run>` on the render and the latents are written the moment denoise finishes — the difference between losing six hours and losing six minutes.
+
+## Before publishing
+
+<div class="callout spec"><span class="t">Repo readiness checklist</span>
+<ol>
+<li><b>Sync <code>source/dalang/</code></b> — it currently stops at <code>11_render.py</code>. Missing <code>12</code>–<code>16</code> (the G1→G4 build that ch.45 cites by name) and the three safety-layer files. Right now the chapters reference code the repo does not contain.</li>
+<li><b>Include the runtime scripts</b> — <code>h3_encode_local.py</code>, <code>h3_denoise_local.py</code>, <code>h3_cenas.py</code>. Without them the drivers have nothing to call.</li>
+<li><b>Secrets: clean.</b> Scanned — no embedded tokens or keys. The box reads <code>/root/.hf_token</code> by path rather than inlining it, which is the pattern to keep.</li>
+<li><b>Do not commit weights or embeds</b> — the models are tens of GB and <code>h3-lab/embeds/*.pt</code> is regenerable by phase A. Gitignore both.</li>
+<li><b>Pin the environment</b> — the stack is sensitive to <code>torch</code> / <code>torchao</code> / <code>diffusers</code> versions; the safety-layer patches copy upstream function bodies and must be re-diffed after an upgrade.</li>
+</ol></div>
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">partial pipeline</span><span class="badge">SequentialPipelineBlocks</span><span class="badge">phase A / phase B</span><span class="badge">driver layer</span><span class="badge">safety layer</span><span class="badge">group offloading</span><span class="badge">encode once, render many</span><span class="badge">latent dump</span></p>
+<p>If those feel solid, this stack is yours to run.</p></div>
+
+<p class="small">The engine internals are <a href="43-the-dalang-engine.html">ch.43</a> and <a href="44-building-dalang.html">ch.44</a>; the sharded forward is <a href="45-three-gpu-sequence-parallelism.html">ch.45</a>; the safety layer and the night that produced it are <a href="46-the-first-15-seconds.html">ch.46</a>; measured costs for every configuration are <a href="47-the-scorecard.html">ch.47</a>. Code: <code>runtime/h3-consumer-bench/</code> (engine), <code>dalang/</code> (drivers + safety layer), <code>upscale/</code> (post-process binaries).</p>
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
