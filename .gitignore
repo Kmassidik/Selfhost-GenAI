@@ -1,38 +1,48 @@
-# never commit — model weights, media, envs, secrets
-*.mp4
-*.mov
-*.png
-*.jpg
+# ---- never commit: model weights, engines, media, caches, secrets ----
+# All huge, downloadable, or regenerable — the runtime lives on the box.
+
+# weights + adapters + binaries
+models/
+loras/
+upscale/
 *.safetensors
 *.gguf
+*.pt
 *.pth
 *.pickle
+
+# generated media + render state
+outputs/
+state/
+logs/
+*.log
+*.mp4
+*.mov
+*.wav
+*.png
+*.jpg
+
+# third-party / cloned engines — not ours to redistribute
+runtime/h3-consumer-bench/
+runtime/h3-consumer-bench/h3-lab/
+h3-lab/
+_archive/
+
+# envs + caches
 .venv/
+venv/
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
 .DS_Store
+
 # secrets — never
 *.token
+.hf_token
 id_*
 *.pem
 .env
 secrets*
-
-# added before publishing — regenerable artifacts, never source
-*.pt          # latent dumps + phase-A embeds (can be 69 MB each)
-*.wav          # rendered audio
-h3-lab/          # render outputs + embeds
-outputs/          # finished renders
-
-# box artefacts - never source, always regenerable
-models/           # 205 GB of weights - re-download from Hugging Face
-loras/            # adapter weights
-upscale/          # realesrgan / rife binaries and their models
-state/            # latent dumps - regenerable, and huge
-logs/             # run logs
-*.log             # stray run logs
-_archive/         # superseded material
-h3-lab/embeds/    # phase-A embeddings - regenerate with h3_encode_local.py
 
 # operational handover — names where credentials live, stays local
 handover/
