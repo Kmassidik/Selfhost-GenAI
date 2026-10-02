@@ -1,0 +1,13 @@
+{
+  "id": "flux-dev",
+  "enabled": true,
+  "name": "FLUX.1-dev",
+  "engine": "diffusers",
+  "family": "flux",
+  "blurb": "Excellent + great text, lowest VRAM. Slowest (~8 min/image).",
+  "speed": "~8 min · slow",
+  "model": "models/bench/flux1-dev",
+  "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg": 3.5 },
+  "limits": { "min_side": 256, "max_side": 1536, "max_steps": 60 },
+  "device": 1
+}

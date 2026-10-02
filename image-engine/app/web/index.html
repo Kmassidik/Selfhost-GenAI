@@ -115,6 +115,11 @@
     background:linear-gradient(transparent,rgba(0,0,0,.6));opacity:0;transition:opacity .2s;text-align:center}
   .gallery .gcell:hover::after{opacity:1}
   .gallery .none{grid-column:1/-1;color:var(--text-muted);font-size:13px;padding:24px;text-align:center}
+  .msel{width:100%;padding:11px 12px;border-radius:12px;border:1px solid var(--border-glass);
+    background:var(--field);color:var(--text-main);font-size:14px;font-weight:600;cursor:pointer;
+    font-family:inherit;appearance:none;-webkit-appearance:none;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2.5' stroke-linecap='round'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat:no-repeat;background-position:right 12px center}
   /* render queue — a compact dropdown off the top-right button */
   .topactions{display:flex;align-items:center;gap:10px}
   .qwrap{position:relative}
@@ -192,6 +197,11 @@
 
   <div class="grid">
     <div class="glass panel">
+      <div class="field">
+        <label for="modelsel">Model</label>
+        <select id="modelsel" class="msel"></select>
+        <div class="hint" id="modelhint">loads on demand · switching models takes ~30–60 s</div>
+      </div>
       <div class="field">
         <label>Templates <span style="font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0">· one click fills everything below</span></label>
         <div class="chips" id="templates"></div>
@@ -335,13 +345,26 @@ function isDark(){ const t=document.documentElement.dataset.theme; return t?t===
 function syncIcon(){ $('#themeicon').innerHTML = isDark()?SUN:MOON; }
 $('#theme').onclick=()=>{ const n=isDark()?'light':'dark'; document.documentElement.dataset.theme=n; localStorage.setItem('imageai_theme',n); syncIcon(); };
 
-async function loadModel(){
-  try{ const m=await (await fetch('/api/model')).json();
-    $('#mname').textContent=m.name; $('#msub').textContent=m.blurb||m.id;
-    $('#steps').value=m.defaults.steps; $('#cfg').value=m.defaults.cfg;
+let MODELS=[];
+async function loadModels(){
+  try{ const m=await (await fetch('/api/models')).json();
+    MODELS=m.models||[];
+    $('#modelsel').innerHTML=MODELS.map(s=>`<option value="${s.id}">${s.name} — ${s.speed||''}</option>`).join('');
     if(m.auth_required){ $('#pwfield').style.display='block'; $('#pw').value=localStorage.getItem('imageai_pw')||''; }
+    const saved=localStorage.getItem('imageai_model');
+    if(saved && MODELS.some(s=>s.id===saved)) $('#modelsel').value=saved;
+    applyModel();
   }catch(e){ $('#msub').textContent='offline'; }
 }
+function curModel(){ return MODELS.find(s=>s.id===$('#modelsel').value)||MODELS[0]; }
+function applyModel(){
+  const s=curModel(); if(!s) return;
+  $('#mname').textContent=s.name; $('#msub').textContent=s.blurb||s.id;
+  $('#modelhint').textContent=(s.speed?s.speed+' · ':'')+'loads on demand · switching models takes ~30–60 s';
+  $('#steps').value=s.defaults.steps; $('#cfg').value=s.defaults.cfg;
+  localStorage.setItem('imageai_model', s.id);
+}
+$('#modelsel').onchange=applyModel;
 document.querySelectorAll('#sizes .chip').forEach(c=>c.onclick=()=>{
   document.querySelectorAll('#sizes .chip').forEach(x=>x.classList.remove('on'));
   c.classList.add('on'); $('#width').value=c.dataset.w; $('#height').value=c.dataset.h;
@@ -401,13 +424,15 @@ document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
 
 // ── render queue: ONE poll for every job; drawn as a compact top-right dropdown ──
 let timer=null, lastDone=-1, trackId=null;
+function modelName(id){ const s=MODELS.find(m=>m.id===id); return s?s.name:(id||'?'); }
 function qrow(j){
   const clickable=j.status==='done'&&j.image;
+  const mn=modelName(j.model);
   let st,sub;
-  if(j.status==='queued'){ st='queued'; sub=j.position?('#'+j.position+' waiting'):'waiting'; }
-  else if(j.status==='running'){ st='running'; sub='GPU 1 · rendering…'; }
+  if(j.status==='queued'){ st='queued'; sub=mn+' · '+(j.position?('#'+j.position+' waiting'):'waiting'); }
+  else if(j.status==='running'){ st='running'; sub=mn+' · rendering…'; }
   else if(j.status==='failed'){ st='failed'; sub=(j.error||'error').slice(0,40); }
-  else { st='done'; sub=(j.seconds?j.seconds+'s · ':'')+'seed '+j.seed; }
+  else { st='done'; sub=mn+' · '+(j.seconds?j.seconds+'s · ':'')+'seed '+j.seed; }
   return `<div class="qrow ${clickable?'clk':''}" ${clickable?`data-img="${j.image}"`:''}>`+
     `<span class="qid">#${j.id}</span>`+
     `<div class="mid"><div class="pmt">${esc(j.prompt||'(no prompt)')}</div><div class="sub">${esc(sub)}</div></div>`+
@@ -454,7 +479,8 @@ $('#go').onclick=async()=>{
   const prompt=$('#prompt').value.trim();
   if(!prompt){ $('#status').className='status'; $('#status').textContent='Write a prompt first.'; return; }
   const body={prompt,negative:$('#negative').value,width:+$('#width').value,height:+$('#height').value,
-    steps:+$('#steps').value,cfg:+$('#cfg').value,seed:$('#seed').value?+$('#seed').value:0};
+    steps:+$('#steps').value,cfg:+$('#cfg').value,seed:$('#seed').value?+$('#seed').value:0,
+    model:$('#modelsel').value};
   const pw=$('#pw').value.trim(); if(pw) localStorage.setItem('imageai_pw',pw);
   const headers={'Content-Type':'application/json'}; if(pw) headers['Authorization']='Bearer '+pw;
   const go=$('#go'); go.disabled=true; $('#status').className='status'; $('#status').textContent='Queueing…';
@@ -469,7 +495,7 @@ $('#go').onclick=async()=>{
   else { $('#result').innerHTML='<div class="spin"></div>'; $('#status').className='status'; $('#status').textContent='Starting…'; }
   refresh();
 };
-loadModel(); renderTemplates(); gallery(true); refresh();
+loadModels(); renderTemplates(); gallery(true); refresh();
 </script>
 </body>
 </html>

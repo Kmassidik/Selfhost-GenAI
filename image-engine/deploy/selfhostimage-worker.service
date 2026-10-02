@@ -16,8 +16,9 @@ Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 Environment=QWEN_INT8=1
 # reuse the causal-conditioning K/V across denoising steps (2.1's KV cache)
 Environment=QWEN_KV_CACHE=1
-# dedicated venv (diffusers git-main with QwenImage21Pipeline) — isolated from the H3 video engine
-ExecStart=/root/Desktop/selfhostimageai/.venv-qwen21/bin/python /root/Desktop/selfhostimageai/app/worker_qwen.py
+# dedicated venv (diffusers git-main) — isolated from the H3 video engine.
+# worker_multi serves every enabled model, loading one onto GPU 1 at a time (swap on demand).
+ExecStart=/root/Desktop/selfhostimageai/.venv-qwen21/bin/python /root/Desktop/selfhostimageai/app/worker_multi.py
 # finish the render in hand before stopping, rather than throw away a half-made image
 KillMode=mixed
 TimeoutStopSec=600

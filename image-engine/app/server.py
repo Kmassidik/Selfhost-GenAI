@@ -58,12 +58,13 @@ class GenReq(BaseModel):
     steps: int | None = None
     cfg: float | None = None
     seed: int | None = None
+    model: str | None = None
 
 
 @app.post("/api/generate")
 def generate(req: GenReq, request: Request, authorization: str = Header(default="")):
     require_owner(request, authorization)
-    spec = registry.default_model()
+    spec = (registry.get(req.model) if req.model else None) or registry.default_model()
     p = registry.clamp(spec, req.model_dump())
     if not p["prompt"]:
         raise HTTPException(400, "prompt is empty")
@@ -114,7 +115,7 @@ def jobs_feed(limit: int = 24):
     pos = jobs.positions(c)
     c.close()
     return [{"id": r["id"], "status": r["status"], "image": r["image"],
-             "seconds": r["seconds"], "error": r["error"],
+             "seconds": r["seconds"], "error": r["error"], "model": r["model"],
              "position": pos.get(r["id"]), **r["params"]} for r in rows]
 
 
@@ -139,6 +140,17 @@ def model():
     s = registry.default_model()
     return {"id": s["id"], "name": s["name"], "blurb": s.get("blurb", ""),
             "defaults": s["defaults"], "limits": s["limits"],
+            "auth_required": bool(S.owner_password)}
+
+
+@app.get("/api/models")
+def models():
+    """Every enabled model, for the picker. The page lets you choose one per job;
+    the worker loads it on demand (one model on the 8 GB card at a time)."""
+    ms = registry.models()  # enabled only
+    return {"models": [{"id": s["id"], "name": s["name"], "blurb": s.get("blurb", ""),
+                        "defaults": s["defaults"], "limits": s["limits"],
+                        "speed": s.get("speed", "")} for s in ms.values()],
             "auth_required": bool(S.owner_password)}
 
 

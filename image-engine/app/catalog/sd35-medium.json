@@ -1,0 +1,13 @@
+{
+  "id": "sd35-medium",
+  "enabled": true,
+  "name": "SD3.5 Medium",
+  "engine": "diffusers",
+  "family": "sd3",
+  "blurb": "Fastest here (~100s), light, good text. Best for quick drafts.",
+  "speed": "~100 s · fastest",
+  "model": "models/bench/sd35-medium",
+  "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg": 4.5 },
+  "limits": { "min_side": 256, "max_side": 1536, "max_steps": 60 },
+  "device": 1
+}

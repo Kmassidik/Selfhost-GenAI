@@ -1,0 +1,13 @@
+{
+  "id": "sdxl",
+  "enabled": true,
+  "name": "SDXL 1.0",
+  "engine": "diffusers",
+  "family": "sdxl",
+  "blurb": "Fast (~110s), great art & photoreal. Note: can't render text; weak hands.",
+  "speed": "~110 s · fast",
+  "model": "models/bench/sdxl-base",
+  "defaults": { "width": 1024, "height": 1024, "steps": 30, "cfg": 7.0 },
+  "limits": { "min_side": 256, "max_side": 1536, "max_steps": 60 },
+  "device": 1
+}
