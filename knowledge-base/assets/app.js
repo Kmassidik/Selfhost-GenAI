@@ -24,6 +24,7 @@ const PAGES = [
   { file: "19-what-a-model-is.html", n: "19",  title: "What a Model Actually Is", cat: "foundations" },
   { file: "28-anatomy-of-h3.html",   n: "28",  title: "Anatomy of H3", cat: "foundations" },
   { file: "06-learning-roadmap.html",n: "06",  title: "Your Learning Roadmap", cat: "foundations" },
+  { file: "50-reading-an-image-recipe.html", n: "50", title: "Reading an Image's Recipe", cat: "foundations" },
 
   // ⚙️ Technical — how it actually works under the hood
   { file: "07-optimization-720p.html", n: "07", title: "Optimizing for 720p", cat: "technical" },

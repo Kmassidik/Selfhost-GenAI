@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>50 · Reading an Image's Recipe — Seed, Negative, and the Controls</title>
+<meta name="description" content="A beginner's guide to the five knobs behind every generated image — prompt, negative, seed, steps, CFG — what each one actually does, and the one-variable-at-a-time method that turns guessing into learning. Plus the recipe panel that shows you how any image in your gallery was made.">
+<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/katex.min.css">
+</head>
+<body>
+<script type="text/markdown" id="md">
+<span class="kicker">Chapter 50 · Learn the knobs</span>
+
+# Reading an Image's Recipe
+
+<p class="lede">Every image the engine makes has a <b>recipe</b> — the exact prompt, the negative prompt, the seed, the steps, and the CFG that produced it. Once you can read that recipe and change <em>one thing at a time</em>, you stop guessing and start learning. This chapter explains each knob in plain language, and the panel that now shows you the recipe behind any image in your gallery.</p>
+
+<div class="callout truth"><span class="t">The one habit that matters</span>
+<p>Change <b>one variable at a time</b>. Lock everything, move a single knob, render, compare. That is the whole method — it is how the fox in chapter 49 was tested (same seed, only int8-vs-bf16 changed), and it is how you will learn what each control actually does on <em>your</em> prompts.</p></div>
+
+## The five knobs
+
+A generated image is not magic; it is five inputs. Here is the whole control panel, plainest-first.
+
+| knob | in one line | when to touch it |
+|---|---|---|
+| **prompt** | what you want | always — this is 80% of the result |
+| **negative** | what to avoid | when something keeps appearing that you don't want |
+| **seed** | which random starting point | to lock a composition, or to get a fresh one |
+| **steps** | how many refinement passes | rarely — 30 is plenty |
+| **CFG** | how hard it obeys the prompt | when the image ignores you, or looks "fried" |
+
+## Seed — the starting point, as a number
+
+Image generation does not draw. It **denoises**. It starts from a full frame of random static — like TV snow — and, step by step, removes the noise until a picture is left. The **seed** is the number that decides what that first field of static looks like.
+
+<div class="callout spec"><span class="t">The rule that makes seed useful</span>
+<p><b>Same seed + same prompt + same settings → the exact same image, every single time.</b> Change the seed and you get a completely different image from the same prompt. Leave the seed blank and the engine picks a random one for you (and records it, so you can get that image back later).</p></div>
+
+This is the most powerful learning tool you have. The workflow:
+
+1. Generate a few images with a **blank** seed (random each time).
+2. One is *almost* right. Open it, read its recipe, note the seed.
+3. **Lock that seed** and change only the prompt — add a word, fix a detail.
+4. The composition stays put; only the thing you changed moves.
+
+Without a locked seed, every render is a different photo and you can never tell whether your prompt edit helped or whether you just rolled a different dice. With it, the comparison is fair.
+
+## Negative prompt — the "do not" list
+
+The prompt is a magnet pulling the image *toward* things. The **negative prompt** is a magnet pushing it *away* from things. Typical negative:
+
+```
+blurry, low quality, deformed, extra fingers, extra limbs,
+text, watermark, signature, jpeg artifacts
+```
+
+That tells the model: whatever you do, steer away from these. Leave it blank and the model simply isn't being pushed away from anything.
+
+<div class="callout warn"><span class="t">What a negative prompt is not</span>
+<p>It is a <b>gentle steering wheel, not a magic fix</b>. "deformed hands" in the negative reduces bad hands; it does not guarantee perfect ones. Most of your quality comes from the positive prompt and the seed. Reach for the negative when something <em>specific and unwanted</em> keeps showing up — then name that thing.</p></div>
+
+## Steps — refinement passes
+
+Steps are how many times the model cleans up the noise on its way to the final image. Few steps → rough, unfinished. More steps → finer, but slower, with **diminishing returns**: the jump from 8 to 20 is huge; from 30 to 50 is usually invisible. On this engine, **30 is the comfortable default**, and render time scales roughly linearly with it — doubling steps roughly doubles the wait.
+
+## CFG — how hard it follows the prompt
+
+CFG (the engine calls it `true_cfg_scale`) controls how strictly the image obeys your words versus doing its own natural thing.
+
+- **Too low** (≈1–2): the model ignores your prompt and drifts.
+- **The sweet spot** (≈3.5–5): follows the prompt, still looks natural.
+- **Too high** (≈8+): over-obeys — colours get garish, contrast "fried", details crunchy.
+
+<div class="callout spec"><span class="t">If an image looks over-cooked</span>
+<p>Over-saturated, high-contrast, slightly crunchy? <b>Lower the CFG.</b> Ignoring half your prompt? <b>Raise it a little.</b> Default around 4 is a safe home base; move it ±1 and compare.</p></div>
+
+## Size and aspect
+
+Width and height set how many pixels the image has, and the *shape* of the frame changes the composition the model reaches for — a tall 896×1152 invites a portrait, a wide 1536×640 invites a landscape. More pixels also means more room for fine detail (and a longer render). Chapter 17 has the deeper point: how big a face lands in the frame matters more for its quality than almost anything else.
+
+## The recipe panel
+
+All of this is now visible in the app. In your gallery, **click any image**. A panel opens showing that image's full recipe — prompt, negative, seed, size, steps, CFG, render time — with four buttons:
+
+<div class="callout truth"><span class="t">What the buttons do</span>
+<p><b>↩ Use these settings</b> — loads everything, <em>including the exact seed</em>, so a regenerate gives you that same image back. Change one thing to explore from it.<br>
+<b>🎲 Same prompt, new seed</b> — loads everything but clears the seed, for a fresh variation of the same idea.<br>
+<b>⧉ Copy recipe</b> — copies the whole recipe as text, so you can keep your good ones.<br>
+<b>↗ Full size</b> — opens the raw image.</p></div>
+
+The point of saving the recipe is the point of this whole chapter: an image you cannot reproduce taught you nothing. An image whose recipe you can read, lock, and tweak is a lesson you can build on.
+
+## A quick troubleshooting table
+
+| what you see | the knob to reach for |
+|---|---|
+| image is rough / unfinished | more **steps** (try 30) |
+| colours fried, over-contrasty | lower **CFG** |
+| it's ignoring part of my prompt | raise **CFG** a little, or reword the prompt |
+| a specific unwanted thing keeps appearing | name it in the **negative** |
+| love it, want to explore from it | lock the **seed**, change one word |
+| want a totally different take | clear the **seed** |
+| faces/eyes mushy | frame tighter / bigger (ch. 17), raise resolution |
+
+## The vocabulary you now own
+
+<div class="callout spec"><span class="t">Terms from this chapter</span>
+<p><span class="badge">seed</span><span class="badge">denoising</span><span class="badge">negative prompt</span><span class="badge">steps</span><span class="badge">diminishing returns</span><span class="badge">CFG / true_cfg_scale</span><span class="badge">aspect ratio</span><span class="badge">one variable at a time</span><span class="badge">reproducibility</span><span class="badge">recipe</span></p>
+<p>Ready for what the engine does with all this under the hood? The image engine itself — int8, offload, the KV cache — is chapter 49.</p></div>
+
+Next: how that recipe becomes a picture on an 8 GB card ([ch.49](49-the-image-engine.html)), or why bigger faces beat every other quality trick ([ch.17](17-what-actually-improves-quality.html)).
+</script>
+<script src="assets/marked.min.js"></script>
+<script src="assets/katex.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

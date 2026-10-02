@@ -106,11 +106,42 @@
   .meta a{color:var(--accent);font-weight:600;text-decoration:none}
   .seclabel{font-size:12px;font-weight:700;color:var(--text-muted);letter-spacing:.04em;margin:4px 4px -2px;text-transform:uppercase}
   .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:12px}
-  .gallery a{aspect-ratio:1;border-radius:16px;overflow:hidden;border:1px solid var(--border-glass);
-    box-shadow:var(--shadow-glass);background:var(--bg-glass)}
+  .gallery .gcell{aspect-ratio:1;border-radius:16px;overflow:hidden;border:1px solid var(--border-glass);
+    box-shadow:var(--shadow-glass);background:var(--bg-glass);cursor:pointer;padding:0;position:relative}
   .gallery img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .25s}
-  .gallery a:hover img{transform:scale(1.05)}
+  .gallery .gcell:hover img{transform:scale(1.05)}
+  .gallery .gcell::after{content:"recipe";position:absolute;left:0;right:0;bottom:0;padding:6px;
+    font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#fff;
+    background:linear-gradient(transparent,rgba(0,0,0,.6));opacity:0;transition:opacity .2s;text-align:center}
+  .gallery .gcell:hover::after{opacity:1}
   .gallery .none{grid-column:1/-1;color:var(--text-muted);font-size:13px;padding:24px;text-align:center}
+  /* image-detail modal — the recipe behind each render */
+  .modal{position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;
+    background:rgba(0,0,0,.62);backdrop-filter:blur(4px);padding:18px}
+  .modal.on{display:flex}
+  .modal-card{position:relative;background:var(--bg-glass);backdrop-filter:blur(18px);
+    border:1px solid var(--border-glass);border-radius:20px;box-shadow:var(--shadow-glass);
+    max-width:920px;width:100%;max-height:92vh;overflow:auto;display:grid;grid-template-columns:1fr 1fr}
+  .modal-img{background:#000;display:flex;align-items:center;justify-content:center;min-height:240px}
+  .modal-img img{width:100%;height:100%;object-fit:contain;max-height:92vh}
+  .modal-body{padding:22px;display:flex;flex-direction:column;gap:14px}
+  .modal-body h3{margin:0 0 2px;font-size:16px}
+  .recipe{display:flex;flex-direction:column;gap:11px}
+  .recipe .row{display:flex;flex-direction:column;gap:3px}
+  .recipe .k{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted)}
+  .recipe .v{font-size:13.5px;color:var(--text-main);word-break:break-word;line-height:1.5;white-space:pre-wrap}
+  .recipe .v.muted{color:var(--text-muted);font-style:italic}
+  .recipe .pills{display:flex;flex-wrap:wrap;gap:8px}
+  .recipe .pill{background:var(--bg-main);border:1px solid var(--border-glass);border-radius:999px;
+    padding:4px 11px;font-size:12.5px;font-variant-numeric:tabular-nums}
+  .recipe .pill b{color:var(--accent);font-weight:700}
+  .modal-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:2px}
+  .btn2{border:1px solid var(--border-glass);background:var(--bg-main);color:var(--text-main);
+    border-radius:12px;padding:10px 13px;font-size:13px;font-weight:600;cursor:pointer;text-decoration:none}
+  .btn2.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .modal-x{position:absolute;top:12px;right:14px;z-index:2;font-size:24px;line-height:1;color:#fff;
+    cursor:pointer;background:rgba(0,0,0,.35);border:none;border-radius:50%;width:34px;height:34px}
+  @media (max-width:720px){.modal-card{grid-template-columns:1fr}}
   @media (max-width:860px){.grid{grid-template-columns:1fr}}
 </style>
 </head>
@@ -206,8 +237,25 @@
   </div>
 </div>
 
+<div class="modal" id="modal">
+  <div class="modal-card">
+    <button class="modal-x" id="modalx" aria-label="Close">×</button>
+    <div class="modal-img"><img id="mdImg" src="" alt="render"></div>
+    <div class="modal-body">
+      <h3>How this image was made</h3>
+      <div class="recipe" id="mdRecipe"></div>
+      <div class="modal-actions">
+        <button class="btn2 primary" id="mdUse">↩ Use these settings</button>
+        <button class="btn2" id="mdReroll">🎲 Same prompt, new seed</button>
+        <button class="btn2" id="mdCopy">⧉ Copy recipe</button>
+        <a class="btn2" id="mdOpen" href="" target="_blank">↗ Full size</a>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
-const $=s=>document.querySelector(s); let poll=null;
+const $=s=>document.querySelector(s); let poll=null; let GAL=[]; let mdCur=null;
 // Full presets: one click fills prompt + negative + size + steps + cfg, tuned per style.
 const NEG="blurry, low quality, lowres, bad anatomy, deformed, extra fingers, disfigured, watermark, text, signature, jpeg artifacts";
 const TEMPLATES=[
@@ -264,12 +312,52 @@ document.querySelectorAll('#sizes .chip').forEach(c=>c.onclick=()=>{
   document.querySelectorAll('#sizes .chip').forEach(x=>x.classList.remove('on'));
   c.classList.add('on'); $('#width').value=c.dataset.w; $('#height').value=c.dataset.h;
 });
+function esc(s){ return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 async function gallery(){
-  try{ const g=await (await fetch('/api/gallery?limit=60')).json();
-    $('#gallery').innerHTML = g.length ? g.map(i=>`<a href="${i.image}" target="_blank" title="${(i.prompt||'').replace(/"/g,'&quot;')}"><img src="${i.image}" loading="lazy"></a>`).join('')
+  try{ GAL=await (await fetch('/api/gallery?limit=60')).json();
+    $('#gallery').innerHTML = GAL.length ? GAL.map((i,n)=>`<button class="gcell" data-i="${n}" title="${esc(i.prompt).slice(0,120)}"><img src="${i.image}" loading="lazy" alt=""></button>`).join('')
       : '<div class="none">No images yet — your gallery fills as you generate.</div>';
+    $('#gallery').querySelectorAll('.gcell').forEach(b=>b.onclick=()=>openDetail(+b.dataset.i));
   }catch(e){}
 }
+// Each image keeps its full recipe. Click a tile to see it and rebuild from it.
+function openDetail(n){
+  const i=GAL[n]; if(!i) return; mdCur=i;
+  $('#mdImg').src=i.image; $('#mdOpen').href=i.image;
+  const neg=(i.negative||'').trim();
+  $('#mdRecipe').innerHTML=
+    `<div class="row"><span class="k">Prompt</span><span class="v">${esc(i.prompt)}</span></div>`+
+    `<div class="row"><span class="k">Negative — what to avoid</span><span class="v ${neg?'':'muted'}">${neg?esc(neg):'— none —'}</span></div>`+
+    `<div class="row"><span class="k">Settings</span><span class="pills">`+
+      `<span class="pill"><b>seed</b> ${i.seed}</span>`+
+      `<span class="pill"><b>size</b> ${i.width}×${i.height}</span>`+
+      `<span class="pill"><b>steps</b> ${i.steps}</span>`+
+      `<span class="pill"><b>cfg</b> ${i.cfg}</span>`+
+      (i.seconds?`<span class="pill">${i.seconds}s</span>`:'')+
+    `</span></div>`;
+  $('#modal').classList.add('on');
+}
+function closeModal(){ $('#modal').classList.remove('on'); }
+function applyRecipe(i,reroll){
+  $('#prompt').value=i.prompt||''; $('#negative').value=i.negative||'';
+  $('#width').value=i.width; $('#height').value=i.height;
+  $('#steps').value=i.steps; $('#cfg').value=i.cfg;
+  $('#seed').value=reroll?'':i.seed;
+  document.querySelectorAll('#sizes .chip').forEach(x=>x.classList.toggle('on',+x.dataset.w===+i.width&&+x.dataset.h===+i.height));
+  closeModal(); window.scrollTo({top:0,behavior:'smooth'});
+  $('#status').className='status';
+  $('#status').textContent=reroll?'Loaded — new seed, so you get a fresh variation of the same idea.':'Loaded exactly — the same seed rebuilds this image; change one thing to explore.';
+}
+$('#mdUse').onclick=()=>mdCur&&applyRecipe(mdCur,false);
+$('#mdReroll').onclick=()=>mdCur&&applyRecipe(mdCur,true);
+$('#mdCopy').onclick=()=>{ const i=mdCur; if(!i) return;
+  const txt=`Prompt: ${i.prompt}\nNegative: ${i.negative||'(none)'}\nSeed: ${i.seed}\nSize: ${i.width}x${i.height}\nSteps: ${i.steps}\nCFG: ${i.cfg}`;
+  navigator.clipboard&&navigator.clipboard.writeText(txt);
+  const b=$('#mdCopy'),o=b.textContent; b.textContent='✓ Copied'; setTimeout(()=>b.textContent=o,1200);
+};
+$('#modalx').onclick=closeModal;
+$('#modal').onclick=e=>{ if(e.target===$('#modal')) closeModal(); };
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
 function busy(b){ $('#go').disabled=b; }
 
 $('#go').onclick=async()=>{
