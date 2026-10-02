@@ -60,14 +60,15 @@ def get(conn, job_id: int) -> dict | None:
     return d
 
 
-def recent(conn, limit=60, status=DONE) -> list:
+def recent(conn, limit=60, status=DONE, offset=0) -> list:
     sql = "SELECT * FROM jobs"
     args = []
     if status:
         sql += " WHERE status=?"
         args.append(status)
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
     args.append(int(limit))
+    args.append(int(offset))
     out = []
     for r in conn.execute(sql, args):
         d = dict(r)

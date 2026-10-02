@@ -96,10 +96,10 @@ def cancel(job_id: int, request: Request, authorization: str = Header(default=""
 
 
 @app.get("/api/gallery")
-def gallery(limit: int = 60):
+def gallery(limit: int = 24, offset: int = 0):
     c = conn()
-    out = [{"image": r["image"], "seconds": r["seconds"], **r["params"]}
-           for r in jobs.recent(c, limit) if r["image"]]
+    out = [{"id": r["id"], "image": r["image"], "seconds": r["seconds"], **r["params"]}
+           for r in jobs.recent(c, limit, offset=offset) if r["image"]]
     c.close()
     return out
 
