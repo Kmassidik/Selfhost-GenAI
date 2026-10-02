@@ -104,6 +104,20 @@ def gallery(limit: int = 60):
     return out
 
 
+@app.get("/api/jobs")
+def jobs_feed(limit: int = 24):
+    """The live feed: recent jobs across ALL statuses, with queue position for
+    the ones still waiting. Lets the page show a queue that fills as you stack
+    requests and drains one render at a time."""
+    c = conn()
+    rows = jobs.recent(c, limit, status=None)
+    pos = jobs.positions(c)
+    c.close()
+    return [{"id": r["id"], "status": r["status"], "image": r["image"],
+             "seconds": r["seconds"], "error": r["error"],
+             "position": pos.get(r["id"]), **r["params"]} for r in rows]
+
+
 @app.get("/api/queue")
 def queue():
     c = conn()
