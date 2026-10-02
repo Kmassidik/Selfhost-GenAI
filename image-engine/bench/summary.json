@@ -1,0 +1,26 @@
+{
+  "qwen": {
+    "n": 10,
+    "median_s": 615.1,
+    "mean_s": 606.5,
+    "peak_vram_gb": 7.1
+  },
+  "flux-dev": {
+    "n": 10,
+    "median_s": 518.1,
+    "mean_s": 521.1,
+    "peak_vram_gb": 2.57
+  },
+  "sdxl": {
+    "n": 10,
+    "median_s": 109.0,
+    "mean_s": 109.1,
+    "peak_vram_gb": 4.04
+  },
+  "sd35-medium": {
+    "n": 10,
+    "median_s": 99.7,
+    "mean_s": 101.2,
+    "peak_vram_gb": 3.03
+  }
+}

@@ -46,3 +46,6 @@ secrets*
 
 # operational handover — names where credentials live, stays local
 handover/
+
+# exception: the benchmark comparison strips are cited by knowledge-base ch.51
+!knowledge-base/assets/bench/*.jpg

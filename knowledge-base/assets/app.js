@@ -66,6 +66,7 @@ const PAGES = [
   { file: "38-making-the-movie.html", n: "38", title: "Making the Movie", cat: "ideas" },
   { file: "39-choosing-the-next-card.html", n: "39", title: "Choosing the Next Card", cat: "ideas" },
   { file: "49-the-image-engine.html", n: "49", title: "The Image Engine — Qwen-Image 2.1", cat: "ideas" },
+  { file: "51-the-benchmark.html", n: "51", title: "The Benchmark — 4 Models on 8 GB", cat: "ideas" },
 
   // 📖 Glossary
   { file: "11-glossary.html",        n: "11",  title: "Glossary — Every Term", cat: "glossary" },
