@@ -392,6 +392,7 @@ function openDetail(i){
     `<div class="row"><span class="k">Prompt</span><span class="v">${esc(i.prompt)}</span></div>`+
     `<div class="row"><span class="k">Negative — what to avoid</span><span class="v ${neg?'':'muted'}">${neg?esc(neg):'— none —'}</span></div>`+
     `<div class="row"><span class="k">Settings</span><span class="pills">`+
+      `<span class="pill"><b>model</b> ${esc(modelName(i.model))}</span>`+
       `<span class="pill"><b>seed</b> ${i.seed}</span>`+
       `<span class="pill"><b>size</b> ${i.width}×${i.height}</span>`+
       `<span class="pill"><b>steps</b> ${i.steps}</span>`+
@@ -441,7 +442,7 @@ function qrow(j){
 function showResult(j){
   if(!j||!j.image) return;
   $('#result').innerHTML=`<img src="${j.image}" alt="result">`;
-  $('#meta').innerHTML=`<span><b>seed</b> ${j.seed}</span><span><b>${j.width}×${j.height}</b></span>`+
+  $('#meta').innerHTML=`<span><b>model</b> ${esc(modelName(j.model))}</span><span><b>seed</b> ${j.seed}</span><span><b>${j.width}×${j.height}</b></span>`+
     `<span><b>steps</b> ${j.steps}</span><span><b>cfg</b> ${j.cfg}</span>`+(j.seconds?`<span>${j.seconds}s</span>`:'')+
     `<span><a href="#" id="metaRecipe">recipe</a></span><span><a href="${j.image}" download>download</a></span>`;
   const rc=$('#metaRecipe'); if(rc) rc.onclick=(e)=>{ e.preventDefault(); openDetail(j); };

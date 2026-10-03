@@ -31,6 +31,19 @@ def _free():
     torch.cuda.empty_cache()
 
 
+def _tile(pipe):
+    """Tile + slice the VAE decode so high resolutions don't spike past 8 GB.
+    The decode (latent -> pixels) is the memory peak; tiling bounds it."""
+    vae = getattr(pipe, "vae", None)
+    if vae is None:
+        return
+    for fn in ("enable_tiling", "enable_slicing"):
+        try:
+            getattr(vae, fn)()
+        except Exception:
+            pass
+
+
 def _path(spec):
     return str(S.root / spec["model"])
 
@@ -134,6 +147,7 @@ def switch_to(model_id):
     t0 = time.time()
     print(f"[swap] loading {model_id} (family {fam})…", flush=True)
     pipe, render = LOADERS[fam](spec)
+    _tile(pipe)  # bound the VAE-decode memory so high-res renders fit 8 GB
     _cur.update(id=model_id, pipe=pipe, render=render)
     print(f"[swap] {model_id} ready in {time.time()-t0:.0f}s", flush=True)
     return render
